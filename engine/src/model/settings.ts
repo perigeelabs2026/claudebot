@@ -10,7 +10,7 @@ export function defaultWorkerLimit(cpus = os.cpus().length, memGb = os.totalmem(
 
 /** Delegation budgets are owner settings, enforced by the engine; no assistant tool can change them.
  *  depth: the owner's message is depth 0, the lead's tasks depth 1, a specialist's child depth 2. */
-export const SETTING_DEFAULTS: Record<string, unknown> = { worker_limit: defaultWorkerLimit(), memory_pressure_floor_pct: 10, default_workspace_worker_limit: 4, product_name: 'ClaudeBot', review_max_rounds: 2, delegation_max_depth: 2, delegation_max_children: 3, delegation_max_auto_turns: 2, chat_max_turns_per_message: 4, usage_low_power_pct: 90, usage_stop_pct: 95, approval_ttl_minutes: 720 };
+export const SETTING_DEFAULTS: Record<string, unknown> = { worker_limit: Math.min(3, defaultWorkerLimit()), memory_pressure_floor_pct: 10, default_workspace_worker_limit: 4, product_name: 'ClaudeBot', review_max_rounds: 2, delegation_max_depth: 2, delegation_max_children: 3, delegation_max_auto_turns: 2, chat_max_turns_per_message: 4, usage_low_power_pct: 90, usage_stop_pct: 95, approval_ttl_minutes: 720 };
 
 export class Settings {
   private db: DB;

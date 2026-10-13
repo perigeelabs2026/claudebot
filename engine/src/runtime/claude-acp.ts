@@ -61,6 +61,11 @@ function nextOccurrence(h: number, m: number, tz: string | undefined, now: Date)
   return new Date(target);
 }
 
+/** Claude Code's ACP agent advertises its models by alias (default, opus, sonnet, haiku, or a full id such as claude-fable-5-1[1m]).
+ *  ClaudeBot stores full model ids; these map to the alias the agent advertises. Anything else passes through unchanged. */
+export const ACP_MODEL_ALIAS: Record<string, string> = { 'claude-opus-5-5': 'opus', 'claude-sonnet-5-5': 'sonnet', 'claude-haiku-5-5': 'haiku' };
+export const acpModel = (id: string) => ACP_MODEL_ALIAS[id] ?? id;
+
 export class ClaudeAcpRuntime implements ModelRuntime {
   readonly id = 'claude-acp' as const;
   private o: ClaudeAcpOptions;
@@ -156,6 +161,16 @@ export class ClaudeAcpRuntime implements ModelRuntime {
     } catch (e) { this.o.log.warn('acp timeout not applied; the plugin default applies', { sessionKey, err: (e as Error).message }); }
   }
 
+  /** Each assistant runs on its own model (Edit assistant > Advanced). Set with the documented `/acp model <id> <session>` control
+   *  before the turn; if the backend refuses the model, the turn fails and says so rather than running on another model. */
+  private models = new Map<string, string>();
+  private async ensureModel(sessionKey: string, model: string | undefined): Promise<void> {
+    if (!model || this.models.get(sessionKey) === model) return;
+    const reply = await this.command(`/acp model ${acpModel(model)} ${sessionKey}`, 20_000);
+    if (/ACP error|unknown|invalid|not (available|allowed|supported|found)|unsupported|usage:/i.test(reply)) throw new GatewayError('MODEL_REFUSED', `The model "${model}" was not accepted: ${redact(reply).slice(0, 200)}`, false);
+    this.models.set(sessionKey, model); this.o.log.info('acp session model set', { sessionKey, model, reply: reply.slice(0, 120) });
+  }
+
   async inspectSession(sessionRef: string): Promise<{ text: string; observed_at: string }> {
     if (!/^agent:[a-z_]+:acp:[0-9a-f-]+$/i.test(sessionRef)) throw new Error('Only a recorded ACP session can be inspected');
     return { text: redact(await this.command(`/acp status ${sessionRef}`, 20_000)).slice(0, 8000), observed_at: new Date().toISOString() };
@@ -179,6 +194,7 @@ export class ClaudeAcpRuntime implements ModelRuntime {
       await gw.connect();
       sessionKey = await this.ensureSession(req);
       if (!req.probeOnly) await this.ensureTimeout(sessionKey, req.timeoutMs);
+      if (!req.probeOnly) await this.ensureModel(sessionKey, req.model);
       req.onSession?.(sessionKey);
       req.onHeartbeat?.(`acp session ${sessionKey}`);
       if (req.signal?.aborted) { await this.cancel(sessionKey); return { ok: false, category: 'cancelled', message: 'stopped before the turn started', retryable: true, runtimeSessionId: sessionKey }; }

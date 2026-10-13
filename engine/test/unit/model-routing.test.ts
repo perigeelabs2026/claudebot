@@ -1,0 +1,28 @@
+/** Each assistant runs on its own model (owner direction 2026-10-13: Haiku for the lead's chat, Sonnet for browser/review/resume, Opus for deep research). */
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { acpModel } from '../../src/runtime/claude-acp.ts';
+import { AGENT_MODELS } from '../../src/api/server.ts';
+
+const src = (f: string) => fs.readFileSync(path.resolve(import.meta.dirname, '..', '..', f), 'utf8');
+
+test('model ids map to the aliases the ACP agent advertises (verified live: haiku, sonnet, opus); others pass through', () => {
+  assert.equal(acpModel('claude-haiku-5-5'), 'haiku'); assert.equal(acpModel('claude-sonnet-5-5'), 'sonnet'); assert.equal(acpModel('claude-opus-5-5'), 'opus');
+  assert.equal(acpModel('claude-fable-5-1[1m]'), 'claude-fable-5-1[1m]');
+  assert.deepEqual(AGENT_MODELS, ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5']);
+});
+
+test('every turn carries its assistant\'s model; a refused model fails the turn instead of running on another', () => {
+  const run = src('src/worker/run.ts'); assert.equal((run.match(/deps\.runtime\.startTurn\(\{[^\n]*model: agent\?\.model,/g) || []).length, 2, 'chat turns and workflow stages both pass the model');
+  const acp = src('src/runtime/claude-acp.ts');
+  assert.match(acp, /if \(!req\.probeOnly\) await this\.ensureModel\(sessionKey, req\.model\);/);
+  assert.match(acp, /throw new GatewayError\('MODEL_REFUSED'/);
+});
+
+test('the owner picks the model in Edit assistant > Advanced; new assistants default to Sonnet 5.5; Claude Code subagents are off (they ran hidden parallel Opus turns)', () => {
+  const app = src('ui/app.js'); assert.match(app, /field\('Model \(on your Claude plan\)', model\)/); assert.match(app, /const curModel = a\?\.model \|\| 'claude-sonnet-5-5'/);
+  assert.ok(!src('src/model/definitions.ts').includes("'claude-opus-5-5'"));
+  const deny = JSON.parse(src('../install/claude-settings.json')).permissions.deny as string[]; assert.ok(deny.includes('Task') && deny.includes('Agent'));
+});

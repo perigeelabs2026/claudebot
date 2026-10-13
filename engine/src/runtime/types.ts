@@ -12,6 +12,8 @@ export interface TurnRequest {
   prompt: string;
   resume: boolean;           // true when continuing an existing session after interruption
   timeoutMs: number;
+  /** the assistant's own Claude model (its Edit assistant setting); applied to the session before the turn, never silently replaced */
+  model?: string;
   onHeartbeat?: (note: string) => void;
   /** called as soon as the runtime session is bound, before the turn starts, so a stop can target it immediately */
   onSession?: (sessionRef: string) => void;

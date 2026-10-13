@@ -262,7 +262,7 @@ Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-�
       const bind = (key: string) => { chat.setSession(conv.id, key, agentId); store.patch(job.id, { session_ref: key, runtime_session_id: key }); };
       let r: TurnResult;
       try {
-        r = await deps.runtime.startTurn({ jobId: job.id, label: sessKey, sessionRef: sessRef ?? sessKey, role: agentId, cwd: ctx.workspace, prompt, resume, timeoutMs: Number(process.env.CLAUDEBOT_STAGE_TIMEOUT_MS ?? (stage.timeoutMs ?? 10 * 60_000)), onHeartbeat: ctx.beat, onSession: (key) => { if (chat.member(conv.id, agentId) && key !== chat.memberSession(conv.id, agentId)) bind(key); else if (!chat.member(conv.id, agentId)) store.patch(job.id, { session_ref: key, runtime_session_id: key }); }, signal: ctx.signal });
+        r = await deps.runtime.startTurn({ jobId: job.id, label: sessKey, sessionRef: sessRef ?? sessKey, role: agentId, cwd: ctx.workspace, prompt, resume, model: agent?.model, timeoutMs: Number(process.env.CLAUDEBOT_STAGE_TIMEOUT_MS ?? (stage.timeoutMs ?? 10 * 60_000)), onHeartbeat: ctx.beat, onSession: (key) => { if (chat.member(conv.id, agentId) && key !== chat.memberSession(conv.id, agentId)) bind(key); else if (!chat.member(conv.id, agentId)) store.patch(job.id, { session_ref: key, runtime_session_id: key }); }, signal: ctx.signal });
       } finally {
         issueCapability(deps.runDir, job, ctx.workspace, [], 6 * 3600, sessKey);   // between turns the session can call nothing
         // A router that is not a member has no membership to keep its session on: close it now (also when the turn threw).
@@ -313,7 +313,7 @@ Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-�
       if (turnCwd === ctx.workspace) { const sk = installSkills(turnCwd, agentId); if (sk.installed.length || sk.refused.length) store.event(job.id, 'engine', 'skills.prepared', sk); }   // reviewed skills only; never into a selected repository
       if (directions) markDirectionsDelivered(deps, job.id, `step ${stage.name}`);
       const resume = !!job.session_ref;
-      const r: TurnResult = await deps.runtime.startTurn({ jobId: job.id, sessionRef: job.session_ref ?? job.id, role: agentId, cwd: turnCwd, prompt, resume, timeoutMs: Number(process.env.CLAUDEBOT_STAGE_TIMEOUT_MS ?? (stage.timeoutMs ?? 15 * 60_000)), onHeartbeat: ctx.beat, onSession: (key) => { if (key !== store.get(job.id)?.session_ref) store.patch(job.id, { session_ref: key, runtime_session_id: key }); }, signal: ctx.signal });
+      const r: TurnResult = await deps.runtime.startTurn({ jobId: job.id, sessionRef: job.session_ref ?? job.id, role: agentId, cwd: turnCwd, prompt, resume, model: agent?.model, timeoutMs: Number(process.env.CLAUDEBOT_STAGE_TIMEOUT_MS ?? (stage.timeoutMs ?? 15 * 60_000)), onHeartbeat: ctx.beat, onSession: (key) => { if (key !== store.get(job.id)?.session_ref) store.patch(job.id, { session_ref: key, runtime_session_id: key }); }, signal: ctx.signal });
       if (r.runtimeSessionId && r.runtimeSessionId !== job.session_ref) store.patch(job.id, { session_ref: r.runtimeSessionId, runtime_session_id: r.runtimeSessionId });
       if (r.ok) {
         // A successful turn proves capacity and login; clear both flags so other workers stop short-circuiting.

@@ -3,20 +3,41 @@
   "permissions": {
     "defaultMode": "default",
     "allow": [
-      "Read(./**)", "Glob(./**)", "Grep(./**)", "Edit(./**)", "Write(./**)", "MultiEdit(./**)",
-      "WebFetch", "WebSearch", "TodoWrite",
+      "Read(./**)",
+      "Glob(./**)",
+      "Grep(./**)",
+      "Edit(./**)",
+      "Write(./**)",
+      "MultiEdit(./**)",
+      "WebFetch",
+      "WebSearch",
+      "TodoWrite",
       "mcp__claudebot__*"
     ],
     "deny": [
-      "Bash", "Bash(*)",
-      "Read(~/.claudebot/run/**)", "Read(~/.claudebot/secrets/**)", "Read(~/.claudebot/claude/**)", "Read(~/.openclaw-claudebot/**)", "Read(~/.claude/**)",
-      "Edit(~/.claudebot/**)", "Write(~/.claudebot/run/**)", "Write(~/.claudebot/secrets/**)",
-      "NotebookEdit", "KillShell", "BashOutput"
+      "Bash",
+      "Bash(*)",
+      "Read(~/.claudebot/run/**)",
+      "Read(~/.claudebot/secrets/**)",
+      "Read(~/.claudebot/claude/**)",
+      "Read(~/.openclaw-claudebot/**)",
+      "Read(~/.claude/**)",
+      "Edit(~/.claudebot/**)",
+      "Write(~/.claudebot/run/**)",
+      "Write(~/.claudebot/secrets/**)",
+      "NotebookEdit",
+      "KillShell",
+      "BashOutput",
+      "Task",
+      "Agent"
     ],
     "additionalDirectories": []
   },
   "enableAllProjectMcpServers": true,
   "includeCoAuthoredBy": false,
   "cleanupPeriodDays": 30,
-  "env": { "DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1" }
+  "env": {
+    "DISABLE_AUTOUPDATER": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  }
 }

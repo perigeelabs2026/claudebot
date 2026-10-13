@@ -79,3 +79,13 @@ test('seed refreshes a system agent\'s tools until the owner edits it; an owner 
   defs.upsertAgent({ ...defs.getAgent('coordinator')!, allowed_tools: ['read_records'] }, 'owner');
   defs.seedSystemDefaults(); assert.deepEqual(defs.getAgent('coordinator')!.allowed_tools, ['read_records'], 'owner edit wins afterwards');
 });
+
+test('built-in assistants start on sensible models (lead Haiku, research Opus, the rest Sonnet); an owner-chosen model survives reseeding', () => {
+  const { defs } = fresh();
+  const m = Object.fromEntries(defs.listAgents().map((a) => [a.id, a.model]));
+  assert.deepEqual(m, { browser_operator: 'claude-sonnet-5-5', builder: 'claude-sonnet-5-5', coordinator: 'claude-haiku-5-5', researcher: 'claude-opus-5-5', reviewer: 'claude-sonnet-5-5' });
+  defs.upsertAgent({ ...defs.getAgent('coordinator')!, model: 'claude-opus-5-5' }, 'owner'); defs.seedSystemDefaults();
+  assert.equal(defs.getAgent('coordinator')!.model, 'claude-opus-5-5');
+  assert.equal(Math.min(3, defaultWorkerLimit(14, 24)), 3);
+  assert.equal(new Settings(fresh().db).get('worker_limit') as number <= 3, true, 'at most 3 assistants work at once by default');
+});

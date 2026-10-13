@@ -195,7 +195,7 @@ test('B1/B2: the Chief of Staff drafts with propose_assistant; nothing exists un
   assert.throws(() => A.confirm(draftId, { name: 'Chief of Staff' }), /already an assistant called Chief of Staff/);
   assert.throws(() => A.confirm(draftId, { name: 'everyone' }), /reserved/);
   const agent = A.confirm(draftId, { name: 'Scout' });
-  assert.equal(agent.name, 'Scout'); assert.equal(agent.role, 'Job boards'); assert.equal(agent.created_by, 'assistant:coordinator'); assert.equal(agent.model, 'claude-opus-5-5'); assert.ok(agent.enabled);
+  assert.equal(agent.name, 'Scout'); assert.equal(agent.role, 'Job boards'); assert.equal(agent.created_by, 'assistant:coordinator'); assert.equal(agent.model, 'claude-sonnet-5-5', 'new assistants default to Sonnet 5.5'); assert.ok(agent.enabled);
   assert.ok(agent.allowed_tools.includes('browser_read') && agent.allowed_tools.includes('write_artifact')); assert.ok(!agent.allowed_tools.includes('create_job') && !agent.allowed_tools.includes('request_approval'));
   assert.notEqual(agent.color_index, null); assert.ok(agent.station);
   assert.throws(() => A.confirm(draftId, { name: 'Scout 2' }), /already confirmed/);
