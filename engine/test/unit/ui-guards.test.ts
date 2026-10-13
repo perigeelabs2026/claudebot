@@ -130,3 +130,9 @@ test('every form is guarded: dirty recomputed from starting values; step edits m
 test('the "No one was mentioned…" line is explained once per conversation', () => {
   assert.match(ui('app.js'), /explained once per conversation, not under every message/);
 });
+test('approval card actions are a top-level function, reachable from the chat renderer (crash: "Can\'t find variable: actionRow")', () => {
+  const app = ui('app.js');
+  assert.match(app, /^function actionRow\(m\) \{/m, 'actionRow is declared at top level');
+  const body = app.slice(app.indexOf('function messageEl(m, d) {'), app.indexOf('\n}\n', app.indexOf('function messageEl(m, d) {')));
+  assert.doesNotMatch(body, /function actionRow/, 'actionRow must not be nested inside messageEl');
+});
