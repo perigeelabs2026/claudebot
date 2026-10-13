@@ -1,0 +1,21 @@
+{
+  "name": "claudebot-engine",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 'test/unit/*.test.ts' 'test/integration/*.test.ts' 'test/release/*.test.ts'",
+    "test:unit": "node --test --test-concurrency=1 'test/unit/*.test.ts'",
+    "test:recovery": "node --test --test-concurrency=1 'test/recovery/*.test.ts'",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "start": "node src/supervisor/main.ts",
+    "test:release": "node --test --test-concurrency=1 'test/release/*.test.ts'"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "@types/node": "^24.0.0"
+  }
+}

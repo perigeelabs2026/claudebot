@@ -1,0 +1,22 @@
+{
+  "$comment": "ClaudeBot dedicated Claude Code settings (CLAUDE_CONFIG_DIR=~/.claudebot/claude). Claude Code's own rules are the first layer; acpx approve-reads + nonInteractivePermissions=deny is the second; the broker's role-scoped tools are the third.",
+  "permissions": {
+    "defaultMode": "default",
+    "allow": [
+      "Read(./**)", "Glob(./**)", "Grep(./**)", "Edit(./**)", "Write(./**)", "MultiEdit(./**)",
+      "WebFetch", "WebSearch", "TodoWrite",
+      "mcp__claudebot__*"
+    ],
+    "deny": [
+      "Bash", "Bash(*)",
+      "Read(~/.claudebot/run/**)", "Read(~/.claudebot/secrets/**)", "Read(~/.claudebot/claude/**)", "Read(~/.openclaw-claudebot/**)", "Read(~/.claude/**)",
+      "Edit(~/.claudebot/**)", "Write(~/.claudebot/run/**)", "Write(~/.claudebot/secrets/**)",
+      "NotebookEdit", "KillShell", "BashOutput"
+    ],
+    "additionalDirectories": []
+  },
+  "enableAllProjectMcpServers": true,
+  "includeCoAuthoredBy": false,
+  "cleanupPeriodDays": 30,
+  "env": { "DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1" }
+}

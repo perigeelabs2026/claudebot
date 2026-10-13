@@ -1,0 +1,62 @@
+/* ClaudeBot design tokens (locked from approved draft 1, 2026-10-12). The only place colors, type, spacing and radius are defined. */
+:root {
+  /* Color: calm dark, one accent, semantic states */
+  --bg: #0e1013;            /* app frame */
+  --bg-rail: #0a0b0d;       /* icon rail */
+  --surface-1: #15181c;     /* panes */
+  --surface-2: #1c2026;     /* cards, composer */
+  --surface-3: #252a31;     /* hover, chips */
+  --line: #2a3038;          /* hairlines */
+  --line-strong: #3a414b;
+  --text: #e8eaed;
+  --text-2: #a7adb6;
+  --text-3: #6f7782;
+  --accent: #8ab4ff;        /* ClaudeBot periwinkle */
+  --accent-ink: #0d1b33;
+  --accent-soft: rgba(138, 180, 255, 0.12);
+  --ok: #7fd1a3;
+  --ok-soft: rgba(127, 209, 163, 0.12);
+  --warn: #f2c46d;
+  --warn-soft: rgba(242, 196, 109, 0.12);
+  --danger: #f08a8a;
+  --danger-soft: rgba(240, 138, 138, 0.12);
+
+  /* Assistant identity palette (avatars, mentions, office sprites), assigned in creation order */
+  --a-1: #8ab4ff;
+  --a-2: #7fd1a3;
+  --a-3: #6fc7e8;
+  --a-4: #f2c46d;
+  --a-5: #d39bf0;
+  --a-6: #f0a58a;
+
+  /* Type */
+  --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --fs-xs: 11px;
+  --fs-sm: 12.5px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --fs-2xl: 26px;
+  --lh: 1.5;
+
+  /* Spacing (4px grid) */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s8: 32px;
+
+  /* Radius */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+
+  /* Layout */
+  --rail-w: 64px;
+  --composer-h: 112px;
+  --ctx-w: 44%;
+}

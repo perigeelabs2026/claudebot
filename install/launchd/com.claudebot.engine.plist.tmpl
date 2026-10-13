@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.claudebot.engine</string>
+  <key>ProgramArguments</key><array><string>@SRC@/bin/claudebot-engine</string></array>
+  <key>EnvironmentVariables</key><dict>
+    <key>HOME</key><string>@HOME@</string>
+    <key>PATH</key><string>@HOME@/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>CLAUDEBOT_HOME</key><string>@HOME@/.claudebot</string>
+    <key>CLAUDEBOT_SOURCE</key><string>@SRC@</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>ExitTimeOut</key><integer>30</integer>
+  <key>ProcessType</key><string>Standard</string>
+  <key>WorkingDirectory</key><string>@HOME@/.claudebot</string>
+  <key>StandardOutPath</key><string>@HOME@/.claudebot/logs/engine.stdout.log</string>
+  <key>StandardErrorPath</key><string>@HOME@/.claudebot/logs/engine.stderr.log</string>
+</dict></plist>

@@ -1,0 +1,38 @@
+#!/bin/bash
+# ClaudeBot command line.
+#   claudebot doctor         check every part of the install and print the fix for anything wrong
+#   claudebot login          sign in to Claude for ClaudeBot (your own Claude subscription)
+#   claudebot start | stop   start or stop the background engine
+#   claudebot logs           follow the engine log
+#   claudebot update         pull the latest version and reinstall
+#   claudebot maintenance <counts|purge [--markers] --confirm>
+set -uo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"; L="$HOME/.local/bin"; H="$HOME/.claudebot"
+NODE="${CLAUDEBOT_NODE:-$L/node}"; OC="${CLAUDEBOT_OPENCLAW_BIN:-$L/openclaw}"; CLAUDE="${CLAUDEBOT_CLAUDE_EXECUTABLE:-$L/claude}"
+PORT="${CLAUDEBOT_PORT:-48311}"; SVC="gui/$(id -u)/com.claudebot.engine"
+pass() { printf '  \033[32m✓\033[0m %s\n' "$1"; }
+fail() { printf '  \033[31m✗\033[0m %s\n      Fix: %s\n' "$1" "$2"; BAD=1; }
+signed_in() { CLAUDE_CONFIG_DIR="$H/claude" "$CLAUDE" auth status 2>/dev/null | "$NODE" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.exit(JSON.parse(s).loggedIn?0:1)}catch{process.exit(1)}})' 2>/dev/null; }
+case "${1:-}" in
+  doctor)
+    BAD=0; echo "ClaudeBot doctor"
+    [ "$(uname -s)" = Darwin ] && pass "macOS $(sw_vers -productVersion)" || fail "Not macOS" "ClaudeBot runs on macOS 13 or newer."
+    command -v swiftc >/dev/null 2>&1 && pass "Xcode Command Line Tools" || fail "Xcode Command Line Tools missing" "xcode-select --install, then rerun ./install.sh"
+    "$NODE" -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit((a===24&&b>=16)||(a===26&&b>=1)||a>26?0:1)' 2>/dev/null && pass "Node.js $("$NODE" -v)" || fail "Node.js 24.16+ not found at $NODE" "rerun ./install.sh"
+    [ -x "$CLAUDE" ] && pass "Claude Code $("$CLAUDE" --version 2>/dev/null | head -1)" || fail "Claude Code not found at $CLAUDE" "rerun ./install.sh"
+    if [ -x "$CLAUDE" ] && signed_in; then pass "Signed in to Claude"; else fail "Not signed in to Claude" "claudebot login"; fi
+    [ -x "$OC" ] && pass "OpenClaw $("$OC" --version 2>/dev/null | head -1)" || fail "OpenClaw not found at $OC" "rerun ./install.sh"
+    [ -d "$HOME/.openclaw-claudebot/extensions/acpx" ] && pass "acpx plugin" || fail "acpx plugin missing" "rerun ./install.sh"
+    "$OC" --profile claudebot gateway health >/dev/null 2>&1 && pass "Gateway running (127.0.0.1:48310)" || fail "Gateway not running" "$OC --profile claudebot gateway restart   (port 48310 must be free: lsof -iTCP:48310)"
+    launchctl print "$SVC" >/dev/null 2>&1 && pass "Engine service loaded" || fail "Engine service not loaded" "claudebot start"
+    if [ -s "$H/secrets/ui.token" ] && curl -sf -H "x-claudebot-token: $(cat "$H/secrets/ui.token")" "http://127.0.0.1:$PORT/api/health" >/dev/null; then pass "Engine answering (127.0.0.1:$PORT)"; else fail "Engine not answering on 127.0.0.1:$PORT" "claudebot start; if it still fails, read: tail -50 $H/logs/engine.stderr.log"; fi
+    [ -e "/Applications/ClaudeBot.app" ] && pass "App installed" || fail "App missing from /Applications" "rerun ./install.sh"
+    [ "$BAD" = 0 ] && echo "Everything looks good." || echo "Fix the items marked ✗, then run: claudebot doctor"; exit "$BAD";;
+  login) CLAUDE_CONFIG_DIR="$H/claude" exec "$CLAUDE" auth login --claudeai;;
+  start) launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.claudebot.engine.plist" 2>/dev/null; launchctl kickstart -k "$SVC" && echo "Engine started.";;
+  stop) launchctl bootout "$SVC" && echo "Engine stopped. Work resumes from its last save point when you start it again.";;
+  logs) exec tail -f "$H/logs/engine.log";;
+  update) cd "$ROOT" && git pull --ff-only && exec "$ROOT/install.sh";;
+  maintenance) shift; exec "$NODE" "$ROOT/engine/src/maintenance/cli.ts" "$@";;
+  *) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2;;
+esac

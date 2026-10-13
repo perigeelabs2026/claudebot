@@ -1,0 +1,17 @@
+#!/bin/bash
+# ClaudeBot → acpx → Claude Code ACP adapter wrapper.
+# Pins the adapter to the product's dedicated Claude config dir and the OFFICIAL local Claude Code install.
+# It never reads, prints, or forwards credentials; Claude Code owns login and refresh inside CLAUDE_CONFIG_DIR.
+set -euo pipefail
+export CLAUDE_CONFIG_DIR="${CLAUDEBOT_CLAUDE_CONFIG_DIR:-$HOME/.claudebot/claude}"
+# Route-proof override (owner-only file, outside every workspace): points the OFFICIAL Claude Code at another config dir
+# it already owns, e.g. the user's default login. It copies nothing. Remove the file to return to the dedicated dir.
+OVERRIDE="$HOME/.claudebot/run/claude-config-dir.override"
+if [ -f "$OVERRIDE" ] && [ -d "$(cat "$OVERRIDE")" ]; then export CLAUDE_CONFIG_DIR="$(cat "$OVERRIDE")"; fi
+export CLAUDE_CODE_EXECUTABLE="${CLAUDEBOT_CLAUDE_EXECUTABLE:-$HOME/.local/bin/claude}"
+export CLAUDE_AGENT_LOGS="${CLAUDE_AGENT_LOGS:-$HOME/.claudebot/logs/claude-agent-acp.log}"
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX OPENAI_API_KEY
+ADAPTER="${CLAUDEBOT_ACP_ADAPTER:-$HOME/.openclaw-claudebot/extensions/acpx/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js}"
+if [ ! -f "$ADAPTER" ]; then echo "claude-acp: adapter not found at $ADAPTER" >&2; exit 97; fi
+if [ ! -x "$CLAUDE_CODE_EXECUTABLE" ]; then echo "claude-acp: official claude binary not found at $CLAUDE_CODE_EXECUTABLE" >&2; exit 98; fi
+exec "${CLAUDEBOT_NODE:-$HOME/.local/bin/node}" "$ADAPTER" "$@"

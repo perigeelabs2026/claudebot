@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>ClaudeBot</string>
+  <key>CFBundleDisplayName</key><string>ClaudeBot</string>
+  <key>CFBundleIdentifier</key><string>com.claudebot.app</string>
+  <key>CFBundleVersion</key><string>0.2.0</string>
+  <key>CFBundleShortVersionString</key><string>0.2.0</string>
+  <key>CFBundleExecutable</key><string>ClaudeBot</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>ClaudeBot</string><key>CFBundleURLSchemes</key><array><string>claudebot</string></array></dict></array>
+  <key>NSMicrophoneUsageDescription</key><string>ClaudeBot listens only while you press Talk, so you can speak to your lead assistant. The microphone turns off when you finish.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>ClaudeBot turns what you say into a chat message for your lead assistant. Recognition runs on this Mac when macOS supports it; ClaudeBot asks before using Apple's server recognition.</string>
+  <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
+</dict></plist>

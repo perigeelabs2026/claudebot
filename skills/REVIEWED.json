@@ -1,0 +1,20 @@
+{
+ "reviewed_by": "ClaudeBot build (Opus 5.5), 2026-10-07; owner may revoke by deleting an entry",
+ "skills": {
+  "source-audit": {
+   "sha256": "0ffc810d70b3e06e88d94b6c1b498471b7cd46f6c59978ab28a281b98b656b37",
+   "roles": [
+    "researcher",
+    "browser_operator"
+   ],
+   "reviewed_at": "2026-10-07"
+  },
+  "plain-review": {
+   "sha256": "9a55c36d1a2ef80188f743caadf3d9e4804dbdffeed16716a41d892f65bbad10",
+   "roles": [
+    "reviewer"
+   ],
+   "reviewed_at": "2026-10-07"
+  }
+ }
+}
