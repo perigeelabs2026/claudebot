@@ -9,7 +9,7 @@ import { JobStore, newId, now } from '../jobs/store.ts';
 import { ApprovalStore, CONSEQUENTIAL_KINDS } from '../approvals/store.ts';
 import { Definitions } from '../model/definitions.ts';
 import { ChatStore, ChatRuleError } from '../chat/store.ts';
-import { Assistants } from '../chat/assistants.ts';
+import { Assistants, ownerAsked, CHAT_CREATE_DAILY_LIMIT } from '../chat/assistants.ts';
 import { setPriority, saveReport } from '../cos/report.ts';
 import { readArtifact } from './artifact-access.ts';
 import { searchScoped } from '../search/index.ts';
@@ -147,13 +147,30 @@ export class BrokerApi {
         return { ok: true, text: `Handed to ${who}. They will answer in the group; do not claim their part is done.`, data: { to: r.job.agent_role, message_id: r.message.id } };
       }
       case 'propose_assistant': {
-        const me = this.store.get(cap.job_id); const conv = me?.conversation_id ?? null;
+        // The owner asking for an assistant in chat (or Telegram) is the owner's confirmation: with owner_words quoted from the
+        // owner's message that started this turn, the assistant is created now. Without it, a draft waits for the owner in the app.
+        const me = this.store.get(cap.job_id); const conv = me?.conversation_id ?? null; const as = new Assistants(db);
+        const asked = a.owner_words !== undefined ? ownerAsked(db, cap.job_id, a.owner_words) : null;
+        const create = (draftId: string) => {
+          if (!asked || !asked.ok) return null;
+          if (db.prepare("SELECT 1 FROM job_events WHERE job_id = ? AND type = 'assistant.confirmed'").get(cap.job_id)) return { ok: false, text: 'One new assistant per reply. Tell the owner the first one exists and ask about the next.' };
+          if (as.createdFromChatToday() >= CHAT_CREATE_DAILY_LIMIT) return { ok: false, text: `Not created: ${CHAT_CREATE_DAILY_LIMIT} assistants were already created from chat today. The owner can create more on the Create assistant screen.` };
+          const agent = as.confirm(draftId, { name: a.name ? String(a.name) : undefined }, 'owner:chat', { autoName: true, via: { confirmed_via: 'owner_message', message_id: asked.message_id, source: asked.source, by_assistant: me?.agent_role } });
+          if (conv) new ChatStore(db, this.store).add({ conversation_id: conv, role: 'system', kind: 'activity', content: `${agent.name} joined the team, as you asked. You can rename or edit them any time.`, job_id: cap.job_id, meta: { assistant_created: agent.id, draft_id: draftId } });
+          return { ok: true, text: `Created "${agent.name}" (id ${agent.id}) because the owner asked for it. It exists now. Give it the owner's work right away (hand_off in a group, or create_job with agent "${agent.id}"); tell the owner its name in one sentence.`, data: { agent_id: agent.id, name: agent.name, draft_id: draftId } };
+        };
         try {
-          const d = new Assistants(db).saveDraft({ job_id: cap.job_id, conversation_id: conv, description: String(a.description ?? ''), fields: a });
-          if (conv) new ChatStore(db, this.store).add({ conversation_id: conv, role: 'assistant', kind: 'question', sender: me!.agent_role, content: `Draft assistant ready for you to name and confirm: ${d.draft.role}.`, job_id: cap.job_id, meta: { draft_id: d.id, draft: d.draft } });
+          if (a.draft_id) {   // confirm a draft that is already waiting
+            const d = as.get(String(a.draft_id)); if (!d) return { ok: false, text: 'no such draft' }; if (d.status !== 'pending') return { ok: false, text: `that draft was already ${d.status}` + (d.agent_id ? ` (assistant ${d.agent_id})` : '') };
+            if (!asked || !asked.ok) return { ok: false, text: `Not confirmed: ${asked ? asked.reason : 'pass owner_words quoting the owner asking for it'}.` };
+            return create(d.id)!;
+          }
+          const d = as.saveDraft({ job_id: cap.job_id, conversation_id: conv, description: String(a.description ?? ''), fields: a });
           this.store.event(cap.job_id, actor, 'assistant.drafted', { draft_id: d.id, role: d.draft.role, tools: d.draft.tools });
-          return { ok: true, text: `Draft saved and shown to the owner (suggested name "${d.draft.name}"). It does not exist until the owner names and confirms it; say so.`, data: { draft_id: d.id } };
-        } catch (e) { return { ok: false, text: `Draft not saved: ${e instanceof ChatRuleError ? e.message : (e as Error).message}` }; }
+          const made = create(d.id); if (made) return made;
+          if (conv) new ChatStore(db, this.store).add({ conversation_id: conv, role: 'assistant', kind: 'question', sender: me!.agent_role, content: `Draft assistant ready for you to name and confirm: ${d.draft.role}.`, job_id: cap.job_id, meta: { draft_id: d.id, draft: d.draft } });
+          return { ok: true, text: `Draft saved and shown to the owner (suggested name "${d.draft.name}").${asked && !asked.ok ? ` Not created yet: ${asked.reason}.` : ''} It does not exist until the owner confirms it, in the app or by asking you for it in chat; say so.`, data: { draft_id: d.id } };
+        } catch (e) { return { ok: false, text: `Not saved: ${e instanceof ChatRuleError ? e.message : (e as Error).message}` }; }
       }
       case 'create_experiment': { const id = newId('exp'); db.prepare('INSERT INTO experiments(id, opportunity_id, hypothesis, metric, status, result, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)').run(id, a.opportunity_id ? String(a.opportunity_id) : null, String(a.hypothesis), `${a.metric} | stop: ${a.stop_rule}`, 'designed', null, t, t); return { ok: true, text: `experiment ${id} recorded (designed, not active)`, data: { id } }; }
       case 'request_approval': { const kind = String(a.kind); if (!(CONSEQUENTIAL_KINDS as readonly string[]).includes(kind)) return { ok: false, text: `kind must be one of ${CONSEQUENTIAL_KINDS.join(', ')}` }; const ttlMin = Number((this.db.prepare("SELECT value FROM settings WHERE key = 'approval_ttl_minutes'").get() as { value: string } | undefined)?.value ?? 720); const ap = this.approvals.request({ job_id: cap.job_id, action_kind: kind, target: String(a.target), content: String(a.content), evidence: Array.isArray(a.evidence_ids) ? a.evidence_ids : [], budget: (a.budget as Record<string, unknown>) ?? null, ttlSeconds: ttlMin * 60 });

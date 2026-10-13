@@ -212,6 +212,48 @@ test('B1/B2: the Chief of Staff drafts with propose_assistant; nothing exists un
   assert.match(String(s.defs.deleteAgent(agent.id, 'owner').reason), /part of 1 conversation/); assert.ok(dc);
 });
 
+test('B3: the owner asking in chat (or Telegram) is the confirmation: created at once, named if needed; never from a handoff, unquoted words, twice per reply, or past the daily limit', async () => {
+  const s = setup(); const A = new Assistants(s.db);
+  const c = s.chat.create({ workspace_id: s.ws.id });
+  const draft = { description: 'builds resumes', role: 'Resume builder', purpose: 'Tailors resumes per role.', responsibilities: ['Tailor a resume per role'], instructions: 'Use only real history.', tools: ['read', 'write'] };
+  // unquoted words: a draft only
+  const t0 = s.chat.send(c.id, 'Abdul, spin off a resume building agent', s.defs).job;
+  const r0 = await s.broker.call(cap(t0, ['propose_assistant']), 'propose_assistant', { ...draft, name: 'Sailor', owner_words: 'please make a new agent' });
+  assert.equal(r0.ok, true); assert.match(r0.text, /not in the owner's message/); assert.equal(s.defs.getAgent('sailor'), undefined);
+  const waiting = A.byJob(t0.id)!; assert.equal(waiting.status, 'pending');
+  // the owner asks to approve the waiting draft: confirmed now, with the owner's message on record
+  const t1 = s.chat.send(c.id, "I'm asking you to approve that agent to build the resumes", s.defs).job;
+  const r1 = await s.broker.call(cap(t1, ['propose_assistant']), 'propose_assistant', { draft_id: waiting.id, owner_words: 'approve that agent to build the resumes' });
+  assert.equal(r1.ok, true, r1.text); assert.equal(A.get(waiting.id)!.status, 'confirmed'); const sailor = s.defs.getAgent('sailor')!; assert.ok(sailor.enabled);
+  const ev = s.db.prepare("SELECT actor, detail FROM job_events WHERE type = 'assistant.confirmed' AND job_id = ?").get(waiting.job_id) as { actor: string; detail: string };
+  assert.equal(ev.actor, 'owner:chat'); assert.equal(JSON.parse(ev.detail).message_id, t1.message_id);
+  assert.ok(s.chat.messages(c.id).some((m) => m.kind === 'activity' && /Sailor joined the team, as you asked/.test(m.content)));
+  assert.ok(!sailor.allowed_tools.includes('create_job') && !sailor.allowed_tools.includes('request_approval'), 'no delegation; consequential actions stay approval-bound');
+  // a new one in one step, name taken -> a free variant; a second creation in the same reply is refused
+  const t2 = s.chat.send(c.id, 'Create a resume builder for account manager roles too', s.defs).job;
+  const r2 = await s.broker.call(cap(t2, ['propose_assistant']), 'propose_assistant', { ...draft, name: 'Sailor', owner_words: 'create a resume builder' });
+  assert.equal(r2.ok, true, r2.text); assert.equal((r2.data as { name: string }).name, 'Sailor 2');
+  const r2b = await s.broker.call(cap(t2, ['propose_assistant']), 'propose_assistant', { ...draft, name: 'Third', owner_words: 'create a resume builder' });
+  assert.equal(r2b.ok, false); assert.match(r2b.text, /One new assistant per reply/);
+  // a turn started by another assistant's handoff is not the owner asking
+  const g = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] });
+  const gt = s.chat.send(g.id, '@coordinator ask the researcher', s.defs).job;
+  const ho = s.chat.handOff(gt.id, 'researcher', 'create a resume builder for me', s.defs, 'agent:coordinator'); assert.equal(ho.ok, true);
+  const r3 = await s.broker.call(cap((ho as { job: { id: string; agent_role: string } }).job, ['propose_assistant']), 'propose_assistant', { ...draft, name: 'Sneaky', owner_words: 'create a resume builder' });
+  assert.match(r3.text, /not started by the owner/); assert.equal(s.defs.getAgent('sneaky'), undefined);
+  // daily limit
+  for (let i = 0; i < 5; i++) { const t = s.chat.send(c.id, `Create a helper number ${i} for me now`, s.defs).job; await s.broker.call(cap(t, ['propose_assistant']), 'propose_assistant', { ...draft, name: `Helper ${i}`, owner_words: `create a helper number ${i}` }); }
+  assert.equal(A.createdFromChatToday(), 5);
+  const tl = s.chat.send(c.id, 'Create one more helper please', s.defs).job;
+  const rl = await s.broker.call(cap(tl, ['propose_assistant']), 'propose_assistant', { ...draft, name: 'Overflow', owner_words: 'create one more helper' });
+  assert.equal(rl.ok, false); assert.match(rl.text, /already created from chat today/);
+  // a message that came in over Telegram counts the same way and is recorded as such
+  const s2 = setup(); const c2 = s2.chat.create({ workspace_id: s2.ws.id });
+  const tt = s2.chat.send(c2.id, 'Make a new agent for interview prep', s2.defs, 'owner', { source: 'telegram' }).job;
+  const rt = await s2.broker.call(cap(tt, ['propose_assistant']), 'propose_assistant', { ...draft, name: 'Prep', owner_words: 'make a new agent for interview prep' });
+  assert.equal(rt.ok, true, rt.text); assert.equal(JSON.parse((s2.db.prepare("SELECT detail FROM job_events WHERE type = 'assistant.confirmed'").get() as { detail: string }).detail).source, 'telegram');
+});
+
 test('E3: "working" only with a live lease and a fresh heartbeat; stale reads "checking"; a running automatic report is "delivering"', () => {
   const now = Date.parse('2026-10-13T10:00:00Z'); const fresh = '2026-10-13T09:59:50Z'; const stale = '2026-10-13T09:58:00Z'; const exp = '2026-10-13T10:01:00Z';
   const base = { blocker_code: null, inputs: '{}' } as const;

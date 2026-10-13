@@ -124,15 +124,30 @@ test('live updates never rebuild a form being edited (owner report 19:46Z: the a
 test('every form is guarded: dirty recomputed from starting values; step edits mark it; cleared on every route', () => {
   const app = ui('app.js');
   assert.match(app, /function recomputeDirty\(\)/); assert.match(app, /v\.dataset\.formDirty === '1'/);
-  assert.match(app, /\$\('#view'\)\.dataset\.dirty = ''; \$\('#view'\)\.dataset\.formDirty = ''; try \{ const el = await view\(arg\);/);
+  assert.match(app, /\$\('#view'\)\.dataset\.dirty = ''; \$\('#view'\)\.dataset\.formDirty = ''; try \{ const el = await view\.call\(views, arg\);/);
   assert.match(app, /stages\.splice\(i, 1\); \$\('#view'\)\.dataset\.dirty = '1';/);
 });
 test('the "No one was mentioned…" line is explained once per conversation', () => {
   assert.match(ui('app.js'), /explained once per conversation, not under every message/);
 });
-test('approval card actions are a top-level function, reachable from the chat renderer (crash: "Can\'t find variable: actionRow")', () => {
+test('approval actions are a top-level function: every renderer can call actionRow (owner crash 21:20Z: "Can\'t find variable: actionRow")', () => {
+  const app = ui('app.js'); const a = app.indexOf('\nfunction actionRow(m) {'); const m = app.indexOf('\nfunction messageEl(m, d) {');
+  assert.ok(a > 0 && m > a, 'actionRow is declared at top level, before messageEl (it was nested inside messageEl, out of reach of the chat renderer)');
+  assert.ok(app.slice(a, m).trimEnd().endsWith('\n}'), 'actionRow closes before messageEl starts');
+});
+
+test('no screen depends on `this` (owner crash 21:34Z on Needs your review: "undefined is not an object (evaluating \'this.approvalsList\')")', () => {
   const app = ui('app.js');
-  assert.match(app, /^function actionRow\(m\) \{/m, 'actionRow is declared at top level');
-  const body = app.slice(app.indexOf('function messageEl(m, d) {'), app.indexOf('\n}\n', app.indexOf('function messageEl(m, d) {')));
-  assert.doesNotMatch(body, /function actionRow/, 'actionRow must not be nested inside messageEl');
+  assert.deepEqual(app.split('\n').map((l, i) => [i + 1, l]).filter(([, l]) => /\bthis\./.test(String(l))).map(([n]) => n), [], 'views are called as plain functions by the router; refer to views.x, never this.x');
+  assert.match(app, /await view\.call\(views, arg\)/, 'the router still binds views, as a second guard');
+});
+
+test('approval cards say what will actually run: "Send email" only for a real email; browser actions read as browser actions; Always allow only for emails; no Allow when an email has no text', () => {
+  const app = ui('app.js');
+  assert.equal((app.match(/'Send email'/g) || []).length, 1, 'one place decides the email label');
+  assert.match(app, /label: email \? 'Send email' :/);
+  assert.match(app, /\/\\bapply\\b\/i\.test\(el\) \? 'Open apply link'/);
+  assert.match(app, /const blockAllow = pending && dv\.missingBody/);
+  assert.match(app, /!dv\.email \? null : h\('button', \{ class: 'btn2', title: `Allow/);
+  const css = ui('theme.css'); assert.match(css, /\.card2\.approval, \.card2\.approval \* \{ overflow-wrap: anywhere;/);
 });

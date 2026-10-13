@@ -497,3 +497,14 @@ details.advanced { margin-top: 12px; } details.advanced summary { cursor: pointe
 .rename-pop { box-shadow: 0 0 0 18px var(--bg), 0 18px 56px rgba(0,0,0,.65); }   /* a wide halo, so no half-covered letters show around it */
 .agent-edit textarea.input2 { line-height: 1.5; font-size: var(--fs-sm, 14px); padding: 12px 13px; }   /* one height for a line of text in every editor field */
 .rename-pop { clip-path: inset(-60px -60px -60px -8px); }   /* the halo never spills over the rail divider */
+
+/* Approval card: everything wraps inside the conversation column; the exact email copy is readable before Allow. */
+.ev-card, .ev-card .card2.approval { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.card2.approval, .card2.approval * { overflow-wrap: anywhere; word-break: break-word; }
+.card2.approval .approval-kind { font-weight: 600; color: var(--text-1); }
+.card2.approval .approval-link { color: var(--accent, inherit); font-size: var(--fs-xs); }
+.email-copy { margin-top: var(--s2); border: 1px solid var(--line); border-radius: var(--r-md, 8px); padding: var(--s2) var(--s3); background: var(--surface-1); }
+.email-line { display: flex; gap: var(--s2); font-size: var(--fs-sm); padding: 2px 0; } .email-k { color: var(--text-3); min-width: 56px; flex: none; }
+.email-body { margin-top: var(--s2); white-space: pre-wrap; font-size: var(--fs-sm); color: var(--text-1); line-height: var(--lh); max-height: 360px; overflow: auto; }
+.email-body.missing { color: var(--warn, #f2c46d); white-space: normal; }
+.approval-details { font-size: var(--fs-xs); color: var(--text-3); display: grid; gap: 4px; } .approval-details pre { white-space: pre-wrap; margin: 0; font-family: var(--mono); }

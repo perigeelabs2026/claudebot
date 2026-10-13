@@ -213,7 +213,25 @@ async function placeBeside() {
 }
 function toggleBrowserPane(open) { browserPaneOpen = open; localStorage.setItem('claudebot.browserPane', open ? '1' : '0'); const root = $('#chat-root'); if (root) root.classList.toggle('with-browser', open); if (open) { connectBrowserStream(); refreshLiveStatus(); } else disconnectBrowserStream(); }
 
-// Approval actions for a decision card. Top level: the chat renderer (messageEl2) calls it too.
+// What an approval is, in the owner's words. A browser action carries its exact request as JSON (url, action, element); an
+// email carries To/Subject/body. The label comes from what will actually run, never a default "Send email".
+function describeApproval(ap, meta) {
+  const raw = String(ap?.content ?? meta?.preview ?? ''); const kind = meta?.action_kind ?? ap?.action_kind;
+  let b = null; try { const j = JSON.parse(raw); if (j && typeof j === 'object' && j.url && j.action) b = j; } catch {}
+  const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
+  if (b) {
+    const el = b.element?.name ? String(b.element.name) : ''; const site = host(b.url);
+    const label = b.action === 'type' ? 'Type in a page' : b.action === 'press' ? 'Press a key on a page' : b.action === 'select' ? 'Choose an option on a page' : /\bapply\b/i.test(el) ? 'Open apply link' : /submit|send|post|publish|pay|buy|order/i.test(el) ? `Click “${clip(el, 40)}”` : 'Click on a page';
+    const what = b.action === 'click' ? `Click “${el || 'this control'}”` : b.action === 'type' ? `Type into “${el || 'a field'}”` : `${b.action} “${el}”`;
+    return { browser: true, label, site, title: el || label, summary: `${what} on ${site || 'this page'}. Nothing else happens until you allow it.`, url: b.url, raw };
+  }
+  const head = (k) => (raw.match(new RegExp(`^\\s*${k}:\\s*(.+)$`, 'im')) || [])[1]?.trim() ?? '';
+  const body = raw.replace(/^\s*(To|From|Subject|Cc|Bcc):.*$/gim, '').trim();
+  const target = String(meta?.target ?? ap?.target ?? '');
+  const email = kind === 'send' && (/^email to /i.test(target) || /@/.test(head('To')) || /^\s*Subject:/im.test(raw) || /^[^\s@]+@[^\s@]+$/.test(target));
+  return { browser: false, email, target, label: email ? 'Send email' : { send: 'Send or submit', publish: 'Publish', purchase: 'Buy', delete: 'Delete' }[kind] ?? String(kind ?? 'Action'), title: head('Subject'), to: head('To') || String(meta?.target ?? '').replace(/^email to /, ''), cc: head('Cc'), bcc: head('Bcc'), subject: head('Subject'), body, missingBody: email && !body, raw };
+}
+// Approval actions (run once, resolve an uncertain run, receipts). Top level: both the classic and the chat renderer use it.
 function actionRow(m) {
   const ap = m.approval; const act = m.action; const local = ['send', 'publish'].includes(ap?.action_kind);
   const decided = h('span', { class: 'muted small' }, ap?.decided_at ? `decided ${fmtT(ap.decided_at)}` : '');
@@ -222,6 +240,7 @@ function actionRow(m) {
   if (act && act.status === 'performed') { let rc = {}; try { rc = JSON.parse(act.receipt || '{}'); } catch {} return h('div', { class: 'row' }, h('span', { class: 'tag ok' }, 'Done once'), h('span', { class: 'hint' }, rc.executor === 'local_outbox' ? `Written to the local outbox (nothing left the Mac): ${String(rc.path || '').split('/').pop()}` : 'Performed.'), decided); }
   if (act && act.status === 'uncertain') return h('div', { class: 'row' }, h('span', { class: 'tag warn' }, 'Outcome unknown'), h('span', { class: 'hint' }, `${act.refusal_reason || ''} It will not be retried. Check, then record what happened:`), h('button', { class: 'btn small', onclick: () => resolve('performed') }, 'It happened'), h('button', { class: 'btn small', onclick: () => resolve('not_performed') }, 'It did not happen'));
   if (act && act.status === 'refused') return h('div', { class: 'row' }, h('span', { class: 'tag bad' }, 'Not run'), h('span', { class: 'hint' }, act.refusal_reason || ''), decided);
+  if (ap?.status === 'approved' && describeApproval(ap, m.meta).browser) return h('div', { class: 'row' }, h('span', { class: 'hint' }, 'Allowed once. The assistant can do exactly this, one time, in the ClaudeBot browser.'), decided);
   if (ap?.status === 'approved' && local) return h('div', { class: 'row' }, h('button', { class: 'btn small primary', onclick: run }, 'Run once (local outbox)'), h('span', { class: 'hint' }, 'Writes exactly the approved content to a local outbox on this Mac. Nothing is sent.'), decided);
   if (ap?.status === 'approved') return h('div', { class: 'row' }, h('span', { class: 'hint' }, 'Approved. No executor for this kind of action exists in this build, so nothing can run.'), decided);
   return decided;
@@ -344,14 +363,28 @@ function messageEl2(m, d, names, onChange) {
     const viewDraft = () => { try { sessionStorage.setItem(`claudebot.reviewApproval`, ap.id); } catch {} const t = [...document.querySelectorAll('.ctx-tab')].find((b) => b.textContent === 'Review'); if (t) t.click(); else notify(String(ap.content ?? '').slice(0, 400)); };
     const ttlH = ap.expires_at && ap.created_at ? Math.round((Date.parse(ap.expires_at) - Date.parse(ap.created_at)) / 3600000) : null;
     const content = (() => { const full = String(ap.content ?? m.meta.preview ?? ''); const subj = (full.match(/^\s*Subject:\s*(.+)$/im) || [])[1]; const rcpt = [...full.matchAll(/^\s*(Cc|Bcc):\s*(.+)$/gim)].map((x) => `${x[1]}: ${x[2]}`).join(' · '); const body = full.replace(/^\s*(To|From|Subject|Cc|Bcc):.*$/gim, '').replace(/\s+/g, ' ').trim(); return { subj, body: rcpt ? `${rcpt} — ${body}` : body }; })();   // extra recipients are never hidden
-    return h('div', { class: 'ev-card' }, h('div', { class: `card2 approval ${pending ? 'pending' : expired ? 'expired' : 'decided'}` }, h('div', { class: 'card2-h' }, h('span', {}, `${{ send: 'Send email', publish: 'Publish', purchase: 'Buy', delete: 'Delete' }[m.meta.action_kind] ?? m.meta.action_kind} · ${String(m.meta.target).replace(/^email to /, '')}`), h('span', { class: `tag ${tagCls}` }, ap.status === 'stale' ? 'Replaced by your edit' : tagTxt)),
-      content.subj ? h('div', { class: 'card2-title' }, content.subj) : null,
-      expired ? h('p', { class: 'card2-p' }, `This expired at ${fmtClock(ap.expires_at)} because nobody decided${ttlH ? ` in ${ttlH} hour${ttlH === 1 ? '' : 's'}` : ''}. Nothing was ${past}.`) : h('p', { class: 'card2-p' }, `“${clip(content.body, 110)}”`),
-      h('div', { class: 'approval-meta' }, expired ? h('span', {}, `created ${fmtClock(ap.created_at)}`) : h('span', {}, `to ${String(m.meta.target).replace(/^email to /, '')}`), expired ? h('span', {}, `expired ${fmtClock(ap.expires_at)}`) : null, ap.content_hash ? h('span', {}, `sha256 ${ap.content_hash.slice(0, 4)}…${ap.content_hash.slice(-4)}`) : null, pending && ap.expires_at ? h('span', {}, `expires ${fmtClock(ap.expires_at)}`) : null, ap.decided_at ? h('span', {}, `decided ${fmtClock(ap.decided_at)}`) : null),
-      pending ? h('div', { class: 'row', style: 'gap:8px;margin-top:12px;flex-wrap:wrap' }, h('button', { class: 'btn2 primary', onclick: allow }, 'Allow once'), h('button', { class: 'btn2', title: `Allow ${agentById(who)?.name ?? 'this assistant'} to do this again, only to this recipient, within limits you confirm`, onclick: async () => { try { const pm = await api('/api/permissions/propose', { method: 'POST', body: { approval_id: ap.id } }); if (pm.error) { notify(pm.error, true); return; } const r = await withOwner('permit', pm.id, pm.scope_text, (headers) => api(`/api/permissions/${pm.id}/activate`, { method: 'POST', headers })); if (r && r.error) notify(r.error, true); else if (r) notify('Standing permission on. You can revoke it in Settings.'); } catch (e) { notify(e.message, true); } route(); } }, `Always allow ${noun} like this`), h('button', { class: 'btn2 danger', onclick: deny }, 'Deny'))
+    const dv = describeApproval(ap, m.meta); const blockAllow = pending && dv.missingBody;
+    const short = (u) => { try { const x = new URL(u); return `${x.hostname.replace(/^www\./, '')}${x.pathname.length > 1 ? x.pathname.slice(0, 24) + (x.pathname.length > 24 ? '…' : '') : ''}`; } catch { return clip(u, 40); } };
+    const emailCopy = dv.email ? h('div', { class: 'email-copy' },
+      h('div', { class: 'email-line' }, h('span', { class: 'email-k' }, 'To'), h('span', {}, dv.to || '(no recipient)')),
+      dv.cc ? h('div', { class: 'email-line' }, h('span', { class: 'email-k' }, 'Cc'), h('span', {}, dv.cc)) : null,
+      dv.bcc ? h('div', { class: 'email-line' }, h('span', { class: 'email-k' }, 'Bcc'), h('span', {}, dv.bcc)) : null,
+      h('div', { class: 'email-line' }, h('span', { class: 'email-k' }, 'Subject'), h('span', {}, dv.subject || '(no subject)')),
+      dv.body ? h('div', { class: 'email-body' }, dv.body) : h('div', { class: 'email-body missing' }, 'There is no email text yet, so there is nothing to approve. Ask for the draft first.')) : null;
+    return h('div', { class: 'ev-card' }, h('div', { class: `card2 approval ${pending ? 'pending' : expired ? 'expired' : 'decided'}` }, h('div', { class: 'card2-h' }, h('span', { class: 'approval-kind' }, dv.label), h('span', { class: `tag ${tagCls}` }, ap.status === 'stale' ? 'Replaced by your edit' : tagTxt)),
+      dv.browser ? h('div', { class: 'card2-title' }, dv.title) : dv.subject ? null : null,
+      dv.browser ? h('p', { class: 'card2-p' }, dv.summary, ' ', h('a', { href: dv.url, target: '_blank', rel: 'noopener', class: 'approval-link' }, short(dv.url))) : null,
+      expired ? h('p', { class: 'card2-p' }, `This expired at ${fmtClock(ap.expires_at)} because nobody decided${ttlH ? ` in ${ttlH} hour${ttlH === 1 ? '' : 's'}` : ''}. Nothing was ${past}.`) : null,
+      emailCopy,
+      !dv.email && !dv.browser ? h('div', { class: 'card2-title' }, dv.target) : null,
+      !dv.email && !dv.browser ? h('div', { class: 'email-body' }, dv.raw || '(no content)') : null,
+      h('div', { class: 'approval-meta' }, pending && ap.expires_at ? h('span', {}, `expires ${fmtClock(ap.expires_at)}`) : null, ap.decided_at ? h('span', {}, `decided ${fmtClock(ap.decided_at)}`) : null, expired ? h('span', {}, `created ${fmtClock(ap.created_at)}`) : null),
+      details('Details', h('div', { class: 'approval-details' }, h('div', {}, h('b', {}, 'Target: '), String(m.meta.target ?? '')), dv.url ? h('div', {}, h('b', {}, 'Full address: '), dv.url) : null, ap.content_hash ? h('div', {}, h('b', {}, 'Approval is bound to sha256 '), ap.content_hash) : null, h('pre', {}, dv.raw))),
+      pending && !blockAllow ? h('div', { class: 'row', style: 'gap:8px;margin-top:12px;flex-wrap:wrap' }, h('button', { class: 'btn2 primary', onclick: allow }, 'Allow once'), !dv.email ? null : h('button', { class: 'btn2', title: `Allow ${agentById(who)?.name ?? 'this assistant'} to do this again, only to this recipient, within limits you confirm`, onclick: async () => { try { const pm = await api('/api/permissions/propose', { method: 'POST', body: { approval_id: ap.id } }); if (pm.error) { notify(pm.error, true); return; } const r = await withOwner('permit', pm.id, pm.scope_text, (headers) => api(`/api/permissions/${pm.id}/activate`, { method: 'POST', headers })); if (r && r.error) notify(r.error, true); else if (r) notify('Standing permission on. You can revoke it in Settings.'); } catch (e) { notify(e.message, true); } route(); } }, `Always allow ${noun} like this`), h('button', { class: 'btn2 danger', onclick: deny }, 'Deny'))
+        : blockAllow ? h('div', { class: 'row', style: 'gap:8px;margin-top:12px' }, h('button', { class: 'btn2', onclick: deny }, 'Deny'))
         : expired ? h('div', { class: 'row', style: 'gap:8px;margin-top:12px' }, h('button', { class: 'btn2', onclick: retry }, 'Retry'), h('button', { class: 'btn2 ghost', onclick: viewDraft }, 'View draft'))
         : h('div', { style: 'margin-top:8px' }, actionRow(m))),
-      pending ? h('div', { class: 'ev', style: 'padding-left:0;margin-top:20px' }, h('span', { class: 'dot' }), `Allowing opens a Mac confirmation showing the full ${m.meta.action_kind === 'send' ? 'email' : 'content'} before anything is ${past}`) : null);
+      pending && !blockAllow ? h('div', { class: 'ev', style: 'padding-left:0;margin-top:20px' }, h('span', { class: 'dot' }), dv.browser ? 'Allowing opens a Mac confirmation showing exactly this action before it happens' : `Allowing opens a Mac confirmation showing the full ${dv.email ? 'email' : 'content'} before anything is ${past}`) : null);
   }
   if (m.kind === 'status') return h('div', { class: 'ev' }, h('span', { class: 'dot' }), m.content);
   if (m.kind === 'blocker') return h('div', { class: 'ev-card' }, h('div', { class: 'card2' }, h('div', { class: 'row spread' }, h('span', { class: 'card2-title' }, 'Blocked'), h('span', { class: 'tag warn' }, 'Needs your call')), h('p', { class: 'card2-p' }, m.content)));
@@ -537,7 +570,8 @@ function reviewInto(body, d) {
   const m = decisions.find((x) => x.approval.id === want) || decisions.find((x) => x.approval.status === 'pending') || decisions[0];
   if (!m) { body.append(h('div', { class: 'ctx-section' }, h('div', { class: 'section-h' }, 'Review'), h('p', { class: 'empty-line' }, 'Nothing in this chat is waiting for your decision.'))); return; }
   const ap = m.approval; const who = m.job?.agent_role ?? 'coordinator'; const pending = ap.status === 'pending'; const name = agentById(who)?.name ?? 'the assistant';
-  const verb = { send: 'send an email', publish: 'publish something', purchase: 'buy something', delete: 'delete something' }[ap.action_kind] || ap.action_kind;
+  const dv = describeApproval(ap, m.meta);
+  const verb = dv.browser ? `do this in the browser: ${dv.label.toLowerCase()}` : dv.email ? 'send an email' : { send: 'send or submit something', publish: 'publish something', purchase: 'buy something', delete: 'delete something' }[ap.action_kind] || ap.action_kind;
   const full = String(ap.content ?? m.meta.preview ?? ''); const subj = (full.match(/^\s*Subject:\s*(.+)$/im) || [])[1]; const to = (full.match(/^\s*To:\s*(.+)$/im) || [])[1] || String(ap.target).replace(/^email to /, '');
   const from = (full.match(/^\s*From:\s*(.+)$/im) || [])[1];
   const why = (() => { const own = d.messages.find((x) => x.role === 'owner' && x.job_id && x.job_id === m.job_id) || [...d.messages.slice(0, d.messages.indexOf(m))].reverse().find((x) => x.role === 'owner'); return own ? `You asked: “${clip(own.content, 46)}”` : 'Requested in this chat'; })();
@@ -550,10 +584,10 @@ function reviewInto(body, d) {
   const editRow = h('div', { class: 'row', style: 'gap:8px;margin-top:12px' }, editBtn, h('button', { class: 'btn2 ghost', disabled: !pending, onclick: () => { const ta = $('#chat-input'); if (ta) { ta.value = 'Please revise the draft: '; ta.focus(); } } }, `Ask ${name} to revise`));
   body.append(
     h('div', { class: 'ctx-section' }, h('div', { class: 'card-h2' }, avatar(who, 'sm'), h('span', {}, `${name} wants to ${verb}`), h('span', { class: `tag ${tag[0]}` }, tag[1])),
-      h('div', { class: 'card-title2' }, subj || ap.target),
-      h('dl', { class: 'kv' }, h('dt', {}, ap.action_kind === 'send' ? 'To' : 'Target'), h('dd', {}, to), h('dt', {}, 'From'), h('dd', {}, from || (ap.action_kind === 'send' ? 'ClaudeBot outbox on this Mac' : 'ClaudeBot on this Mac')), ...(subj ? [h('dt', {}, 'Subject'), h('dd', {}, subj)] : []), h('dt', {}, 'Why'), h('dd', {}, why), h('dt', {}, 'Content hash'), h('dd', { style: 'font-family:var(--mono);font-size:var(--fs-xs)' }, `sha256 ${String(ap.content_hash).slice(0, 4)}…${String(ap.content_hash).slice(-4)} · approval binds to this exact text`))),
-    h('div', { class: 'ctx-section' }, h('div', { class: 'section-h' }, ap.action_kind === 'send' ? 'Exact email that will be sent' : 'Exact content'), diff, editRow),
-    h('div', { class: 'ctx-section' }, h('div', { class: 'section-h' }, 'What “Always allow” would cover'), h('p', { class: 'empty-line', style: 'color:var(--text-2)' }, `${name} may `, h('b', { style: 'color:var(--text)' }, `${verb.replace(/^send an email$/, 'send emails like this one')}, only to ${to}`), ', at most 3 in any 24 hours for 30 days. Anything new still asks you. You can revoke it in Settings.')));
+      h('div', { class: 'card-title2' }, dv.browser ? dv.title : subj || ap.target),
+      h('dl', { class: 'kv' }, h('dt', {}, dv.email ? 'To' : dv.browser ? 'Page' : 'Target'), h('dd', {}, dv.browser ? dv.site : to), h('dt', {}, dv.browser ? 'Where' : 'From'), h('dd', {}, dv.browser ? 'The ClaudeBot browser on this Mac' : from || (dv.email ? 'ClaudeBot outbox on this Mac' : 'ClaudeBot on this Mac')), ...(subj ? [h('dt', {}, 'Subject'), h('dd', {}, subj)] : []), h('dt', {}, 'Why'), h('dd', {}, why), h('dt', {}, 'Content hash'), h('dd', { style: 'font-family:var(--mono);font-size:var(--fs-xs)' }, `sha256 ${String(ap.content_hash).slice(0, 4)}…${String(ap.content_hash).slice(-4)} · approval binds to this exact text`))),
+    h('div', { class: 'ctx-section' }, h('div', { class: 'section-h' }, dv.email ? 'Exact email that will be sent' : dv.browser ? 'Exact action' : 'Exact content'), dv.browser ? h('div', { class: 'diff' }, dv.summary.replace(/ Nothing else.*$/, ''), '\n\n', dv.url) : diff, dv.browser ? null : editRow),
+    !dv.email ? null : h('div', { class: 'ctx-section' }, h('div', { class: 'section-h' }, 'What “Always allow” would cover'), h('p', { class: 'empty-line', style: 'color:var(--text-2)' }, `${name} may `, h('b', { style: 'color:var(--text)' }, `${verb.replace(/^send an email$/, 'send emails like this one')}, only to ${to}`), ', at most 3 in any 24 hours for 30 days. Anything new still asks you. You can revoke it in Settings.')));
 }
 /** Files tab: results saved by work in this conversation (real artifacts only). */
 function filesInto(body, d) {
@@ -982,7 +1016,7 @@ const views = {
       for (const a of pend) { const j = a.job_id ? await api(`/api/jobs/${a.job_id}`).catch(() => null) : null; const conv = j?.job?.conversation_id; if (conv && (convsCache.find((c) => c.id === conv)?.type ?? 'direct') !== 'group') return chatView(conv, { review: pend.length }); }   // a group's decisions stay private: they open in the review list
       if (!pend.length) return reviewEmpty();
     }
-    return this.approvalsList();
+    return views.approvalsList();
   },
   async approvalsList() {
     const list = await api('/api/approvals'); const pending = list.filter((a) => a.status === 'pending'); const rest = list.filter((a) => a.status !== 'pending');
@@ -1191,7 +1225,7 @@ async function route() {
   const view = views[name] ?? views.home; renderNav(); $('#app').classList.toggle('chat-mode', ['home', 'chat', 'create', 'newgroup'].includes(name) || (name === 'approvals' && arg !== 'all') || !views[name]);
   if (name !== 'chat' && name !== 'browser' && name !== 'workbench' && name !== 'office') disconnectBrowserStream();
   if (name !== 'office') officeCtl = null;
-  $('#view').dataset.dirty = ''; $('#view').dataset.formDirty = ''; try { const el = await view(arg); $('#view').replaceChildren(el); setTimeout(recordFields, 0); setTimeout(recordFields, 500); setTimeout(updateCues, 50); $('#view').classList.toggle('chat-view', name === 'chat'); $('#view').classList.toggle('workbench-view', name === 'workbench' || (name === 'office' && (arg || '').startsWith('list'))); $('#view').classList.toggle('office-view', name === 'office' && !(arg || '').startsWith('list')); } catch (e) { if (e.message !== 'unauthorized') $('#view').replaceChildren(empty('Could not load this screen', e.message)); }
+  $('#view').dataset.dirty = ''; $('#view').dataset.formDirty = ''; try { const el = await view.call(views, arg); $('#view').replaceChildren(el); setTimeout(recordFields, 0); setTimeout(recordFields, 500); setTimeout(updateCues, 50); $('#view').classList.toggle('chat-view', name === 'chat'); $('#view').classList.toggle('workbench-view', name === 'workbench' || (name === 'office' && (arg || '').startsWith('list'))); $('#view').classList.toggle('office-view', name === 'office' && !(arg || '').startsWith('list')); } catch (e) { if (e.message !== 'unauthorized') $('#view').replaceChildren(empty('Could not load this screen', e.message)); }
 }
 window.addEventListener('hashchange', () => { railMenuOpen = false; route(); });
 window.addEventListener('resize', applyCompact); applyCompact();
