@@ -159,8 +159,9 @@ test('15. bounded soak: continuous heartbeats, no phantom busy agents, no orphan
   const SOAK_MS = Number(process.env.CLAUDEBOT_SOAK_MS ?? 45_000); const end = Date.now() + SOAK_MS; let created = 0; let phantom = 0; let samples = 0;
   while (Date.now() < end) {
     if (created < 8) { await post(h, 'system.workspace_summary', `soak ${created}`, { idempotency_key: `soak-${created}` }); created++; }
-    const agents = await h.api<Array<{ status: string; current_job: { lease_heartbeat_at: string } | null }>>('/api/agents');
-    for (const a of agents) if (a.status === 'busy' && (!a.current_job || Date.now() - Date.parse(a.current_job.lease_heartbeat_at) > 60_000)) phantom++;
+    // /api/agents reports live work as active_tasks (there is no current_job field): busy must always come with a fresh heartbeat.
+    const agents = await h.api<Array<{ status: string; active_tasks: Array<{ lease_heartbeat_at: string }> }>>('/api/agents');
+    for (const a of agents) if (a.status === 'busy' && (!a.active_tasks?.length || a.active_tasks.some((t) => Date.now() - Date.parse(t.lease_heartbeat_at) > 60_000))) phantom++;
     samples++; await sleep(2000);
   }
   const jobs = await h.api<Array<{ state: string }>>('/api/jobs'); assert.equal(jobs.filter((j) => j.state === 'completed').length, created);
