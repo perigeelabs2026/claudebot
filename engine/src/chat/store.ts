@@ -107,6 +107,14 @@ export class ChatStore {
     this.store.event(null, actor, 'conversation.member_added', { conversation_id: conversationId, agent_id: agentId });
     return this.member(conversationId, agentId)!;
   }
+  removeMember(conversationId: string, agentId: string, actor = 'owner'): void {
+    const c = this.get(conversationId); if (!c) throw new ChatRuleError('not_found', 'conversation not found');
+    if (c.type !== 'group') throw new ChatRuleError('direct_members', 'A direct chat keeps its one assistant.');
+    if (!this.member(conversationId, agentId)) return;
+    if (this.members(conversationId).length <= 2) throw new ChatRuleError('group_size', 'A group has at least 2 assistants.');
+    this.db.prepare('DELETE FROM conversation_members WHERE conversation_id = ? AND agent_id = ?').run(conversationId, agentId);
+    this.store.event(null, actor, 'conversation.member_removed', { conversation_id: conversationId, agent_id: agentId });
+  }
   /** Session / capability / folder key of one assistant in a conversation. Direct chats keep the conversation id (unchanged from before groups). */
   sessionKey(conv: Pick<Conversation, 'id' | 'type'>, agentId: string): string { return conv.type === 'group' ? `${conv.id}.${agentId}` : conv.id; }
   get(id: string): Conversation | undefined { return this.db.prepare('SELECT * FROM conversations WHERE id = ?').get(id) as Conversation | undefined; }
@@ -168,7 +176,13 @@ export class ChatStore {
     // @Name in the text: longest names first so "@Chief of Staff" is not read as "@Chief".
     const sorted = [...agents].sort((a, b) => b.name.length - a.name.length);
     let rest = content;
-    for (const a of sorted) for (const key of [a.name, a.id]) { const re = new RegExp(`(^|[^\\w@])@${escapeRe(key)}(?![\\w])`, 'gi'); if (re.test(rest)) { mentioned.add(a.id); rest = rest.replace(re, '$1'); } }
+    // Each assistant answers to its full name, its id and its first name ("Jude" for "Jude (Job Applicator)") when no other assistant shares it.
+    const first = (n: string) => (n.trim().split(/[\s(]+/)[0] ?? '').toLowerCase();
+    const firstCount = new Map<string, number>(); for (const a of agents) { const f = first(a.name); if (f.length >= 3) firstCount.set(f, (firstCount.get(f) ?? 0) + 1); }
+    const keysOf = (a: { id: string; name: string }) => [a.name, a.id, ...(firstCount.get(first(a.name)) === 1 && first(a.name) !== a.name.toLowerCase() ? [first(a.name)] : [])];
+    for (const a of sorted) for (const key of keysOf(a)) { const re = new RegExp(`(^|[^\\w@])@${escapeRe(key)}(?![\\w])`, 'gi'); if (re.test(rest)) { mentioned.add(a.id); rest = rest.replace(re, '$1'); } }
+    // A message that opens by addressing one member by name ("Jude, …", "Roger: …") goes straight to them, as a mention would.
+    if (!mentioned.size && !everyone) for (const a of sorted.filter((x) => members.includes(x.id))) { if (keysOf(a).some((key) => new RegExp(`^\\s*(hey\\s+|ok(ay)?\\s+)?${escapeRe(key)}\\s*[,:!\\-–—]`, 'i').test(content))) { mentioned.add(a.id); break; } }
     const outsiders = [...mentioned].filter((id) => !members.includes(id));
     if (outsiders.length) throw new ChatRuleError('not_a_member', `${outsiders.map(nameOf).join(', ')} ${outsiders.length > 1 ? 'are' : 'is'} not in this group. Add ${outsiders.length > 1 ? 'them' : 'them'} first, or ask someone who is.`);
     const targets = new Set<string>(everyone ? members : [...mentioned]);
@@ -284,12 +298,19 @@ export class ChatStore {
     return { ok: true, job: this.store.get(r.job.id)!, message: this.message(msg.id)! };
   }
 
+  /** One message as an assistant sees it in context: a file is named with its id; long text is never cut silently. */
+  contextText(r: { id: string; kind: string; content: string; artifact_id: string | null }, limit = 1500): string {
+    if (r.artifact_id) { const a = this.db.prepare('SELECT title, path FROM artifacts WHERE id = ?').get(r.artifact_id) as { title: string; path: string | null } | undefined; if (a) { const ext = (String(a.path ?? '').split('.').pop() ?? '').toUpperCase(); return `[file: ${a.title}${ext && ext.length <= 4 ? `, ${ext}` : ''}, result id ${r.artifact_id}]${r.kind === 'result' && r.content !== 'Saved a file' ? ` ${r.content.slice(0, 300)}` : ''}`; } }
+    const c = String(r.content ?? ''); if (c.length <= limit) return c;
+    return `${c.slice(0, limit)} [message continues: ${c.length - limit} more characters; read_message ${r.id} offset ${limit}]`;
+  }
+
   /** What other members said in a group since this assistant last spoke (each member's session sees only its own turns). */
   groupContext(conversationId: string, agentId: string, beforeSeq: number): string {
     const last = this.db.prepare("SELECT max(seq) AS s FROM messages WHERE conversation_id = ? AND role = 'assistant' AND sender = ? AND seq < ?").get(conversationId, agentId, beforeSeq) as { s: number | null };
-    const rows = this.db.prepare("SELECT role, sender, kind, content FROM messages WHERE conversation_id = ? AND seq > ? AND seq < ? AND (role IN ('owner','assistant') OR kind IN ('result','delegation')) ORDER BY seq DESC LIMIT 40").all(conversationId, last.s ?? 0, beforeSeq) as Array<{ role: string; sender: string; kind: string; content: string }>;
+    const rows = this.db.prepare("SELECT id, role, sender, kind, content, artifact_id FROM messages WHERE conversation_id = ? AND seq > ? AND seq < ? AND (role IN ('owner','assistant') OR kind IN ('result','delegation')) ORDER BY seq DESC LIMIT 40").all(conversationId, last.s ?? 0, beforeSeq) as Array<{ role: string; sender: string; kind: string; content: string }>;
     const names = new Map((this.db.prepare('SELECT id, name FROM agent_definitions').all() as Array<{ id: string; name: string }>).map((a) => [a.id, a.name]));
-    return rows.reverse().filter((r) => !(r.role === 'assistant' && r.sender === agentId)).map((r) => `${r.role === 'owner' ? 'Owner' : r.role === 'assistant' ? (names.get(r.sender) ?? r.sender) : 'System'}: ${r.content.slice(0, 1500)}`).join('\n');
+    return rows.reverse().filter((r) => !(r.role === 'assistant' && r.sender === agentId)).map((r) => `${r.role === 'owner' ? 'Owner' : r.role === 'assistant' ? (names.get(r.sender) ?? r.sender) : 'System'}: ${this.contextText(r as never)}`).join('\n');
   }
 
   autoReport(defs: Definitions, touched: Set<string>): void {
@@ -354,9 +375,9 @@ export class ChatStore {
 
   /** Transcript for a lead-assistant session that has to be (re)started: the recent owner/assistant exchange. */
   transcript(conversationId: string, opts: { limit?: number; beforeSeq?: number; names?: boolean } = {}): string {
-    const rows = (this.db.prepare("SELECT role, kind, content, sender FROM messages WHERE conversation_id = ? AND seq < ? AND (role IN ('owner','assistant') OR kind IN ('result','delegation')) ORDER BY seq DESC LIMIT ?").all(conversationId, opts.beforeSeq ?? Number.MAX_SAFE_INTEGER, opts.limit ?? 30) as Array<{ role: string; kind: string; content: string; sender: string }>).reverse();
+    const rows = (this.db.prepare("SELECT id, role, kind, content, sender, artifact_id FROM messages WHERE conversation_id = ? AND seq < ? AND (role IN ('owner','assistant') OR kind IN ('result','delegation')) ORDER BY seq DESC LIMIT ?").all(conversationId, opts.beforeSeq ?? Number.MAX_SAFE_INTEGER, opts.limit ?? 30) as Array<{ role: string; kind: string; content: string; sender: string }>).reverse();
     const names = opts.names ? new Map((this.db.prepare('SELECT id, name FROM agent_definitions').all() as Array<{ id: string; name: string }>).map((a) => [a.id, a.name])) : null;
-    return rows.map((r) => `${r.role === 'owner' ? 'Owner' : r.role === 'assistant' ? (names ? (names.get(r.sender) ?? r.sender) : 'You') : 'System'}: ${r.content.slice(0, 1500)}`).join('\n');
+    return rows.map((r) => `${r.role === 'owner' ? 'Owner' : r.role === 'assistant' ? (names ? (names.get(r.sender) ?? r.sender) : 'You') : 'System'}: ${this.contextText(r as never)}`).join('\n');
   }
 
   /** What happened to delegated work since the assistant last replied (fed into the next turn so results are usable). */

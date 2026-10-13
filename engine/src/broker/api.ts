@@ -11,13 +11,14 @@ import { Definitions } from '../model/definitions.ts';
 import { ChatStore, ChatRuleError } from '../chat/store.ts';
 import { Assistants, ownerAsked, CHAT_CREATE_DAILY_LIMIT } from '../chat/assistants.ts';
 import { setPriority, saveReport } from '../cos/report.ts';
-import { readArtifact } from './artifact-access.ts';
+import { readArtifact, artifactFile } from './artifact-access.ts';
 import { searchScoped } from '../search/index.ts';
 import { delegationBudget, waitForChildren, childStatus } from '../coord/delegation.ts';
 import { runCheck, allowedRepo, type CheckProfile } from '../worker/project-check.ts';
 import { TOOL_SCHEMAS } from './capabilities.ts';
 import { parseSnapshot, decide, approvalContent, type ActRequest, type SnapshotElement } from '../browser/act-policy.ts';
 import crypto from 'node:crypto';
+import { markdownToHtml, renderDocument } from '../documents/render.ts';
 import { taskTitle } from '../model/wording.ts';
 import type { Capability } from './capabilities.ts';
 import type { EngineConfig } from '../config.ts';
@@ -171,6 +172,57 @@ export class BrokerApi {
           if (conv) new ChatStore(db, this.store).add({ conversation_id: conv, role: 'assistant', kind: 'question', sender: me!.agent_role, content: `Draft assistant ready for you to name and confirm: ${d.draft.role}.`, job_id: cap.job_id, meta: { draft_id: d.id, draft: d.draft } });
           return { ok: true, text: `Draft saved and shown to the owner (suggested name "${d.draft.name}").${asked && !asked.ok ? ` Not created yet: ${asked.reason}.` : ''} It does not exist until the owner confirms it, in the app or by asking you for it in chat; say so.`, data: { draft_id: d.id } };
         } catch (e) { return { ok: false, text: `Not saved: ${e instanceof ChatRuleError ? e.message : (e as Error).message}` }; }
+      }
+      case 'render_document': {   // a real .docx / .pdf from Markdown (or a saved text result), saved as results with their own cards
+        let md = typeof a.markdown === 'string' ? a.markdown : ''; let from: string | null = null;
+        if (!md && a.source_artifact_id) { const f = artifactFile(db, cap.job_id, String(a.source_artifact_id)); if (!f.ok) return { ok: false, text: `Not rendered: ${f.reason}.` }; md = f.buf.toString('utf8'); from = String(a.source_artifact_id); }
+        if (!md.trim()) return { ok: false, text: 'give markdown or source_artifact_id' }; if (Buffer.byteLength(md) > 512 * 1024) return { ok: false, text: 'the text is larger than 512 KB' };
+        const title = String(a.title ?? 'Document').replace(/\s+/g, ' ').trim().slice(0, 120) || 'Document';
+        const formats = (Array.isArray(a.formats) && a.formats.length ? a.formats : ['docx', 'pdf']).map(String).filter((x): x is 'docx' | 'pdf' => x === 'docx' || x === 'pdf'); if (!formats.length) return { ok: false, text: 'formats: docx and/or pdf' };
+        const base = title.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80) || 'document';
+        let made; try { made = renderDocument(markdownToHtml(md, title), path.join(path.resolve(cap.workspace), 'documents'), base, [...new Set(formats)]); } catch (e) { return { ok: false, text: `Not rendered: ${(e as Error).message}` }; }
+        const ids: Array<{ id: string; format: string }> = [];
+        for (const r of made) { const sha = crypto.createHash('sha256').update(fs.readFileSync(r.path)).digest('hex'); const id = newId('art'); db.prepare('INSERT INTO artifacts(id, job_id, stage_name, kind, path, sha256, title, provenance, created_at) VALUES (?,?,?,?,?,?,?,?,?)').run(id, cap.job_id, this.store.get(cap.job_id)?.stage_name ?? 'claude', 'file', r.path, sha, `${title} (${r.format.toUpperCase()})`, JSON.stringify({ actor, rendered_from: from ?? 'markdown', format: r.format }), now()); ids.push({ id, format: r.format }); }
+        this.store.event(cap.job_id, actor, 'document.rendered', { title, files: ids, from });
+        return { ok: true, text: `Saved ${ids.map((x) => `${x.format.toUpperCase()} ${x.id}`).join(' and ')} for "${title}". They appear as file cards under your reply.`, data: { files: ids } };
+      }
+      // ---- conversation tools (chat replies) ----
+      case 'read_message': {   // the full text of a long message in this conversation (context lines never cut silently)
+        const me = this.store.get(cap.job_id); const msg = new ChatStore(db, this.store).message(String(a.id ?? ''));
+        if (!me?.conversation_id || !msg || msg.conversation_id !== me.conversation_id) return { ok: false, text: 'that message is not in this conversation' };
+        const off = Math.max(0, Math.floor(Number(a.offset ?? 0))); const part = msg.content.slice(off, off + 8000); const next = off + part.length < msg.content.length ? off + part.length : null;
+        return { ok: true, text: part + (next !== null ? `\n[continues: read_message ${msg.id} offset ${next}]` : ''), data: { total_chars: msg.content.length, next_offset: next } };
+      }
+      case 'post_update': {   // a short live progress line in the conversation while the work runs (the final answer is still the reply)
+        const me = this.store.get(cap.job_id); if (!me?.conversation_id) return { ok: false, text: 'post_update is only for conversation replies' };
+        const text = String(a.text ?? '').trim().slice(0, 600); if (!text) return { ok: false, text: 'text is required' };
+        const n = (db.prepare("SELECT count(*) AS n FROM messages WHERE job_id = ? AND json_extract(meta, '$.update') = 1").get(cap.job_id) as { n: number }).n; if (n >= 10) return { ok: false, text: 'at most 10 updates per reply; put the rest in your reply' };
+        const m = new ChatStore(db, this.store).add({ conversation_id: me.conversation_id, role: 'assistant', sender: me.agent_role, content: text, job_id: cap.job_id, meta: { update: true } });
+        return { ok: true, text: 'posted', data: { message_id: m.id } };
+      }
+      case 'share_file': {   // put a saved result in this conversation, or in the owner's direct chat with an assistant
+        const me = this.store.get(cap.job_id); const f = artifactFile(db, cap.job_id, String(a.artifact_id ?? '')); if (!f.ok) return { ok: false, text: `Not shared: ${f.reason}.` };
+        const to = String(a.to ?? 'current'); let conv: string | null = null;
+        if (to === 'current') conv = me?.conversation_id ?? null;
+        else if (to.startsWith('direct:')) { const ag = to.slice(7).trim().toLowerCase(); const agent = (db.prepare('SELECT id FROM agent_definitions WHERE lower(id) = ? OR lower(name) = ?').get(ag, ag) as { id: string } | undefined)?.id; conv = agent ? (db.prepare("SELECT c.id FROM conversations c JOIN conversation_members m ON m.conversation_id = c.id WHERE c.type = 'direct' AND c.status = 'active' AND m.agent_id = ? ORDER BY c.updated_at DESC LIMIT 1").get(agent) as { id: string } | undefined)?.id ?? null : null; }
+        if (!conv) return { ok: false, text: `Not shared: no ${to === 'current' ? 'current conversation' : `open direct chat for ${to.slice(7)}`}.` };
+        if (db.prepare('SELECT 1 FROM messages WHERE conversation_id = ? AND artifact_id = ?').get(conv, String(a.artifact_id))) return { ok: true, text: 'already in that chat' };
+        new ChatStore(db, this.store).add({ conversation_id: conv, role: 'assistant', kind: 'result', sender: me?.agent_role ?? cap.role, content: f.title, job_id: f.job_id, artifact_id: String(a.artifact_id), meta: { state: 'completed', file_verified: true, chat_file: true, shared_by: cap.role } });
+        return { ok: true, text: `shared "${f.title}"` };
+      }
+      // ---- the lead's team tools: each acts only on the owner's own words in the message being answered ----
+      case 'rename_assistant': case 'disable_assistant': case 'add_member': case 'remove_member': {
+        const asked = ownerAsked(db, cap.job_id, a.owner_words); if (!asked.ok) return { ok: false, text: `Not done: ${asked.reason}.` };
+        const defs = new Definitions(db); const key = String(a.assistant ?? a.id ?? '').trim().toLowerCase().replace(/^@/, '');
+        const ag = defs.listAgents({ includeDisabled: true }).find((x) => x.id.toLowerCase() === key || x.name.toLowerCase() === key || x.name.toLowerCase().split(/[\s(]+/)[0] === key); if (!ag) return { ok: false, text: `there is no assistant "${key}"` };
+        const me = this.store.get(cap.job_id)!; const chat = new ChatStore(db, this.store);
+        try {
+          if (tool === 'rename_assistant') { const nn = String(a.name ?? '').replace(/\s+/g, ' ').trim().slice(0, 40); if (!nn || /^everyone$/i.test(nn)) return { ok: false, text: 'give a name' }; if (defs.listAgents({ includeDisabled: true }).some((x) => x.id !== ag.id && x.name.toLowerCase() === nn.toLowerCase())) return { ok: false, text: `another assistant is already called ${nn}` }; defs.upsertAgent({ ...ag, name: nn }, 'owner:chat'); return { ok: true, text: `${ag.name} is now ${nn}` }; }
+          if (tool === 'disable_assistant') { if (ag.id === 'coordinator') return { ok: false, text: 'the lead cannot switch itself off' }; defs.setAgentEnabled(ag.id, false, 'owner:chat'); return { ok: true, text: `${ag.name} is switched off` }; }
+          const conv = String(a.conversation ?? me.conversation_id ?? '');
+          if (tool === 'add_member') { chat.addMember(conv, ag.id, 'owner:chat'); return { ok: true, text: `${ag.name} added` }; }
+          chat.removeMember(conv, ag.id, 'owner:chat'); return { ok: true, text: `${ag.name} removed` };
+        } catch (e) { return { ok: false, text: e instanceof ChatRuleError ? e.message : (e as Error).message }; }
       }
       case 'create_experiment': { const id = newId('exp'); db.prepare('INSERT INTO experiments(id, opportunity_id, hypothesis, metric, status, result, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)').run(id, a.opportunity_id ? String(a.opportunity_id) : null, String(a.hypothesis), `${a.metric} | stop: ${a.stop_rule}`, 'designed', null, t, t); return { ok: true, text: `experiment ${id} recorded (designed, not active)`, data: { id } }; }
       case 'request_approval': { const kind = String(a.kind); if (!(CONSEQUENTIAL_KINDS as readonly string[]).includes(kind)) return { ok: false, text: `kind must be one of ${CONSEQUENTIAL_KINDS.join(', ')}` }; const ttlMin = Number((this.db.prepare("SELECT value FROM settings WHERE key = 'approval_ttl_minutes'").get() as { value: string } | undefined)?.value ?? 720); const ap = this.approvals.request({ job_id: cap.job_id, action_kind: kind, target: String(a.target), content: String(a.content), evidence: Array.isArray(a.evidence_ids) ? a.evidence_ids : [], budget: (a.budget as Record<string, unknown>) ?? null, ttlSeconds: ttlMin * 60 });

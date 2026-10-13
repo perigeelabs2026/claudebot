@@ -416,7 +416,7 @@ test('owner can rename and re-describe a built-in assistant, and the seed keeps 
 
 test('files an assistant saves during a chat reply appear in that chat as file cards, once each (owner: "the file is not in the chat")', () => {
   const run = fs.readFileSync(path.resolve(import.meta.dirname, '..', '..', 'src/worker/run.ts'), 'utf8');
-  assert.match(run, /chat\.add\(\{ conversation_id: conv\.id, role: 'assistant', kind: 'result', sender: agentId, content: 'Saved a file', job_id: job\.id, artifact_id: a\.id/);
+  assert.match(run, /chat\.add\(\{ conversation_id: conv\.id, role: 'assistant', kind: 'result', sender: agentId, content: a\.title \|\| 'Saved a file', job_id: job\.id, artifact_id: a\.id/);
   assert.match(run, /id NOT IN \(SELECT artifact_id FROM messages WHERE artifact_id IS NOT NULL AND conversation_id = \?\)/, 'never twice');
 });
 
@@ -437,4 +437,33 @@ test('browser approvals: the outbox and the permission runner never perform or c
   // an email approval is not resumed this way (it runs through the executor)
   const em = approvals.request({ job_id: turn.id, action_kind: 'send', target: 'email to a@example.test', content: 'To: a@example.test\nSubject: x\n\nhi' }); approvals.decide(em.id, 'approved', 'owner');
   assert.equal(s.chat.resumeForApproval(em.id, s.defs), null);
+});
+
+test('mentions: first names route ("@Jude", "Jude, …"); long messages are never cut silently; read_message, post_update, share_file and the lead\'s team tools work only within their limits', async () => {
+  const s = setup(); const defs = s.defs;
+  defs.upsertAgent({ ...defs.getAgent('researcher')!, name: 'Jude (Job Applicator)' }, 'owner');
+  const g = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher', 'reviewer'] });
+  assert.deepEqual(s.chat.send(g.id, '@Jude answer me', defs).jobs.map((j) => j.agent_role), ['researcher']);
+  assert.deepEqual(s.chat.send(g.id, 'Jude, where are the files?', defs).jobs.map((j) => j.agent_role), ['researcher']);
+  assert.deepEqual(s.chat.send(g.id, 'what do we have today', defs).jobs.map((j) => j.agent_role), ['coordinator'], 'no name: the lead routes');
+  // truncation is marked, and read_message returns the rest, only for this conversation
+  const long = 'x'.repeat(2000) + 'END';
+  const lm = s.chat.add({ conversation_id: g.id, role: 'assistant', sender: 'reviewer', content: long });
+  const turn = s.chat.send(g.id, '@coordinator summarise', defs).job;
+  const ctx = s.chat.groupContext(g.id, 'coordinator', Number.MAX_SAFE_INTEGER); assert.match(ctx, new RegExp(`\\[message continues: 503 more characters; read_message ${lm.id} offset 1500\\]`));
+  const rm = await s.broker.call(cap(turn, ['read_message']), 'read_message', { id: lm.id, offset: 1500 }); assert.equal(rm.ok, true); assert.ok(rm.text.endsWith('END'));
+  const other = s.chat.create({ workspace_id: s.ws.id }); const om = s.chat.add({ conversation_id: other.id, role: 'assistant', sender: 'coordinator', content: 'private' });
+  assert.equal((await s.broker.call(cap(turn, ['read_message']), 'read_message', { id: om.id })).ok, false, 'another conversation is refused');
+  // post_update: capped
+  for (let i = 0; i < 10; i++) assert.equal((await s.broker.call(cap(turn, ['post_update']), 'post_update', { text: `step ${i}` })).ok, true);
+  assert.equal((await s.broker.call(cap(turn, ['post_update']), 'post_update', { text: 'one more' })).ok, false);
+  // team tools need the owner's own words
+  const rn = s.chat.send(g.id, '@coordinator rename Resume Tailor to Roger please', defs).job;
+  assert.equal((await s.broker.call(cap(rn, ['rename_assistant']), 'rename_assistant', { assistant: 'reviewer', name: 'Roger', owner_words: 'make him Bob' })).ok, false);
+  const ok = await s.broker.call(cap(rn, ['rename_assistant']), 'rename_assistant', { assistant: 'reviewer', name: 'Roger', owner_words: 'rename Resume Tailor to Roger' }); assert.equal(ok.ok, true, ok.text); assert.equal(defs.getAgent('reviewer')!.name, 'Roger');
+  assert.deepEqual(s.chat.send(g.id, 'Roger: check this', defs).jobs.map((j) => j.agent_role), ['reviewer'], 'the new name routes at once');
+  const rm2 = s.chat.send(g.id, '@coordinator remove Roger from this group', defs).job;
+  assert.equal((await s.broker.call(cap(rm2, ['remove_member']), 'remove_member', { assistant: 'Roger', owner_words: 'remove Roger from this group' })).ok, true); assert.equal(s.chat.member(g.id, 'reviewer'), undefined);
+  const rm3 = s.chat.send(g.id, '@coordinator remove Jude from this group', defs).job;
+  assert.match((await s.broker.call(cap(rm3, ['remove_member']), 'remove_member', { assistant: 'Jude', owner_words: 'remove Jude from this group' })).text, /at least 2/);
 });

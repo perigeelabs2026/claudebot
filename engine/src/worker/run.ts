@@ -199,7 +199,7 @@ async function executeStage(deps: RunDeps, job: Job, stage: StageDef, ctx: { wor
       const clock = `Current time: ${nowLocal.toLocaleString('en-US', { timeZone: tz, dateStyle: 'full', timeStyle: 'short' })} (${tz}); ISO ${nowLocal.toISOString()}.`;
       const routerOnly = isGroup && router && !chat.member(conv.id, agentId);
       // A router that is not in the group only reads and hands off: it never starts work in a group it is not part of.
-      const tools = routerOnly ? [...agent.allowed_tools.filter((t) => ['read_records', 'search_evidence', 'search', 'read_memory_rules', 'list_jobs', 'read_artifact', 'list_my_tools'].includes(t)), 'hand_off'] : [...agent.allowed_tools, 'react', 'ask_owner', ...(isGroup ? ['hand_off'] : [])];
+      const tools = routerOnly ? [...agent.allowed_tools.filter((t) => ['read_records', 'search_evidence', 'search', 'read_memory_rules', 'list_jobs', 'read_artifact', 'list_my_tools'].includes(t)), 'hand_off'] : [...agent.allowed_tools, 'react', 'ask_owner', 'read_message', 'post_update', 'share_file', ...(isGroup ? ['hand_off'] : []), ...(agentId === 'coordinator' ? ['rename_assistant', 'disable_assistant', 'add_member', 'remove_member', 'propose_assistant'] : [])];
       const leadFrame = `You are ${agent.name}, the lead assistant in ClaudeBot, talking with the owner of the project "${wsName}". Reply briefly in plain, friendly English.
 ${clock} You are the owner's single point of contact; the owner never picks workflows, assistants or settings.
 Chat style: this is a chat, not a document. Write one to three short sentences (at most about 60 words) in plain prose: no headings, no bullet or numbered lists, no tables, no code blocks. The details live in the saved file or the decision card, which the owner sees as a card under your message; say what it is and the one thing that matters. When you request an approval, do not paste the draft text in your reply: say who it goes to and why in one sentence of at most 25 words, because the owner reads the exact text in the card.
@@ -213,6 +213,10 @@ How to work:
 - Anything that would send, publish, purchase, delete or change production needs the owner's approval: call request_approval with the exact content and target, then tell the owner it is waiting for their decision. Never perform such actions yourself. In this build an approved send or publish can only be written by the owner to a local outbox on this Mac (nothing is delivered to anyone); purchases, deletions and production changes have no executor at all. Say exactly that only when the owner asks how sending works; otherwise do not mention the outbox.
 - If the owner asks for something later or on a repeat ("tomorrow at 9", "every Monday"), use mcp__claudebot__create_schedule with the same kind/objective you would give create_job and one of at / cron / every_seconds; confirm the time back in plain words.
 - If the owner asks you to create or approve a new assistant (a teammate with its own job), that request is their confirmation: call propose_assistant with the full draft and owner_words (their exact words asking for it); pick a sensible name if they gave none. For a draft already waiting, pass its draft_id with owner_words. It exists once the tool says it was created; then give it the owner's work right away. Never claim it exists before that.
+- Files: when you save a document for the owner, it appears in the chat as a file card; to show an existing result here or in someone's direct chat, use share_file. Never paste whole documents into a message, and never say a file is in the chat unless a tool confirmed it.
+- Long work: post short progress lines with post_update (e.g. "3 of 8 saved"); your reply then states what was done, with the evidence (files, pages, confirmations).
+- If a message in your context says "[message continues …]", call read_message before relying on it; count files from the [file: …] lines.
+- The owner can do everything in the app through you: when they ask you (the lead) to rename, add, remove or switch off an assistant, or create one, use the matching tool with owner_words quoted from their message. Never tell the owner you cannot do something they can do in the app; if a tool refuses, say exactly what it said.
 - When you genuinely need the owner to choose before you can continue (a wording, an option, a direction), call ask_owner with the question and 2-4 short options instead of listing them in text.
 - To acknowledge the owner briefly you may add an emoji reaction to their message with react (one at most, only when it fits).
 - Never automate a login, MFA or CAPTCHA. If a page needs sign-in, tell the owner to take over the ClaudeBot browser.
@@ -229,6 +233,9 @@ ${agent.system_instructions ? 'Your standing instructions: ' + agent.system_inst
 How to work:
 - Do the work yourself with your own tools. Save text outputs with mcp__claudebot__write_artifact (path, title, kind, complete content) and name the file to the owner.
 - Never say work is finished unless a tool result confirms it. If something cannot be done, say exactly why.
+- Every file you save appears in the chat as a file card under your reply; to show an existing result here or in someone's direct chat use share_file. Never paste whole documents into a message, and never say a file is in the chat unless a tool confirmed it.
+- For long work, post short progress lines with post_update (e.g. "3 of 8 saved"), then reply with what was done and the evidence.
+- If a message in your context says "[message continues …]", call read_message before relying on it.
 - Anything that would send, publish, purchase, delete or change production needs the owner's approval${tools.includes('request_approval') ? ': call request_approval with the exact content and target' : '; you cannot request it yourself, so tell the owner what you would need'}. Never perform such actions yourself.
 - Never automate a login, MFA or CAPTCHA. Talk only about this owner's request.
 Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-…) to the owner.`;
@@ -251,6 +258,17 @@ Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-�
       if (!resume && !isGroup) { const t = chat.transcript(conv.id, { beforeSeq: msg.seq }); if (t) parts.push(`Conversation so far (your earlier session was closed; this is the durable record):\n${t}`); }
       if (!resume && isGroup && !routerOnly && deps.db.prepare("SELECT 1 FROM messages WHERE conversation_id = ? AND role = 'assistant' AND sender = ? AND seq < ? LIMIT 1").get(conv.id, agentId, msg.seq)) { const t = chat.transcript(conv.id, { beforeSeq: msg.seq, names: true }); if (t) parts.push(`The group so far (your earlier session was closed; this is the durable record, including what you said):\n${t}`); }
       if (updates) parts.push(`Updates on delegated work since your last reply:\n${updates}`);
+      { // Files the owner attached since this assistant last spoke: images are copied into this turn's folder so Claude can look at them
+        // (Read), and documents are named with their text copy's result id.
+        const lastMine = (deps.db.prepare("SELECT max(seq) AS s FROM messages WHERE conversation_id = ? AND role = 'assistant' AND sender = ? AND seq < ?").get(conv.id, agentId, msg.seq) as { s: number | null }).s ?? 0;
+        const atts = deps.db.prepare("SELECT m.artifact_id, a.path, a.title, a.job_id FROM messages m JOIN artifacts a ON a.id = m.artifact_id WHERE m.conversation_id = ? AND m.kind = 'attachment' AND m.seq > ? AND m.seq <= ? ORDER BY m.seq").all(conv.id, lastMine, msg.seq + 1) as Array<{ artifact_id: string; path: string; title: string; job_id: string }>;
+        const lines: string[] = [];
+        for (const a of atts) {
+          if (/\.(png|jpe?g|gif|webp)$/i.test(a.path) && fs.existsSync(a.path)) { const dir = path.join(ctx.workspace, 'attachments'); fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); const dest = path.join(dir, path.basename(a.path)); if (!fs.existsSync(dest)) fs.copyFileSync(a.path, dest); lines.push(`- image "${a.title}": open attachments/${path.basename(a.path)} with the Read tool to see it`); }
+          else { const copy = deps.db.prepare("SELECT id FROM artifacts WHERE job_id = ? AND kind = 'note' LIMIT 1").get(a.job_id) as { id: string } | undefined; lines.push(`- file "${a.title}" (result id ${a.artifact_id}${copy ? `; readable text copy: read_artifact ${copy.id}` : ''})`); }
+        }
+        if (lines.length) parts.push(`The owner attached:\n${lines.join('\n')}`);
+      }
       if (msg.kind === 'handoff') {
         const root = chat.message(String(inputs.chain_root ?? '')); const fromName = String(inputs.handoff_from_name ?? inputs.handoff_from ?? 'Another assistant');
         parts.push(`${root ? `The owner's message: ${root.content}\n` : ''}${fromName} handed this to you: ${String((msg.meta as { request?: string }).request ?? msg.content)}\nDo your part and reply in the group.`);
@@ -276,8 +294,8 @@ Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-�
         if (titleLine) { reply = reply.slice(titleLine[0].length).trim() || reply; if (!isGroup && (!conv.title || conv.title === chat.defaultTitle(conv.id))) chat.setTitle(conv.id, titleLine[1].replace(/[*_`]/g, '')); }
         chat.add({ conversation_id: conv.id, role: 'assistant', sender: agentId, content: reply, job_id: job.id, reply_to: msg.kind === 'handoff' ? msg.id : null, meta: { duration_ms: r.durationMs, session_resumed: resume, ...(router ? { router: true } : {}) } });
         // Files this reply saved appear in the chat under it, one file card each (preview, download), so "it's in the chat" is true.
-        for (const a of deps.db.prepare("SELECT id FROM artifacts WHERE job_id = ? AND kind = 'file' AND id NOT IN (SELECT artifact_id FROM messages WHERE artifact_id IS NOT NULL AND conversation_id = ?) ORDER BY created_at, rowid").all(job.id, conv.id) as Array<{ id: string }>)
-          chat.add({ conversation_id: conv.id, role: 'assistant', kind: 'result', sender: agentId, content: 'Saved a file', job_id: job.id, artifact_id: a.id, meta: { state: 'completed', file_verified: true, chat_file: true } });
+        for (const a of deps.db.prepare("SELECT id, title FROM artifacts WHERE job_id = ? AND kind = 'file' AND id NOT IN (SELECT artifact_id FROM messages WHERE artifact_id IS NOT NULL AND conversation_id = ?) ORDER BY created_at, rowid").all(job.id, conv.id) as Array<{ id: string; title: string }>)
+          chat.add({ conversation_id: conv.id, role: 'assistant', kind: 'result', sender: agentId, content: a.title || 'Saved a file', job_id: job.id, artifact_id: a.id, meta: { state: 'completed', file_verified: true, chat_file: true } });
         if (!routerOnly) await readUsageAfterTurn(deps, job, r.runtimeSessionId ?? store.get(job.id)?.session_ref ?? null, ctx.workspace, agentId);   // a router's session is already closed
         return { kind: 'ok', payload: { reply, summary: reply.slice(0, 200), turn_duration_ms: r.durationMs } };
       }

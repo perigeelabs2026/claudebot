@@ -28,7 +28,15 @@ export function readableJobs(db: DB, requesterId: string): Set<string> {
   return out;
 }
 
-export function readArtifact(db: DB, requesterId: string, artifactId: string, opts: { offset?: number; maxChars?: number } = {}): ArtifactAccess {
+/** The verified file behind a result this task may use (same scope and hash checks as readArtifact), for uploads and conversions. */
+export function artifactFile(db: DB, requesterId: string, artifactId: string): { ok: true; path: string; sha256: string; title: string; job_id: string; buf: Buffer } | { ok: false; reason: string } {
+  const r = locate(db, requesterId, artifactId); if (!r.ok) return r;
+  const buf = fs.readFileSync(r.real); const sha = crypto.createHash('sha256').update(buf).digest('hex');
+  if (r.row.sha256 && sha !== r.row.sha256) return { ok: false, reason: `the file for result ${artifactId} changed after it was saved (hash mismatch); it was not used` };
+  return { ok: true, path: r.real, sha256: sha, title: r.row.title, job_id: r.row.job_id, buf };
+}
+
+function locate(db: DB, requesterId: string, artifactId: string): { ok: true; real: string; row: { id: string; job_id: string; path: string | null; sha256: string | null; title: string } } | { ok: false; reason: string } {
   const row = db.prepare('SELECT id, job_id, path, sha256, title FROM artifacts WHERE id = ?').get(artifactId) as { id: string; job_id: string; path: string | null; sha256: string | null; title: string } | undefined;
   if (!row) return { ok: false, reason: `no result with id ${artifactId}` };
   if (!readableJobs(db, requesterId).has(row.job_id)) return { ok: false, reason: `result ${artifactId} belongs to a task outside this conversation and its dependencies; access refused` };
@@ -38,9 +46,11 @@ export function readArtifact(db: DB, requesterId: string, artifactId: string, op
   let real: string; let root: string;
   try { real = fs.realpathSync(row.path); root = fs.realpathSync(ws.root_path); } catch { return { ok: false, reason: `the file for result ${artifactId} is missing (${path.basename(row.path)})` }; }
   if (!(real === root || real.startsWith(root + path.sep))) return { ok: false, reason: `the file for result ${artifactId} resolves outside its project folder; access refused` };
-  const buf = fs.readFileSync(real);
-  const sha = crypto.createHash('sha256').update(buf).digest('hex');
-  if (row.sha256 && sha !== row.sha256) return { ok: false, reason: `the file for result ${artifactId} changed after it was saved (hash mismatch); it was not returned` };
+  return { ok: true, real, row };
+}
+
+export function readArtifact(db: DB, requesterId: string, artifactId: string, opts: { offset?: number; maxChars?: number } = {}): ArtifactAccess {
+  const f = artifactFile(db, requesterId, artifactId); if (!f.ok) return f; const buf = f.buf; const sha = f.sha256; const real = f.path; const row = { title: f.title, job_id: f.job_id };
   const text = buf.toString('utf8'); const offset = Math.max(0, Math.min(text.length, Math.floor(opts.offset ?? 0))); const max = Math.max(1000, Math.min(200_000, Math.floor(opts.maxChars ?? 60_000)));
   const content = text.slice(offset, offset + max); const next = offset + content.length < text.length ? offset + content.length : null;
   return { ok: true, content, total_chars: text.length, offset, next_offset: next, sha256: sha, file: path.basename(real), title: row.title, job_id: row.job_id };
