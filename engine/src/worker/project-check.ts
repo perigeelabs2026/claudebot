@@ -40,7 +40,7 @@ export const SANDBOX_PROFILE = `(version 1)
 (allow default)
 (deny network-outbound)
 (deny network-outbound (remote unix-socket))
-(deny file-read* (subpath (param "CB_HOME")) (subpath (param "OPENCLAW_HOME")) (subpath (param "CLAUDE_HOME")) (subpath (param "SSH_HOME")) (subpath (param "KEYCHAINS")) (subpath (param "CLAUDE_JSON")))
+(deny file-read* (subpath (param "AOS_HOME")) (subpath (param "OPENCLAW_HOME")) (subpath (param "CLAUDE_HOME")) (subpath (param "SSH_HOME")) (subpath (param "KEYCHAINS")) (subpath (param "CLAUDE_JSON")))
 (deny file-write*)
 (allow file-write* (subpath (param "REPO")) (subpath "/private/tmp") (subpath "/private/var/folders") (subpath (param "NPM_CACHE")) (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr") (literal "/dev/tty"))`;
 /** Wrap a command in the check sandbox (macOS sandbox-exec). */

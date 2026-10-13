@@ -30,6 +30,7 @@ const created = (r: { data?: unknown }) => (r.data as { id: string }).id;
 
 test('coordination: depth and child budgets are enforced by the engine and refusals are audited', async () => {
   const s = setup();
+  new Settings(s.db).set('worker_limit', 4, 'owner'); // the default scales with the machine; small CI runners would hit the waiting-parent guard first
   const spec = created(await s.broker.call(s.leadCap, 'create_job', { kind: 'research.report', objective: 'Find three facts' }));
   assert.equal(depthOf(s.db, spec), 1);
   s.store.lease({ owner: 'w', leaseSeconds: 60 }); s.db.prepare("UPDATE jobs SET state = 'running' WHERE id = ?").run(spec);
