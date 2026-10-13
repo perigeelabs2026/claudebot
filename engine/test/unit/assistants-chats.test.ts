@@ -413,3 +413,9 @@ test('owner can rename and re-describe a built-in assistant, and the seed keeps 
   let a = s.defs.getAgent('researcher')!; assert.equal(a.name, 'Scout'); assert.equal(a.purpose, 'Finds things.'); assert.equal(a.role, 'Finds sources'); assert.equal(a.color_index, 4); assert.deepEqual(a.prohibited_actions, ['never guess']);
   s.defs.seedSystemDefaults(); a = s.defs.getAgent('researcher')!; assert.equal(a.name, 'Scout', 'the seed does not undo an owner rename'); assert.equal(a.purpose, 'Finds things.');
 });
+
+test('files an assistant saves during a chat reply appear in that chat as file cards, once each (owner: "the file is not in the chat")', () => {
+  const run = fs.readFileSync(path.resolve(import.meta.dirname, '..', '..', 'src/worker/run.ts'), 'utf8');
+  assert.match(run, /chat\.add\(\{ conversation_id: conv\.id, role: 'assistant', kind: 'result', sender: agentId, content: 'Saved a file', job_id: job\.id, artifact_id: a\.id/);
+  assert.match(run, /id NOT IN \(SELECT artifact_id FROM messages WHERE artifact_id IS NOT NULL AND conversation_id = \?\)/, 'never twice');
+});

@@ -15,6 +15,7 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Assistants can open zip and tar archives you give them: files are extracted into a new folder inside the task. Links, paths that escape the folder, and oversized archives are refused. Documents and PDFs also get text copies the assistants can read.
 
 ### Fixed
+- Files an assistant saves while replying in chat now appear in the conversation as result cards.
 - Changing the model of a built-in assistant now saves (it was silently ignored).
 - "Needs your review" no longer crashes when opened.
 - Approval cards say exactly what will run: browser actions show the page, the action and the address; only real emails are labelled "Send email" and offer Always allow; long text wraps, with a Details section.

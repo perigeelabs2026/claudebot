@@ -23,6 +23,9 @@ function rowToWorkflow(r: Record<string, unknown>): WorkflowDef {
   return { id: String(r.id), name: String(r.name), description: String(r.description ?? ''), default_agent: String(r.default_agent), stages: P(String(r.stages), []), contract: P(String(r.contract), {}), inputs: P(String(r.inputs), []), is_system: !!r.is_system, enabled: !!r.enabled, template_pack: (r.template_pack as string) ?? null, created_at: String(r.created_at), updated_at: String(r.updated_at) };
 }
 
+/** Default model of each built-in assistant. */
+export const SYSTEM_MODEL: Record<string, string> = { coordinator: 'claude-haiku-5-5', researcher: 'claude-opus-5-5', reviewer: 'claude-sonnet-5-5', browser_operator: 'claude-sonnet-5-5', builder: 'claude-sonnet-5-5' };
+
 export class Definitions {
   private db: DB;
   constructor(db: DB) { this.db = db; }
@@ -38,7 +41,9 @@ export class Definitions {
       a += Number(r.changes);
       // Tools and instructions are owner-editable on system agents, so the seed refreshes them only while the owner has never edited that agent.
       const edited = this.db.prepare("SELECT 1 FROM job_events WHERE type = 'agent.updated' AND actor = 'owner' AND json_extract(detail, '$.id') = ? LIMIT 1").get(s.id);
-      if (!edited && s.model) this.db.prepare('UPDATE agent_definitions SET model = ? WHERE id = ?').run(s.model, s.id);   // per-assistant model defaults (templates/core.ts); owner edits are kept
+      // Model defaults (owner direction 2026-10-13): the lead on Haiku, deep research on Opus, everyone else on Sonnet. Only while the
+      // owner has never edited the assistant and it still has the old column default; an owner's choice is never replaced.
+      if (!edited) this.db.prepare("UPDATE agent_definitions SET model = ? WHERE id = ? AND model = 'claude-opus-5-5'").run(SYSTEM_MODEL[s.id] ?? 'claude-sonnet-5-5', s.id);
       if (!edited) this.db.prepare('UPDATE agent_definitions SET name = ?, purpose = ?, prohibited_actions = ?, approval_rules = ? WHERE id = ?').run(s.name, s.purpose, J(s.prohibited_actions), J(s.approval_rules), s.id);   /* the owner's wording wins once they have edited this assistant */
       if (!edited) { const u = this.db.prepare('UPDATE agent_definitions SET allowed_tools = ?, system_instructions = ?, updated_at = ? WHERE id = ? AND (allowed_tools != ? OR system_instructions != ?)').run(J(s.allowed_tools), s.system_instructions, t, s.id, J(s.allowed_tools), s.system_instructions); if (Number(u.changes)) this.audit('system', 'agent.seed_refreshed', { id: s.id, tools: s.allowed_tools }); }
     }

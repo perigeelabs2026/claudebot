@@ -275,6 +275,9 @@ Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-�
         const titleLine = reply.match(/^\s*Title:\s*(.{3,80}?)\s*(?:\n|$)/i);
         if (titleLine) { reply = reply.slice(titleLine[0].length).trim() || reply; if (!isGroup && (!conv.title || conv.title === chat.defaultTitle(conv.id))) chat.setTitle(conv.id, titleLine[1].replace(/[*_`]/g, '')); }
         chat.add({ conversation_id: conv.id, role: 'assistant', sender: agentId, content: reply, job_id: job.id, reply_to: msg.kind === 'handoff' ? msg.id : null, meta: { duration_ms: r.durationMs, session_resumed: resume, ...(router ? { router: true } : {}) } });
+        // Files this reply saved appear in the chat under it, one file card each (preview, download), so "it's in the chat" is true.
+        for (const a of deps.db.prepare("SELECT id FROM artifacts WHERE job_id = ? AND kind = 'file' AND id NOT IN (SELECT artifact_id FROM messages WHERE artifact_id IS NOT NULL AND conversation_id = ?) ORDER BY created_at, rowid").all(job.id, conv.id) as Array<{ id: string }>)
+          chat.add({ conversation_id: conv.id, role: 'assistant', kind: 'result', sender: agentId, content: 'Saved a file', job_id: job.id, artifact_id: a.id, meta: { state: 'completed', file_verified: true, chat_file: true } });
         if (!routerOnly) await readUsageAfterTurn(deps, job, r.runtimeSessionId ?? store.get(job.id)?.session_ref ?? null, ctx.workspace, agentId);   // a router's session is already closed
         return { kind: 'ok', payload: { reply, summary: reply.slice(0, 200), turn_duration_ms: r.durationMs } };
       }
