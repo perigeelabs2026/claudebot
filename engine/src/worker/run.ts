@@ -13,6 +13,7 @@ import type { ModelRuntime, TurnResult } from '../runtime/types.ts';
 import { renderPrompt, type StageDef } from '../workflows/index.ts';
 import { Definitions } from '../model/definitions.ts';
 import { DETERMINISTIC } from './deterministic.ts';
+import { plainForOwner } from '../model/wording.ts';
 import type { Logger } from '../log.ts';
 import { issueCapability, revokeCapability, mcpJson } from '../broker/capabilities.ts';
 import { ChatStore, CHAT_WORKFLOW } from '../chat/store.ts';
@@ -324,7 +325,7 @@ Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-�
           const needsOwner = ['login', 'captcha', 'mfa', 'bot_check'].includes(od.block_kind ?? '') && od.site;
           if (deps.runtime.closeSession && after.session_ref) { try { await deps.runtime.closeSession(after.session_ref); store.event(job.id, ctx.actor, 'session.closed', { session_ref: after.session_ref, reason: 'blocked' }); store.patch(job.id, { session_ref: null, runtime_session_id: null }); } catch { /* best effort */ } }
           if (needsOwner) return { kind: 'wait_auth', identity: `browser:${od.site}`, operatorAction: `${od.site} ${od.block_kind === 'captcha' ? 'showed a CAPTCHA' : od.block_kind === 'mfa' ? 'asked for a verification code' : od.block_kind === 'bot_check' ? 'showed a bot check' : 'needs a sign-in'}. Take over the ClaudeBot browser, finish it yourself, then click "I'm done"; the task resumes from its saved progress. ${od.reason ?? ''}`.trim() };
-          return { kind: 'fail', reason: `blocked: ${od.reason ?? 'the source could not be read'}`, operatorAction: od.next_action ?? `The requested work could not be done (${od.block_kind ?? 'blocked'}): ${od.reason ?? ''}. ${od.remaining ? 'Still unavailable: ' + od.remaining + '. ' : ''}Try again later or give direction.`, code: 'BLOCKED' };
+          return { kind: 'fail', reason: `blocked: ${plainForOwner(od.reason ?? 'the source could not be read')}`, operatorAction: od.next_action ?? `The requested work could not be done (${od.block_kind ?? 'blocked'}): ${od.reason ?? ''}. ${od.remaining ? 'Still unavailable: ' + od.remaining + '. ' : ''}Try again later or give direction.`, code: 'BLOCKED' };
         }
         await readUsageAfterTurn(deps, job, r.runtimeSessionId ?? after.session_ref ?? null, turnCwd, agentId);
         return { kind: 'ok', payload: { summary, turn_duration_ms: r.durationMs, outcome: after.outcome ?? null, remaining: od.remaining ?? null } };

@@ -127,6 +127,7 @@ ClaudeBot is built in the open and we want it to be yours too. Bug reports, idea
 - Read [CONTRIBUTING.md](CONTRIBUTING.md) to get started.
 - Please follow our [Code of Conduct](CODE_OF_CONDUCT.md).
 - Report security issues privately as described in [SECURITY.md](SECURITY.md).
+- See what changed in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

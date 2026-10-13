@@ -1,6 +1,6 @@
 // ClaudeBot console: chat-first, hash-routed single page over /api/*, live via SSE. Every number on screen comes from live engine state; nothing is invented.
 import { mountOffice } from './office.js';
-import { voice, initVoice, talk, voiceBar, dictate, liveVoice } from './voice.js';
+import { voice, initVoice, talk, voiceBar, dictate, liveVoice, stopDictationForSend } from './voice.js';
 import { mountPixelOffice } from './pixel-office.js';
 // Never print "null" on screen: replaceChildren/append/prepend skip empty slots, as h() already does.
 for (const fn of ['replaceChildren', 'append', 'prepend']) { const orig = Element.prototype[fn]; Element.prototype[fn] = function (...kids) { return orig.apply(this, kids.filter((k) => k !== null && k !== undefined && k !== false)); }; }
@@ -589,7 +589,7 @@ function composer2({ placeholder, onSend, hint, members = [], isGroup = false, d
   const ta = h('textarea', { id: 'chat-input', rows: '2', placeholder, 'aria-label': 'Message', oninput: (e) => { try { sessionStorage.setItem(draftKey, e.target.value); } catch {} e.target.style.height = 'auto'; e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`; } }, (() => { try { return sessionStorage.getItem(draftKey) || ''; } catch { return ''; } })());
   const pop = h('div', { class: 'mention-pop', role: 'listbox', hidden: true });
   const sendBtn = h('button', { class: 'send', 'aria-label': 'Send', title: 'Send (⌘↩)' }, '→');
-  const send = async () => { const t = ta.value.trim(); if (!t) return; sendBtn.disabled = true; try { const ids = [...chosen].filter((id) => new RegExp(`@${(id === 'everyone' ? 'everyone' : (members.find((mm) => mm.agent_id === id)?.name ?? id)).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w])`, 'i').test(t)); await onSend(t, { mentions: ids, reply_to: replyTo ? replyTo.id : null }); ta.value = ''; chosen.clear(); replyTo = null; try { sessionStorage.removeItem(draftKey); } catch {} } catch (e) { notify(e.message, true); } finally { syncSend(); } };
+  const send = async () => { const t = ta.value.trim(); if (!t) return; stopDictationForSend(); sendBtn.disabled = true; try { const ids = [...chosen].filter((id) => new RegExp(`@${(id === 'everyone' ? 'everyone' : (members.find((mm) => mm.agent_id === id)?.name ?? id)).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w])`, 'i').test(t)); await onSend(t, { mentions: ids, reply_to: replyTo ? replyTo.id : null }); ta.value = ''; chosen.clear(); replyTo = null; try { sessionStorage.removeItem(draftKey); } catch {} } catch (e) { notify(e.message, true); } finally { syncSend(); } };
   sendBtn.onclick = send;
   const syncSend = () => { sendBtn.disabled = !ta.value.trim(); }; ta.addEventListener('input', syncSend); syncSend();   /* Send looks active only with something to send */
   ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); } else if (e.key === 'Escape' && onEscape && pop.hidden && !replyTo) { e.preventDefault(); onEscape(); } });

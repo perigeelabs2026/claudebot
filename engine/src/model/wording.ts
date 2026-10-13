@@ -67,3 +67,10 @@ export function eventWording(type: string, detail: Record<string, unknown>): str
     default: return null;
   }
 }
+
+/** Blocked or failed text the owner reads: drop sentences that talk about internals (tools, shells, allow-lists, sub-agents…). */
+export function plainForOwner(text: string): string {
+  const internal = /\b(shell|allow-?list(?:ed)?|read tool|sub-?agents?|mcp|broker|capabilit(?:y|ies)|tool call|run_allowlisted|extract_archive|stdout|stderr|exit code)\b/i;
+  const sentences = String(text).split(/(?<=[.!?])\s+/).filter((x) => x.trim() && !internal.test(x));
+  return sentences.join(' ').trim() || 'It could not open the files it needed.';
+}

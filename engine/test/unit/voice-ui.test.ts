@@ -111,3 +111,22 @@ test('voice UI (mocked bridge): live voice ends a turn after 2 s of quiet, not m
   assert.match(sw, /self\.committed = text   \/\/ the segment ended by itself: keep its words and listen on/, 'a segment macOS ends by itself is chained, not delivered');
   assert.match(sw, /withTimeInterval: 900/); assert.doesNotMatch(sw, /withTimeInterval: 60, repeats: false/);
 });
+
+test('voice UI (mocked bridge): pressing Send while dictating stops listening; late words never refill the box', async () => {
+  const h = await harness({ mode: 'ptt' }); h.mod.dictate(); const sid = h.startSid(); h.ev({ event: 'listening', sid });
+  h.ev({ event: 'partial', text: 'Send this now', sid }); assert.equal(h.composer.value, 'Send this now');
+  h.composer.value = '';   // the composer clears the box when the message is sent
+  h.mod.stopDictationForSend();
+  assert.ok(h.posted.some((m) => m.type === 'voice.end'), 'the microphone is told to stop');
+  h.ev({ event: 'partial', text: 'Send this now', sid }); h.ev({ event: 'final', text: 'Send this now.', sid });
+  assert.equal(h.composer.value, '', 'nothing comes back into the box after Send');
+});
+
+test('voice UI (mocked bridge): replies are never read aloud after dictation; voice mode is never restored from a reload', async () => {
+  const h = await harness({ mode: 'conversation' });   // a stored "conversation" from an earlier session is ignored
+  assert.equal(h.voice.mode, 'ptt', 'the app always opens in plain dictation');
+  h.mod.dictate(); const sid = h.startSid(); h.ev({ event: 'listening', sid }); h.ev({ event: 'partial', text: 'Book the call', sid });
+  h.ev({ event: 'final', text: 'Book the call.', sid }); await new Promise((r) => setTimeout(r, 30));
+  assert.equal(h.posted.filter((m) => m.type === 'voice.speak').length, 0, 'no spoken reply after a dictated message');
+  assert.equal(h.posted.filter((m) => m.type === 'voice.start').length, 1, 'no new voice session starts by itself');
+});

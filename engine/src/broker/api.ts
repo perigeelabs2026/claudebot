@@ -1,3 +1,4 @@
+import { safeExtract, sourceAllowed } from './archive.ts';
 import { matchPermission } from '../approvals/permissions.ts';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -232,6 +233,16 @@ export class BrokerApi {
         db.prepare('INSERT INTO artifacts(id, job_id, stage_name, kind, path, sha256, title, provenance, created_at) VALUES (?,?,?,?,?,?,?,?,?)').run(id, cap.job_id, job?.stage_name ?? 'claude', 'file', file, sha, `${r.label} (${r.ok ? 'passed' : 'failed'})`, JSON.stringify({ actor, command: r.label, exit: r.exit, timed_out: r.timedOut }), now());
         this.store.event(cap.job_id, actor, 'command.ran', { command: r.label, cwd: repo, exit: r.exit, timed_out: r.timedOut, artifact_id: id });
         return { ok: true, text: `${r.label}: ${r.ok ? 'passed' : `FAILED (exit ${r.exit ?? 'timeout'})`}. Output saved as ${id}.\n\n${r.output.slice(-6000)}`, data: { passed: r.ok, artifact_id: id } };
+      }
+      case 'extract_archive': {
+        const job = this.store.get(cap.job_id); const src = String(a.path ?? '').trim(); if (!src) return { ok: false, text: 'path is required' };
+        const conv = job?.conversation_id ?? null;
+        const ownerText = [job?.objective ?? '', job?.inputs ?? '', ...(conv ? (this.db.prepare("SELECT content FROM messages WHERE conversation_id = ? AND role = 'owner'").all(conv) as Array<{ content: string }>).map((m) => m.content) : [])].join('\n');
+        const abs = path.isAbsolute(src) ? src : path.resolve(cap.workspace, src);
+        if (!sourceAllowed(abs, cap.workspace, ownerText) && !sourceAllowed(src, cap.workspace, ownerText)) return { ok: false, text: 'Only archives the owner gave you can be opened: a path they named in this request, or a file in the task folder.' };
+        try { const r = safeExtract(abs, cap.workspace); this.store.event(cap.job_id, actor, 'archive.extracted', { source: path.basename(abs), folder: r.folder, files: r.files.length, skipped: r.skipped.length });
+          return { ok: true, text: `Extracted ${r.files.length} file(s) into ${r.folder}.${r.skipped.length ? ` Skipped ${r.skipped.length} link(s).` : ''}\n${r.files.slice(0, 400).map((f) => `- ${f.path} (${f.bytes} bytes)${f.text_copy ? ` · text: ${f.text_copy}` : ''}`).join('\n')}`, data: r };
+        } catch (e) { return { ok: false, text: `The archive could not be opened safely: ${(e as Error).message}.` }; }
       }
       case 'run_allowlisted': { const cmd = String(a.command).trim(); if (!COMMAND_ALLOWLIST.some((re) => re.test(cmd))) { this.store.event(cap.job_id, actor, 'command.refused', { command: cmd.slice(0, 200) }); return { ok: false, text: 'command is not on the allowlist (ls, wc -l, head -n N, cat *.md|txt|json|csv); refused and audited' }; } const [bin, ...rest] = cmd.split(/\s+/); const r = await runProbe(bin, rest, { cwd: cap.workspace, timeoutMs: 20_000, label: 'run_allowlisted', maxBuffer: 1024 * 1024, registryDir: path.join(this.cfg.runDir, 'probes') }); this.store.event(cap.job_id, actor, 'command.ran', { command: cmd, exit: r.code }); return { ok: r.ok, text: (r.stdout + r.stderr).slice(0, 20_000) }; }
       default: return { ok: false, text: `unknown tool ${tool}` };

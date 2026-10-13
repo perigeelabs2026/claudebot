@@ -2,6 +2,7 @@
  * Conversations with the lead assistant. Every message is durable; every delegation, result and decision message is
  * derived from a real job/approval row (never invented) and posted exactly once per (job, state) or approval.
  */
+import { plainForOwner } from '../model/wording.ts';
 import { cancelDescendants } from '../coord/delegation.ts';
 import { Settings } from '../model/settings.ts';
 import { ApprovalStore } from '../approvals/store.ts';
@@ -389,7 +390,7 @@ export class ChatStore {
             const od = (() => { try { return JSON.parse(j.outcome_detail || '{}') as { remaining?: string; reason?: string }; } catch { return {}; } })(); meta.outcome = j.outcome;
             content = j.outcome === 'partial' ? `${who(j)} finished part of: ${taskTitle(j.objective)}. Partial result to review: ${main.title}${verified ? ' (file verified)' : ''}. Still unavailable: ${od.remaining ?? od.reason ?? 'see the file'}.` : `${who(j)} finished: ${taskTitle(j.objective)}. Ready to review: ${main.title}${verified ? ' (file verified)' : exists ? ' (file changed since it was saved)' : ''}.`;
           } else content = `${who(j)} finished: ${taskTitle(j.objective)}.`;
-        } else if (j.state === 'failed_terminal' && j.blocker_code === 'BLOCKED') { meta.outcome = 'blocked'; content = `${who(j)} was blocked on: ${taskTitle(j.objective)}. ${j.failure_detail ? j.failure_detail.replace(/^blocked: /, '') : ''} ${j.operator_action ?? ''}`.trim(); }
+        } else if (j.state === 'failed_terminal' && j.blocker_code === 'BLOCKED') { meta.outcome = 'blocked'; content = `${who(j)} was blocked on: ${taskTitle(j.objective)}. ${j.failure_detail ? plainForOwner(j.failure_detail.replace(/^blocked: /, '')) : ''} ${j.operator_action ?? ''}`.trim(); }
         else if (j.state === 'failed_terminal') content = `${who(j)} could not finish: ${taskTitle(j.objective)}. ${j.failure_detail ? 'Reason: ' + j.failure_detail.slice(0, 300) + '.' : ''} ${j.operator_action ?? ''}`.trim();
         else if (j.state === 'cancelled') content = `Stopped: ${taskTitle(j.objective)}. Saved progress and any files are kept.`;
         else content = `${who(j)} is paused on "${taskTitle(j.objective)}": ${plainState(j)}. ${j.operator_action ?? ''}`.trim();

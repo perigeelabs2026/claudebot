@@ -8,7 +8,7 @@ const ls = { get: (k, d) => { try { return localStorage.getItem(k) ?? d; } catch
 export const voice = {
   state: 'off',            // off | starting | listening | transcribing | thinking | speaking
   active: false,           // the owner pressed Talk and has not pressed End voice
-  mode: ls.get('claudebot.voice.mode', 'ptt'),   // ptt | conversation
+  mode: 'ptt',   // ptt | conversation — always starts as plain dictation; live voice only when the owner presses it, never remembered across reloads
   onDevice: null, notice: '', caps: null, awaitingJob: null, partial: '',
   sendOnFinal: false,      // true only when the owner pressed Done, or chose hands-free conversation mode
   lastFinal: '',           // the last transcript left in the message box (so pressing Send still records it as spoken)
@@ -35,6 +35,11 @@ export function talk() {
   post({ type: 'voice.start', locale: 'en-US', allowServer: ls.get('claudebot.voice.serverConsent', '0') === '1', silence: voice.mode === 'ptt' ? 60 : 2.0, sid: voice.sid });
 }
 export function done() { if (voice.state === 'listening' && voice.sid) { voice.sendOnFinal = true; post({ type: 'voice.finish', sid: voice.sid }); } }
+/** The owner pressed Send while dictating: stop listening now and forget the session, so no late words refill the box. */
+export function stopDictationForSend() {
+  if (voice.mode !== 'ptt' || !voice.active) { voice.base = ''; return; }
+  post({ type: 'voice.end' }); voice.sid = ''; voice.base = ''; voice.partial = ''; voice.lastFinal = ''; voice.active = false; voice.sendOnFinal = false; retire(); set('off', '');
+}
 export function stopSpeaking() { post({ type: 'voice.stopSpeaking' }); }
 export function endVoice() { voice.active = false; voice.awaitingJob = null; retire(); post({ type: 'voice.end' }); set('off', 'Voice ended. The microphone is off.'); }
 /** Acceptance fixture (test-only, enabled by a flag file the app never creates): the same session flow fed from a recorded file. */
@@ -43,7 +48,7 @@ window.claudebotVoiceFixture = (o) => {
   voice.active = true; voice.partial = ''; voice.sendOnFinal = !!o.done || voice.mode === 'conversation'; voice.sid = newSid(); voice.fixture = true; set('starting', '');
   post({ type: 'voice.startFixture', file: String(o.file), sid: voice.sid });
 };
-export function setMode(m) { voice.mode = m; ls.set('claudebot.voice.mode', m); render(); }
+export function setMode(m) { voice.mode = m; try { localStorage.removeItem('claudebot.voice.mode'); } catch {} render(); }
 
 function composer() { return document.getElementById('chat-input'); }
 function putInComposer(text) { const ta = composer(); if (ta) { ta.value = text; ta.dispatchEvent(new Event('input')); } }
@@ -119,9 +124,9 @@ async function awaitReply(conv, jobId) {
     await new Promise((r) => setTimeout(r, 2000));
     let d; try { d = await hooks.api(`/api/conversations/${conv}`); } catch { continue; }
     const reply = d.messages.find((m) => m.role === 'assistant' && m.job_id === jobId);
-    if (reply) { voice.awaitingJob = null; if (voice.active) speak(reply.content); else set('off'); return; }
+    if (reply) { voice.awaitingJob = null; if (voice.active && voice.mode === 'conversation') speak(reply.content); else { voice.active = false; set('off'); } return; }   /* replies are read aloud only in live voice */
     const status = d.messages.find((m) => m.kind === 'status' && m.job_id === jobId);
-    if (status) { voice.awaitingJob = null; if (voice.active) speak(status.content); else set('off'); return; }
+    if (status) { voice.awaitingJob = null; if (voice.active && voice.mode === 'conversation') speak(status.content); else { voice.active = false; set('off'); } return; }
   }
   if (voice.awaitingJob === jobId) { voice.awaitingJob = null; set('off', 'The reply is taking a while. It will appear in the chat.'); }
 }
