@@ -151,3 +151,8 @@ test('approval cards say what will actually run: "Send email" only for a real em
   assert.match(app, /!dv\.email \? null : h\('button', \{ class: 'btn2', title: `Allow/);
   const css = ui('theme.css'); assert.match(css, /\.card2\.approval, \.card2\.approval \* \{ overflow-wrap: anywhere;/);
 });
+
+test('a file an assistant saved renders as a file card, not as a text bubble (owner: "I don\'t see any files")', () => {
+  const app = ui('app.js'); assert.match(app, /if \(m\.role === 'assistant' && !\(m\.kind === 'result' && m\.artifact\)\) \{/);
+  assert.ok(app.indexOf("if (m.role === 'assistant' && !(m.kind === 'result' && m.artifact))") < app.indexOf("if (m.kind === 'result' && m.artifact) {   // a saved file"));
+});

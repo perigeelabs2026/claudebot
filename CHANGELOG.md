@@ -11,6 +11,9 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Existing installs: run `claudebot update` to pick up these settings.
 
 ### Added
+- **Assistants keep improving.** Memory lives in a Markdown vault you can open in Obsidian (`~/Documents/ClaudeBot Memory`): a Team note, an Owner note, one note per assistant and daily Lessons. Every reply reads them in full; assistants remember your preferences and corrections, and forget things when you ask. Edit an assistant's memory in Edit assistant › Memory, or open it in Obsidian. Secrets are refused.
+- **Telegram is a full command channel.** Decisions arrive with Allow once / Deny buttons and show exactly what will run (including the full email). Deciding in the app or on Telegram closes the other side. New commands: /help, /status, /stop <n>, /approvals. Only the lead posts on Telegram, files arrive as documents, and other chats are refused.
+- Create and rename groups: right-click a group to rename it, and edit its name, purpose and members in the Members tab. Every member reads the group's purpose. The lead can create and edit groups when you ask.
 - Paste images with ⌘V, drag and drop files, and attach several at once. PDFs, Word documents and images up to 10 MB are accepted, with thumbnails and PDF previews.
 - Assistants can turn their writing into real Word (.docx) and PDF documents.
 - Export a whole conversation from the conversation menu or with the `/export` command.
@@ -20,6 +23,8 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Assistants can open zip and tar archives you give them: files are extracted into a new folder inside the task. Links, paths that escape the folder, and oversized archives are refused. Documents and PDFs also get text copies the assistants can read.
 
 ### Fixed
+- Files saved by assistants now show as file cards in the chat instead of plain lines.
+- Avatar initials follow the assistant's current name everywhere and update live.
 - Long messages are never cut off for assistants: they can read the rest on demand.
 - Approved browser actions now actually happen: allowing a click or form step (in the app or Telegram) resumes the assistant once instead of the approval being used up by the outbox.
 - Files an assistant saves while replying in chat now appear in the conversation as result cards.

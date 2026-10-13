@@ -467,3 +467,17 @@ test('mentions: first names route ("@Jude", "Jude, …"); long messages are neve
   const rm3 = s.chat.send(g.id, '@coordinator remove Jude from this group', defs).job;
   assert.match((await s.broker.call(cap(rm3, ['remove_member']), 'remove_member', { assistant: 'Jude', owner_words: 'remove Jude from this group' })).text, /at least 2/);
 });
+
+test('groups: the lead creates and renames groups on the owner\'s words; purpose reaches members; initials follow the display name', async () => {
+  const s = setup(); const c = s.chat.create({ workspace_id: s.ws.id });
+  const t1 = s.chat.send(c.id, 'Abdul, create a group called Job Hunt with Jude and Oscar', s.defs).job;
+  assert.equal((await s.broker.call(cap(t1, ['create_group']), 'create_group', { name: 'Job Hunt', members: ['researcher', 'reviewer'], owner_words: 'make a group' })).ok, false);
+  const r = await s.broker.call(cap(t1, ['create_group']), 'create_group', { name: 'Job Hunt', members: ['researcher', 'reviewer'], purpose: 'Find and apply to remote roles', owner_words: 'create a group called Job Hunt' });
+  assert.equal(r.ok, true, r.text); const gid = (r.data as { conversation_id: string }).conversation_id; const g = s.chat.get(gid)!;
+  assert.equal(g.title, 'Job Hunt'); assert.deepEqual(s.chat.members(gid).map((m) => m.agent_id).sort(), ['coordinator', 'researcher', 'reviewer']);
+  const t2 = s.chat.send(c.id, 'rename Job Hunt to Applications', s.defs).job;
+  assert.equal((await s.broker.call(cap(t2, ['edit_group']), 'edit_group', { conversation: gid, name: 'Applications', owner_words: 'rename Job Hunt to Applications' })).ok, true); assert.equal(s.chat.get(gid)!.title, 'Applications');
+  const app = fs.readFileSync(path.resolve(import.meta.dirname, '..', '..', 'ui/app.js'), 'utf8');
+  const initials = new Function(`${app.match(/const initials = [^\n]+/)![0]}; return initials;`)() as (n: string) => string;
+  assert.equal(initials('Abdul El-Sayed'), 'AE'); assert.equal(initials('Jude (Job Applicator)'), 'J'); assert.equal(initials('Roger'), 'R'); assert.ok(!/'CS'/.test(app), 'no hard-coded initials');
+});

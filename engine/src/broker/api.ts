@@ -19,6 +19,7 @@ import { TOOL_SCHEMAS } from './capabilities.ts';
 import { parseSnapshot, decide, approvalContent, type ActRequest, type SnapshotElement } from '../browser/act-policy.ts';
 import crypto from 'node:crypto';
 import { markdownToHtml, renderDocument } from '../documents/render.ts';
+import { Vault } from '../memory/vault.ts';
 import { taskTitle } from '../model/wording.ts';
 import type { Capability } from './capabilities.ts';
 import type { EngineConfig } from '../config.ts';
@@ -186,6 +187,19 @@ export class BrokerApi {
         this.store.event(cap.job_id, actor, 'document.rendered', { title, files: ids, from });
         return { ok: true, text: `Saved ${ids.map((x) => `${x.format.toUpperCase()} ${x.id}`).join(' and ')} for "${title}". They appear as file cards under your reply.`, data: { files: ids } };
       }
+      case 'remember': case 'forget': {   // the memory vault (Team / Owner / own note); see memory/vault.ts
+        const defs = new Definitions(db); const me = defs.getAgent(cap.role); if (!me) return { ok: false, text: 'unknown assistant' };
+        const scope = (['team', 'owner', 'self'].includes(String(a.scope)) ? String(a.scope) : 'self') as 'team' | 'owner' | 'self';
+        let target = me;
+        if (a.assistant && cap.role === 'coordinator') { const k = String(a.assistant).toLowerCase(); const t2 = defs.listAgents({ includeDisabled: true }).find((x) => x.id.toLowerCase() === k || x.name.toLowerCase() === k || x.name.toLowerCase().split(/[\s(]+/)[0] === k); if (!t2) return { ok: false, text: `no assistant "${a.assistant}"` }; target = t2; }
+        if ((scope === 'team' || target.id !== me.id) && cap.role !== 'coordinator') return { ok: false, text: 'only the lead writes team rules or another assistant\'s memory' };
+        const vault = new Vault();
+        if (tool === 'forget') { const asked = ownerAsked(db, cap.job_id, a.owner_words); if (!asked.ok) return { ok: false, text: `Not removed: ${asked.reason}.` }; const n = vault.forget({ scope, agent: target, contains: String(a.contains ?? '') }); return { ok: true, text: n ? `removed ${n} line(s)` : 'nothing matched' }; }
+        const src = a.source_message_id ? `from message ${String(a.source_message_id).slice(0, 40)}` : undefined;
+        const r = vault.remember({ scope, section: a.section as never, text: String(a.text ?? ''), agent: target, source: src });
+        if (!r.ok) return { ok: false, text: r.reason }; this.store.event(cap.job_id, actor, 'memory.saved', { scope, assistant: target.id, added: r.added });
+        return { ok: true, text: r.added ? `remembered in ${path.basename(r.file)}` : 'already remembered' };
+      }
       // ---- conversation tools (chat replies) ----
       case 'read_message': {   // the full text of a long message in this conversation (context lines never cut silently)
         const me = this.store.get(cap.job_id); const msg = new ChatStore(db, this.store).message(String(a.id ?? ''));
@@ -211,6 +225,18 @@ export class BrokerApi {
         return { ok: true, text: `shared "${f.title}"` };
       }
       // ---- the lead's team tools: each acts only on the owner's own words in the message being answered ----
+      case 'create_group': case 'edit_group': {   // the lead, on the owner's own words
+        const asked = ownerAsked(db, cap.job_id, a.owner_words); if (!asked.ok) return { ok: false, text: `Not done: ${asked.reason}.` };
+        const defs = new Definitions(db); const chat = new ChatStore(db, this.store); const me = this.store.get(cap.job_id)!;
+        const ids = (Array.isArray(a.members) ? a.members : []).map((x) => { const k = String(x).toLowerCase().replace(/^@/, ''); return defs.listAgents().find((ag) => ag.id.toLowerCase() === k || ag.name.toLowerCase() === k || ag.name.toLowerCase().split(/[\s(]+/)[0] === k)?.id; });
+        if (ids.some((x) => !x)) return { ok: false, text: 'one of those assistants does not exist or is switched off' };
+        try {
+          if (tool === 'create_group') { const members = [...new Set(['coordinator', ...ids as string[]])]; const g = chat.create({ workspace_id: me.workspace_id ?? (db.prepare('SELECT workspace_id FROM conversations WHERE id = ?').get(me.conversation_id) as { workspace_id: string }).workspace_id, type: 'group', title: String(a.name ?? '').trim().slice(0, 120) || 'New group', members }, 'owner:chat'); if (a.purpose) db.prepare('UPDATE conversations SET purpose = ? WHERE id = ?').run(String(a.purpose).slice(0, 1000), g.id); return { ok: true, text: `Created the group "${g.title}" with ${members.length} assistants. It is in the owner's rail.`, data: { conversation_id: g.id } }; }
+          const gid = String(a.conversation ?? me.conversation_id ?? ''); const g = chat.get(gid); if (!g || g.type !== 'group') return { ok: false, text: 'that is not a group' };
+          if (a.name) chat.setTitle(gid, String(a.name).trim()); if (a.purpose !== undefined) db.prepare('UPDATE conversations SET purpose = ? WHERE id = ?').run(String(a.purpose).slice(0, 1000), gid);
+          return { ok: true, text: 'group updated' };
+        } catch (e) { return { ok: false, text: e instanceof ChatRuleError ? e.message : (e as Error).message }; }
+      }
       case 'rename_assistant': case 'disable_assistant': case 'add_member': case 'remove_member': {
         const asked = ownerAsked(db, cap.job_id, a.owner_words); if (!asked.ok) return { ok: false, text: `Not done: ${asked.reason}.` };
         const defs = new Definitions(db); const key = String(a.assistant ?? a.id ?? '').trim().toLowerCase().replace(/^@/, '');

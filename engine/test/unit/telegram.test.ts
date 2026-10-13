@@ -124,3 +124,34 @@ test('T5: saving a token checks it with getMe at once: a rejected token gives a 
   const good = await checkToken(db, dir, reply(true)); assert.deepEqual(good, { ok: true, bot: '@claudebot_test_bot' });
   assert.equal(JSON.parse((db.prepare("SELECT value FROM runtime_state WHERE key = 'telegram.error'").get() as { value: string }).value).error, null, 'the stale error is cleared');
 });
+
+test('T6: Telegram is a command channel through the lead: plain decision cards that close on both sides, lead-only notices, /status, /stop, /approvals; a foreign chat can do nothing', async () => {
+  const f = await fakeTelegram(); const s = setup(f.base); saveToken(s.secrets, TOKEN);
+  const { code } = newPairingCode(s.db); f.push(msg(1, 777, `/start ${code}`)); await s.bridge.cycle(0);
+  const c = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] });
+  const turn = s.chat.send(c.id, '@researcher email the hiring manager', s.defs).job;
+  s.chat.add({ conversation_id: c.id, role: 'assistant', sender: 'researcher', content: 'specialist chatter' });
+  s.chat.add({ conversation_id: c.id, role: 'assistant', sender: 'coordinator', content: 'lead summary' });
+  const ap = s.approvals.request({ job_id: turn.id, action_kind: 'send', target: 'email to hm@example.test', content: 'To: hm@example.test\nSubject: Channel role\n\nHi Sam,\nThe full body.' });
+  s.chat.add({ conversation_id: c.id, role: 'system', kind: 'decision', content: 'decision', approval_id: ap.id, job_id: turn.id });
+  f.calls.length = 0; await s.bridge.cycle(0);
+  const texts = f.calls.filter((x) => x.method === 'sendMessage').map((x) => String(x.body.text));
+  assert.ok(texts.some((t) => t.includes('lead summary'))); assert.ok(!texts.some((t) => t.includes('specialist chatter')), 'only the lead talks on Telegram');
+  const card = f.calls.find((x) => x.method === 'sendMessage' && String(x.body.text).startsWith('Needs your decision'))!;
+  assert.match(String(card.body.text), /Send email \(asked by /); assert.match(String(card.body.text), /Subject: Channel role\n\nHi Sam,\nThe full body\./, 'the full email copy');
+  // decided in the app: the Telegram card loses its buttons and says so
+  s.approvals.decide(ap.id, 'rejected', 'owner'); f.calls.length = 0; await s.bridge.cycle(0);
+  assert.ok(f.calls.some((x) => x.method === 'editMessageReplyMarkup')); assert.ok(f.calls.some((x) => x.method === 'sendMessage' && /^Denied/.test(String(x.body.text))));
+  // commands: /status lists open tasks; /stop 1 cancels; a foreign chat is refused
+  const job = s.store.create({ idempotency_key: 'k1', kind: 'research.report', objective: 'Find remote roles', success_contract: {}, agent_role: 'researcher', workspace_id: s.ws.id }, 'owner').job;
+  f.calls.length = 0; f.push(msg(2, 999, '/stop 1')); f.push(msg(3, 777, '/status')); await s.bridge.cycle(0);
+  assert.equal(s.store.get(job.id)!.state, 'queued', 'a stranger cannot stop work');
+  assert.ok(f.calls.some((x) => x.method === 'sendMessage' && /1\. .*Find remote roles/.test(String(x.body.text))));
+  f.push(msg(4, 777, '/stop 1')); await s.bridge.cycle(0); assert.equal(s.store.get(job.id)!.state, 'cancelled');
+  // /approvals resends a pending decision with fresh buttons
+  const ap2 = s.approvals.request({ job_id: turn.id, action_kind: 'send', target: 'email to a@example.test', content: 'To: a@example.test\nSubject: x\n\nbody' });
+  s.chat.add({ conversation_id: c.id, role: 'system', kind: 'decision', content: 'decision', approval_id: ap2.id, job_id: turn.id }); await s.bridge.cycle(0);
+  f.calls.length = 0; f.push(msg(5, 777, '/approvals')); await s.bridge.cycle(0);
+  assert.equal(f.calls.filter((x) => x.method === 'sendMessage' && String(x.body.text).startsWith('Needs your decision')).length, 1);
+  f.close();
+});

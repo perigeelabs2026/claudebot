@@ -8,6 +8,8 @@
  * Outbound: assistant replies, results and decisions from conversations. Decision notices carry Allow once / Deny buttons
  * bound to the same approval record and its content hash; a changed draft makes the button refuse.
  */
+import { describeApproval } from '../approvals/describe.ts';
+import { cancelDescendants } from '../coord/delegation.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -107,6 +109,8 @@ export class TelegramBridge {
         const conv = ap.job_id ? (db.prepare('SELECT conversation_id FROM jobs WHERE id = ?').get(ap.job_id) as { conversation_id: string | null } | undefined)?.conversation_id : null; if (conv) this.d.onChange?.(conv);
       }
       await this.api('answerCallbackQuery', { callback_query_id: cb.id, text }).catch(() => {});
+      const now2 = this.d.approvals.get(m[1]); const tgId = (cb.message as { message_id?: number } | undefined)?.message_id;
+      if (now2 && now2.status !== 'pending' && tgId) { await this.closeDecision(chatId, tgId, now2.status, now2.decided_by ?? null).catch(() => {}); db.prepare("UPDATE telegram_outbox SET kind = 'decision-closed' WHERE chat_id = ? AND tg_message_id = ?").run(chatId, tgId); }
       return `button:${text}`;
     }
     const msg = u.message as { message_id: number; chat: { id: number; type: string }; from?: { id: number; username?: string; first_name?: string }; text?: string; reply_to_message?: { message_id: number } } | undefined;
@@ -125,7 +129,7 @@ export class TelegramBridge {
       return 'bound';
     }
     if (!b || chatId !== b.chat_id) { ev(db, 'telegram.refused', { reason: 'message from an unbound chat' }); return 'refused:unbound'; }
-    if (text.startsWith('/')) return 'ignored:command';
+    if (text.startsWith('/')) return this.command(chatId, text);
     // Route: a reply to one of our notices goes to that conversation; otherwise the latest direct chat with the Chief of Staff.
     let conv: string | null = null;
     if (msg.reply_to_message) conv = (db.prepare('SELECT m.conversation_id FROM telegram_outbox o JOIN messages m ON m.id = o.message_id WHERE o.tg_message_id = ? AND o.chat_id = ?').get(msg.reply_to_message.message_id, chatId) as { conversation_id: string } | undefined)?.conversation_id ?? null;
@@ -136,25 +140,76 @@ export class TelegramBridge {
     this.d.onChange?.(conv); return 'routed';
   }
 
+  /** Owner commands from the bound chat. Everything else is plain language to the Chief of Staff, who can do what the app can. */
+  private async command(chatId: string, text: string): Promise<string> {
+    const db = this.d.db; const [cmd, ...rest] = text.replace(/@\w+/, '').split(/\s+/); const arg = rest.join(' ').trim();
+    const say = (t: string) => this.api('sendMessage', { chat_id: chatId, text: t.slice(0, 4000) }).catch(() => {});
+    const live = () => db.prepare("SELECT id, agent_role, objective, state FROM jobs WHERE state IN ('queued','leased','running','retry_scheduled','waiting_for_approval') AND kind NOT IN ('chat.turn','owner.upload') ORDER BY created_at").all() as Array<{ id: string; agent_role: string; objective: string; state: string }>;
+    const name = (id: string) => this.d.defs.getAgent(id)?.name ?? id;
+    if (cmd === '/help') { await say('Talk to your Chief of Staff in plain words: assign or redirect work, rename or create assistants, ask for files or status.\n/status: what is running and waiting\n/approvals: decisions waiting, with buttons\n/stop <number>: stop a task from /status'); return 'command:help'; }
+    if (cmd === '/status') {
+      const tasks = live(); const pend = (db.prepare("SELECT count(*) AS n FROM approvals WHERE status = 'pending'").get() as { n: number }).n;
+      await say(tasks.length ? `${tasks.length} task${tasks.length > 1 ? 's' : ''} open, ${pend} decision${pend === 1 ? '' : 's'} waiting:\n${tasks.slice(0, 15).map((j, i) => `${i + 1}. ${name(j.agent_role)}: ${j.objective.replace(/\s+/g, ' ').slice(0, 90)} (${j.state.replace(/_/g, ' ')})`).join('\n')}\nStop one with /stop <number>.` : `Nothing running. ${pend} decision${pend === 1 ? '' : 's'} waiting.`); return 'command:status';
+    }
+    if (cmd === '/approvals') {
+      const pend = db.prepare("SELECT m.id FROM messages m JOIN approvals a ON a.id = m.approval_id WHERE m.kind = 'decision' AND a.status = 'pending'").all() as Array<{ id: string }>;
+      if (!pend.length) { await say('No decisions are waiting.'); return 'command:approvals'; }
+      db.prepare(`DELETE FROM telegram_outbox WHERE chat_id = ? AND kind IN ('decision','skipped') AND message_id IN (${pend.map(() => '?').join(',')})`).run(chatId, ...pend.map((p) => p.id));   // send each again, with fresh buttons
+      const n = await this.flush(50, pend.map((p) => p.id)); return `command:approvals:${n}`;
+    }
+    if (cmd === '/stop') {
+      const tasks = live(); const k = Number(arg); const j = Number.isInteger(k) && k >= 1 ? tasks[k - 1] : undefined;
+      if (!j) { await say(tasks.length ? 'Which one? Send /status, then /stop <number>.' : 'Nothing is running.'); return 'command:stop:none'; }
+      this.d.store.transition(j.id, 'cancelled', 'owner', { next_action: null }, { by: 'owner', via: 'telegram' }); const kids = cancelDescendants(db, this.d.store, j.id, 'owner', 'parent task stopped by the owner');
+      ev(db, 'telegram.stopped', { job: j.id, children: kids.length }); await say(`Stopped: ${name(j.agent_role)}: ${j.objective.replace(/\s+/g, ' ').slice(0, 90)}.`); this.d.onChange?.(''); return 'command:stop';
+    }
+    await say('Unknown command. Send /help, or just tell your Chief of Staff what you want.'); return 'command:unknown';
+  }
+
   /** Send each new assistant reply, result and decision once, to the bound chat. */
-  async flush(limit = 20): Promise<number> {
+  async flush(limit = 20, onlyIds: string[] | null = null): Promise<number> {
     const db = this.d.db; const b = binding(db); if (!b) return 0;
     const since = String((rs(db, KEY_SINCE) as { since?: string } | null)?.since ?? now());
-    const rows = db.prepare(`SELECT m.id, m.conversation_id, m.kind, m.role, m.sender, m.content, m.approval_id, c.title, c.type FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE m.created_at >= ? AND ((m.role = 'assistant' AND m.kind = 'text') OR m.kind IN ('result','decision')) AND NOT EXISTS (SELECT 1 FROM telegram_outbox o WHERE o.message_id = m.id) ORDER BY m.created_at LIMIT ?`).all(since, limit) as Array<{ id: string; conversation_id: string; kind: string; role: string; sender: string; content: string; approval_id: string | null; title: string; type: string }>;
+    const rows = db.prepare(`SELECT m.id, m.conversation_id, m.kind, m.role, m.sender, m.content, m.approval_id, c.title, c.type FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE ${onlyIds ? `m.id IN (${onlyIds.map(() => '?').join(',')}) AND ? <> ''` : 'm.created_at >= ?'} AND ((m.role = 'assistant' AND m.kind = 'text' AND m.sender = 'coordinator' AND COALESCE(json_extract(m.meta, '$.update'), 0) = 0) OR m.kind = 'decision' OR (m.kind = 'result' AND m.artifact_id IS NOT NULL AND c.type = 'direct' AND EXISTS (SELECT 1 FROM conversation_members cm WHERE cm.conversation_id = c.id AND cm.agent_id = 'coordinator'))) AND NOT EXISTS (SELECT 1 FROM telegram_outbox o WHERE o.message_id = m.id) ORDER BY m.created_at LIMIT ?`).all(...(onlyIds ?? []), since, limit) as Array<{ id: string; conversation_id: string; kind: string; role: string; sender: string; content: string; approval_id: string | null; title: string; type: string }>;
     let n = 0;
     for (const r of rows) {
       const who = this.d.defs.getAgent(r.sender)?.name ?? (r.kind === 'result' ? 'Result' : 'ClaudeBot'); const where = r.title ? ` · ${r.title}` : '';
       let body: Record<string, unknown>;
       if (r.kind === 'decision' && r.approval_id) {
         const ap = this.d.approvals.get(r.approval_id); if (!ap || ap.status !== 'pending') { db.prepare('INSERT OR IGNORE INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?,?,?,?,?)').run(r.id, b.chat_id, null, 'skipped', now()); continue; }
-        const text = `Needs your decision${where}\n${ap.action_kind} → ${ap.target.replace(/^email to /, '')}\n\n${ap.content.slice(0, 3000)}\n\nfingerprint ${ap.content_hash.slice(0, 12)}`;
-        body = { chat_id: b.chat_id, text, reply_markup: { inline_keyboard: [[{ text: 'Allow once', callback_data: `ap:${ap.id}:${ap.content_hash.slice(0, 12)}:allow` }, { text: 'Deny', callback_data: `ap:${ap.id}:${ap.content_hash.slice(0, 12)}:deny` }]] } };
+        const v = describeApproval(ap); const asker = ap.job_id ? (db.prepare('SELECT agent_role FROM jobs WHERE id = ?').get(ap.job_id) as { agent_role: string } | undefined)?.agent_role : undefined;
+        const text = `Needs your decision${where}: ${v.label}${asker ? ` (asked by ${this.d.defs.getAgent(asker)?.name ?? asker})` : ''}\n\n${v.text.slice(0, 3400)}\n\nExpires ${new Date(ap.expires_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} · fingerprint ${ap.content_hash.slice(0, 12)}${v.email ? '\n"Always allow" is in the app (it needs your Mac confirmation).' : ''}`;
+        const keys = v.missingBody ? [{ text: 'Deny', callback_data: `ap:${ap.id}:${ap.content_hash.slice(0, 12)}:deny` }] : [{ text: 'Allow once', callback_data: `ap:${ap.id}:${ap.content_hash.slice(0, 12)}:allow` }, { text: 'Deny', callback_data: `ap:${ap.id}:${ap.content_hash.slice(0, 12)}:deny` }];
+        body = { chat_id: b.chat_id, text, reply_markup: { inline_keyboard: [keys] } };
+      } else if (r.kind === 'result') {
+        const a = db.prepare('SELECT path, title FROM artifacts a JOIN messages m ON m.artifact_id = a.id WHERE m.id = ?').get(r.id) as { path: string | null; title: string } | undefined;
+        let sent: { message_id: number } | null = null;
+        if (a?.path && fs.existsSync(a.path) && fs.statSync(a.path).size <= 20 * 1024 * 1024) sent = await this.sendDocument(b.chat_id, a.path, a.title).catch(() => null);
+        db.prepare('INSERT OR IGNORE INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?,?,?,?,?)').run(r.id, b.chat_id, sent?.message_id ?? null, sent ? 'result' : 'skipped', now()); if (sent) n++;
+        continue;
       } else body = { chat_id: b.chat_id, text: `${who}${where}\n${r.content.slice(0, 3500)}` };
       // Approvals from a group are private by nature here: the bound chat is the owner's own.
       const sentMsg = await this.api<{ message_id: number }>('sendMessage', body);
       db.prepare('INSERT OR IGNORE INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?,?,?,?,?)').run(r.id, b.chat_id, sentMsg.message_id, r.kind, now()); n++;
     }
+    // Decisions answered in the app (or expired) lose their buttons here and say what happened, so both sides always agree.
+    for (const o of db.prepare("SELECT o.message_id, o.tg_message_id, m.approval_id FROM telegram_outbox o JOIN messages m ON m.id = o.message_id WHERE o.kind = 'decision' AND o.chat_id = ? AND o.tg_message_id IS NOT NULL").all(b.chat_id) as Array<{ message_id: string; tg_message_id: number; approval_id: string }>) {
+      const ap = this.d.approvals.get(o.approval_id); if (!ap || ap.status === 'pending') continue;
+      await this.closeDecision(b.chat_id, o.tg_message_id, ap.status, ap.decided_by ?? null).catch(() => {});
+      db.prepare("UPDATE telegram_outbox SET kind = 'decision-closed' WHERE message_id = ? AND chat_id = ?").run(o.message_id, b.chat_id);
+    }
     return n;
+  }
+  private async closeDecision(chatId: string, tgId: number, status: string, by: string | null): Promise<void> {
+    const word = status === 'approved' || status === 'consumed' ? (String(by ?? '').startsWith('permission:') ? 'Allowed by your standing permission' : 'Allowed') : status === 'rejected' ? 'Denied' : status === 'expired' ? 'Expired: nobody decided in time' : status === 'stale' ? 'Replaced by an edited version' : status;
+    await this.api('editMessageReplyMarkup', { chat_id: chatId, message_id: tgId, reply_markup: { inline_keyboard: [] } });
+    await this.api('sendMessage', { chat_id: chatId, text: `${word} (${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}).`, reply_to_message_id: tgId });
+  }
+  private async sendDocument(chatId: string, file: string, caption: string): Promise<{ message_id: number }> {
+    const tok = this.token(); if (!tok) throw new Error('no bot token');
+    const form = new FormData(); form.append('chat_id', chatId); form.append('caption', caption.slice(0, 1000)); form.append('document', new Blob([fs.readFileSync(file)]), path.basename(file));
+    const res = await (this.d.fetchImpl ?? fetch)(`${this.d.apiBase ?? 'https://api.telegram.org'}/bot${tok}/sendDocument`, { method: 'POST', body: form, signal: AbortSignal.timeout(120_000) });
+    const j = await res.json() as { ok: boolean; result?: { message_id: number }; description?: string }; if (!j.ok) throw new Error(`telegram sendDocument: ${j.description ?? res.status}`); return j.result!;
   }
 
   /** Run the long-poll loop until stopped; backs off on errors (never logs the token). */

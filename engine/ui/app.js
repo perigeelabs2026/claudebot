@@ -47,9 +47,10 @@ function applyCompact() { /* the rail never collapses; panes adapt in CSS */ }
 // ---------------- Rail (design system §3): lead, groups, direct assistants; Create / Review / More / owner at the bottom ----------------
 let agentsCache = []; let convsCache = []; let railMenuOpen = false;
 const agentById = (id) => agentsCache.find((a) => a.id === id);
-const initials = (name) => (String(name || '?').trim().match(/[\p{L}\p{N}]/u)?.[0] ?? '?').toUpperCase();
+// Initials from the current display name: first letters of the first two words ("Abdul El-Sayed" → AE); one word → its first letter. Text in brackets is a role, not a name.
+const initials = (name) => { const words = String(name || '').replace(/\([^)]*\)/g, ' ').trim().split(/\s+/).map((w) => w.match(/[\p{L}\p{N}]/u)?.[0]).filter(Boolean); return (words.slice(0, 2).join('') || '?').toUpperCase(); };
 const colorOf = (id) => { const a = agentById(id); return a && a.color_index !== null && a.color_index !== undefined ? `c${a.color_index % 6}` : 'c0'; };
-const avatar = (id, size = '') => { const a = agentById(id); return h('span', { class: `av ${size} ${colorOf(id)}`, 'aria-hidden': 'true' }, a ? (a.id === 'coordinator' ? 'CS' : initials(a.name)) : '?'); };
+const avatar = (id, size = '') => { const a = agentById(id); return h('span', { class: `av ${size} ${colorOf(id)}`, 'aria-hidden': 'true' }, a ? initials(a.name) : '?'); };
 const groupAvatar = (ids, size = '') => h('span', { class: `av-group ${size}`, 'aria-hidden': 'true' }, ...ids.slice(0, 4).map((id) => h('span', { class: colorOf(id) })));
 const clip = (t, n) => { const x = String(t || '').replace(/\s+/g, ' ').replace(/(?:\.{3}|…)\.+/g, '…').trim(); return x.length > n ? `${x.slice(0, n - 1).replace(/\s+\S*$/, '').replace(/[\s,;:.…]+$/, '')}…` : x; };   // ends on a word, with an ellipsis when cut
 const isWorking = (a) => a && Array.isArray(a.active_tasks) && a.active_tasks.length > 0;
@@ -92,7 +93,7 @@ document.addEventListener('mouseover', (e) => { const b = e.target.closest && e.
 document.addEventListener('focusin', (e) => { const b = e.target.closest && e.target.closest('#rail [data-tip]'); hideTip(); if (!b) return; const r = b.getBoundingClientRect(); railTip = h('div', { class: 'rail-tip', role: 'tooltip', 'data-for': b.dataset.tip }, b.dataset.tip); railTip.style.left = `${r.right + 8}px`; railTip.style.top = `${r.top + r.height / 2}px`; document.body.append(railTip); });
 addEventListener('hashchange', hideTip); addEventListener('blur', hideTip);
 // The rail never keeps a conversation that no longer exists (deleted elsewhere, e.g. a purge): re-check on focus and every 30 s.
-async function syncConvs() { try { const list = await api('/api/conversations'); const key = (l) => l.map((c) => `${c.id}:${c.status}:${(c.members || []).join(',')}`).join('|'); if (key(list) !== key(convsCache)) { convsCache = list; renderRail(); const cur = location.hash.replace('#', ''); if (cur.startsWith('chat/conv-') && !list.some((c) => c.id === cur.slice(5))) location.replace('#home'); } } catch {} }
+async function syncConvs() { try { const list = await api('/api/conversations'); const key = (l) => l.map((c) => `${c.id}:${c.status}:${c.title || ''}:${(c.members || []).join(',')}`).join('|'); if (key(list) !== key(convsCache)) { convsCache = list; renderRail(); const cur = location.hash.replace('#', ''); if (cur.startsWith('chat/conv-') && !list.some((c) => c.id === cur.slice(5))) location.replace('#home'); } } catch {} }
 addEventListener('focus', syncConvs); setInterval(syncConvs, 30000);
 // Scroll cue: a list or page that continues past the bottom edge fades out there, so it reads as "more below".
 // The cue is a fixed overlay pinned to the bottom edge of the scroll viewport (never mid-content), fading into that container's background.
@@ -329,7 +330,7 @@ function messageEl2(m, d, names, onChange) {
       answer ? null : h('div', { class: 'row', style: 'gap:8px;margin-top:12px' }, h('button', { class: 'btn2 primary', onclick: () => send(m.meta.options[sel]) }, m.meta.action || 'Use this'), h('button', { class: 'btn2 ghost', onclick: () => { const ta = $('#chat-input'); if (ta) { ta.value = 'Why do you suggest that? '; ta.focus(); replyTo = { id: m.id, name: who, sender: m.sender, excerpt: clip(m.content, 60) }; renderReplyBar(); } } }, `Ask ${who} why`))));
   }
   if (m.role === 'assistant' && m.kind === 'question' && m.meta && m.meta.draft_id) return h('div', { class: 'ev-card' }, draftCard(m.meta.draft_id, m.meta.draft, m, d));
-  if (m.role === 'assistant') {
+  if (m.role === 'assistant' && !(m.kind === 'result' && m.artifact)) {   // a file an assistant saved is a file card (below), not a text bubble
     const a = agentById(m.sender);
     return h('div', { class: 'm' }, avatar(m.sender), h('div', { class: 'body' }, h('div', { class: 'meta' }, h('b', {}, m.sender_name), a?.role ? h('span', { class: 'role' }, a.role) : null, h('span', { class: 't' }, fmtClock(m.created_at)), ...msgActions(m, d, onChange)), h('div', { class: 'text' }, quoteOf(m, d), ...textWithMentions(m.content, names)), reactionsRow(m, onChange)));
   }
@@ -485,7 +486,7 @@ function agentMenu(id) {
 }
 function menuFor(t) {
   const ag = t.closest('[data-agent]'); if (ag) return agentMenu(ag.dataset.agent);
-  const rail = t.closest('.rail-btn'); if (rail) { const href = rail.getAttribute('href') || ''; if (href === '#home') return agentMenu('coordinator'); if (href.startsWith('#chat/a/')) return agentMenu(href.slice(8)); if (href.startsWith('#chat/conv-')) { const g = convsCache.find((c) => c.id === href.slice(6)); return g ? [{ head: g.title || 'Group' }, { label: 'Open group', run: () => { location.hash = href; } }, { label: 'Members', run: () => { location.hash = href; setTimeout(() => [...document.querySelectorAll('.ctx-tab')].find((x) => x.textContent === 'Members')?.click(), 300); } }, { label: 'Copy name', run: () => copyText(g.title || 'Group', 'Name') }] : []; } return []; }
+  const rail = t.closest('.rail-btn'); if (rail) { const href = rail.getAttribute('href') || ''; if (href === '#home') return agentMenu('coordinator'); if (href.startsWith('#chat/a/')) return agentMenu(href.slice(8)); if (href.startsWith('#chat/conv-')) { const g = convsCache.find((c) => c.id === href.slice(6)); return g ? [{ head: g.title || 'Group' }, { label: 'Open group', run: () => { location.hash = href; } }, { label: 'Members', run: () => { location.hash = href; setTimeout(() => [...document.querySelectorAll('.ctx-tab')].find((x) => x.textContent === 'Members')?.click(), 300); } }, { label: 'Rename', run: () => { const r = lastMenuTarget?.getBoundingClientRect(); renameGroupInPlace(g, r ? r.right + 8 : lastMenuAt.x, r ? r.top + r.height / 2 : lastMenuAt.y); } }, { label: 'Edit group…', run: () => { location.hash = href; setTimeout(() => [...document.querySelectorAll('.ctx-tab')].find((x) => x.textContent === 'Members')?.click(), 300); } }, { label: 'Copy name', run: () => copyText(g.title || 'Group', 'Name') }] : []; } return []; }
   const file = t.closest('[data-art]'); if (file) { const btn = (txt) => [...file.querySelectorAll('button, a')].find((b) => b.textContent.trim() === txt); return [{ head: file.dataset.name || 'File' }, { label: 'Preview', disabled: !btn('Preview'), run: () => btn('Preview').click() }, { label: 'Download', run: () => { location.href = `/api/artifacts/${file.dataset.art}/download`; } }, '-', { label: 'Copy file name', run: () => copyText(file.dataset.name || '', 'File name') }, file.dataset.hash ? { label: 'Copy sha256', run: () => copyText(file.dataset.hash, 'sha256') } : null].filter(Boolean); }
   const msg = t.closest('.m'); if (msg) { const reply = [...msg.querySelectorAll('.actions button')].find((b) => b.textContent === 'Reply'); const body = msg.querySelector('.body .text, .body p, .body'); const sel = String(getSelection() || '').trim(); return [sel ? { label: 'Copy selection', run: () => copyText(sel, 'Selection') } : null, { label: 'Copy message', run: () => copyText((body?.innerText || '').trim(), 'Message') }, reply ? { label: 'Reply', run: () => reply.click() } : null].filter(Boolean); }
   if (t.closest('.brief-head, .figures')) return [{ head: 'Morning report' }, { label: 'Rewrite the report now', run: async () => { const r = await api('/api/reports/morning', { method: 'POST' }); if (r.error) throw new Error(r.error); notify('The Chief of Staff is writing a fresh report.'); } }];
@@ -601,8 +602,14 @@ function standardContext(key) {
 function browserInto(body) { const pane = h('aside', { id: 'browser-pane', class: 'browser-pane', style: 'display:flex' }); body.append(pane); browserPaneOpen = true; connectBrowserStream(); refreshLiveStatus(); }
 function membersInto(body, d) {
   const sec = h('div', { class: 'ctx-section' }, h('div', { class: 'section-h' }, `${d.members.length} assistant${d.members.length > 1 ? 's' : ''} in this ${d.conversation.type === 'group' ? 'group' : 'chat'}`),
-    ...d.members.map((mm) => { const t = mm.turn; const [w, cls] = t ? (TURN_WORD[t.turn_state] || [t.plain_state, '']) : ['idle', '']; return h('div', { class: 'member-row' }, avatar(mm.agent_id, 'sm'), h('b', {}, mm.name), h('span', { class: 'now' }, mm.role || mm.purpose), h('span', { class: `tag ${cls === 'acc' ? 'accent' : cls === 'warn' ? 'warn' : cls === 'bad' ? 'bad' : cls === 'ok' ? 'ok' : ''}` }, w)); }));
+    ...d.members.map((mm) => { const t = mm.turn; const [w, cls] = t ? (TURN_WORD[t.turn_state] || [t.plain_state, '']) : ['idle', '']; return h('div', { class: 'member-row' }, avatar(mm.agent_id, 'sm'), h('b', {}, mm.name), h('span', { class: 'now' }, mm.role || mm.purpose), h('span', { class: `tag ${cls === 'acc' ? 'accent' : cls === 'warn' ? 'warn' : cls === 'bad' ? 'bad' : cls === 'ok' ? 'ok' : ''}` }, w), d.conversation.type === 'group' && d.members.length > 2 ? h('button', { class: 'btn2 ghost small', 'aria-label': `Remove ${mm.name} from this group`, title: 'Remove from this group', onclick: async () => { const r = await api(`/api/conversations/${d.conversation.id}/members`, { method: 'DELETE', body: { agent_id: mm.agent_id } }).catch((e) => ({ error: e.message })); if (r.error) notify(r.error, true); else { notify(`${mm.name} left the group.`); route(); } } }, 'Remove') : null); }));
   body.append(sec);
+  if (d.conversation.type === 'group') {   // name and purpose: what this group is for (every member reads it)
+    const nm = h('input', { class: 'input2', value: d.conversation.title || '', 'aria-label': 'Group name' }); const pu = h('textarea', { class: 'input2', rows: '3', 'aria-label': 'What this group is for', placeholder: 'What this group is for, e.g. "Find and apply to remote channel roles"' }, d.conversation.purpose || '');
+    const save = h('button', { class: 'btn2', disabled: true, onclick: async () => { const r = await api(`/api/conversations/${d.conversation.id}`, { method: 'PATCH', body: { title: nm.value, purpose: pu.value } }).catch((e) => ({ error: e.message })); if (r.error) notify(r.error, true); else { notify('Group saved.'); await syncConvs(); route(); } } }, 'Save');
+    const dirty = () => { save.disabled = nm.value.trim() === (d.conversation.title || '') && pu.value === (d.conversation.purpose || ''); }; nm.addEventListener('input', dirty); pu.addEventListener('input', dirty);
+    body.append(h('div', { class: 'ctx-section' }, h('div', { class: 'section-h' }, 'Group'), h('div', { class: 'form' }, field('Name', nm), field('What this group is for', pu)), h('div', { class: 'row', style: 'margin-top:8px' }, save)));
+  }
   if (d.conversation.type === 'group' && d.members.length < 6) {
     const cand = agentsCache.filter((a) => a.enabled && !d.members.some((mm) => mm.agent_id === a.id));
     if (cand.length) { const sel = h('select', { class: 'input2', 'aria-label': 'Add an assistant' }, cand.map((a) => h('option', { value: a.id }, a.name))); body.append(h('div', { class: 'ctx-section' }, h('div', { class: 'section-h' }, 'Add an assistant'), h('div', { class: 'row', style: 'gap:8px' }, sel, h('button', { class: 'btn2', onclick: async () => { try { const r = await api(`/api/conversations/${d.conversation.id}/members`, { method: 'POST', body: { agent_id: sel.value } }); if (r.error) notify(r.error, true); else { await refreshChrome(); route(); } } catch (e) { notify(e.message, true); } } }, 'Add')))); }
@@ -755,8 +762,8 @@ async function homeView() {
   const running = rep0?.running;
   const isoWeek = (() => { const ws = currentWs ? workspaces.filter((w) => w.id === currentWs) : workspaces; const start = Math.min(...ws.map((w) => Date.parse(w.created_at)).filter(Number.isFinite)); return Number.isFinite(start) ? Math.floor((Date.now() - start) / (7 * 86400000)) + 1 : 1; })();   // week n of the project, counted from its start
   const kicker = h('div', { class: 'kicker' }, h('span', {}, fmtDay(new Date())), currentWs ? h('span', {}, wsName(currentWs)) : null,
-    report ? h('span', {}, report.first_written_at && report.first_written_at !== report.written_at ? `updated ${fmtClock(report.written_at)} by ` : `written ${fmtClock(report.written_at)} by `, h('span', { class: 'av xs c0', 'aria-hidden': 'true' }, 'CS'), ` ${lead?.name ?? 'Chief of Staff'}`)
-      : running ? h('span', {}, h('span', { class: 'av xs c0', 'aria-hidden': 'true' }, 'CS'), ` ${lead?.name ?? 'Chief of Staff'} is writing the report…`)
+    report ? h('span', {}, report.first_written_at && report.first_written_at !== report.written_at ? `updated ${fmtClock(report.written_at)} by ` : `written ${fmtClock(report.written_at)} by `, h('span', { class: 'av xs c0', 'aria-hidden': 'true' }, initials(lead?.name ?? 'Chief of Staff')), ` ${lead?.name ?? 'Chief of Staff'}`)
+      : running ? h('span', {}, h('span', { class: 'av xs c0', 'aria-hidden': 'true' }, initials(lead?.name ?? 'Chief of Staff')), ` ${lead?.name ?? 'Chief of Staff'} is writing the report…`)
       : outdated ? h('span', {}, `from the work record · report of ${fmtClock(outdated.written_at)} is out of date · `, h('a', { href: '#home', class: 'kicker-link', onclick: writeReport }, 'rewrite'))
       : h('span', {}, 'no report yet · ', h('a', { href: '#home', class: 'kicker-link', onclick: writeReport }, 'write it now')));
   const fig = (n, label, sub, cls = '', dcls = '') => h('div', { class: 'fig' }, h('span', { class: `n ${cls}` }, String(n)), h('span', { class: 'l' }, label), h('span', { class: `d ${dcls}` }, sub));
@@ -1140,6 +1147,15 @@ async function workspaceDetail(id) {
     addObj,
     h('div', { class: 'card' }, h('h3', {}, `Schedules (${w.schedules.length})`), w.schedules.length ? h('ul', { class: 'list' }, w.schedules.map((s) => h('div', { class: 'item' }, h('div', {}, h('div', { class: 't' }, s.name), h('div', { class: 's' }, `${s.kind} · ${s.cron ?? 'every ' + s.every_seconds + 's'}`)), h('span', { class: `tag ${s.enabled ? 'ok' : ''}` }, s.enabled ? 'on' : 'paused')))) : empty('No schedules in this project')));
 }
+// Memory: the assistant's own note in the owner's memory vault (Obsidian-compatible Markdown). Read at the start of every turn.
+function memoryCard(a) {
+  const ta = h('textarea', { class: 'input2 mem-text', rows: '10', 'aria-label': `${a.name}'s memory`, spellcheck: 'false' });
+  const status = h('span', { class: 'hint' }, 'Loading…'); const open = h('a', { class: 'btn2 ghost', href: '#', hidden: true }, 'Open in Obsidian');
+  const save = h('button', { class: 'btn2', disabled: true, onclick: async () => { save.disabled = true; const r = await api(`/api/agents/${a.id}/memory`, { method: 'PUT', body: { text: ta.value } }).catch((e) => ({ error: e.message })); if (r.error) { notify(r.error, true); save.disabled = false; } else { notify('Memory saved. It applies from the next reply.'); ta.dataset.start = ta.value; status.textContent = 'Saved'; } } }, 'Save memory');
+  ta.addEventListener('input', () => { save.disabled = ta.value === ta.dataset.start; });
+  api(`/api/agents/${a.id}/memory`).then((r) => { if (r.error) { status.textContent = r.error; return; } ta.value = r.text; ta.dataset.start = r.text; status.textContent = `${r.path.split('/').slice(-2).join('/')} in your memory vault`; open.href = r.obsidian_url; open.hidden = false; setTimeout(() => { ta.style.height = 'auto'; ta.style.height = `${Math.min(ta.scrollHeight + 2, 520)}px`; }, 0); }).catch((e) => { status.textContent = e.message; });
+  return h('div', { class: 'card' }, h('h3', {}, 'Memory'), h('p', { class: 'hint' }, `What ${a.name} has learned: your preferences, lessons from corrections and facts. Read in full at the start of every reply. Edit here or in Obsidian; never put passwords in it.`), ta, h('div', { class: 'row', style: 'gap:8px;margin-top:8px;align-items:center' }, save, open, status));
+}
 async function agentEditor(a) {
   // Edit an assistant like any team member: name, look, role, what it does, instructions and what it can do, in plain words.
   // Built-in assistants are fully editable too; what any assistant may actually do is enforced by the engine's tools and approvals.
@@ -1153,7 +1169,7 @@ async function agentEditor(a) {
   const purpose = h('textarea', { class: 'input2', rows: '1', 'aria-label': 'What it does' }, a ? a.purpose : '');
   const instr = h('textarea', { class: 'input2', rows: '1', 'aria-label': 'Instructions' }, a ? (a.system_instructions || '') : '');
   const preview = h('span', { class: `av lg c${color}`, 'aria-hidden': 'true' }, initials(name.value || 'A'));
-  name.addEventListener('input', () => { preview.textContent = a && a.id === 'coordinator' ? 'CS' : initials(name.value || 'A'); });
+  name.addEventListener('input', () => { preview.textContent = initials(name.value || 'A'); });
   const swatches = h('div', { class: 'row', role: 'radiogroup', 'aria-label': 'Colour', style: 'gap:8px' }, ...[0, 1, 2, 3, 4, 5].map((c) => h('button', { type: 'button', class: `swatch c${c} ${c === color ? 'on' : ''}`, role: 'radio', 'aria-checked': c === color ? 'true' : 'false', 'aria-label': `Colour ${c + 1}`, onclick: (e) => { color = c; preview.className = `av lg c${c}`; [...swatches.children].forEach((b, k) => { b.classList.toggle('on', k === c); b.setAttribute('aria-checked', k === c ? 'true' : 'false'); }); e.preventDefault(); } })));
   const toggles = GROUPS.map(([label, ids]) => { const avail = ids.filter((t) => catalogue.includes(t)); const cb = h('input', { type: 'checkbox', checked: avail.some((t) => tools.has(t)) ? true : null, onchange: () => { for (const t of avail) cb.checked ? tools.add(t) : tools.delete(t); renderChips(); } }); return h('label', { class: 'toggle-row' }, cb, h('span', {}, label)); });
   const chips = h('div', { class: 'chips' }); const renderChips = () => chips.replaceChildren(...catalogue.map((t) => h('label', { class: 'chip' }, h('input', { type: 'checkbox', checked: tools.has(t) ? true : null, onchange: (e) => { e.target.checked ? tools.add(t) : tools.delete(t); } }), ' ', t))); renderChips();
@@ -1186,6 +1202,7 @@ async function agentEditor(a) {
     h('div', { class: 'card' }, h('div', { class: 'agent-edit-head' }, preview, h('div', { class: 'grow' }, field('Name', name), field('Role', role))),
       field('Colour', swatches), field('What it does', purpose), field('Instructions (added to every task for this assistant)', instr),
       h('div', { class: 'field' }, h('span', {}, 'What it can do'), h('div', { class: 'toggles' }, ...toggles), h('p', { class: 'hint' }, 'Sending, publishing, buying and deleting always ask you first, whatever is switched on here.')),
+      a ? memoryCard(a) : null,
       h('details', { class: 'advanced' }, h('summary', {}, 'Advanced'), field('Model (on your Claude plan)', model), field('Never does (one per line)', proh), field('Checks with you when (one per line)', appr), field('Works with (one per line)', scopes), field('Remembers (one per line)', mem), h('div', { class: 'field' }, h('span', {}, 'All tools'), chips)),
       h('div', { class: 'row', style: 'gap:8px;margin-top:16px' }, saveBtn, h('button', { class: 'btn2', onclick: () => { const v = document.querySelector('#view'); if (v) v.dataset.dirty = ''; location.hash = '#agents'; } }, 'Cancel'))));
 }
@@ -1200,6 +1217,15 @@ function renameInPlace(id, x, y, centre = false) {
   inp.focus(); inp.select(); let done = false;
   const close = () => { done = true; pop.remove(); };
   inp.addEventListener('keydown', async (e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } if (e.key === 'Enter') { e.preventDefault(); const n = inp.value.trim(); if (!n || n === a.name) { close(); return; } try { const res = await api(`/api/agents/${id}`, { method: 'PATCH', body: { name: n } }); if (res.error) throw new Error(res.error); close(); await refreshAssistants(); notify(`Renamed to ${n}.`); route(); } catch (err) { notify(err.message, true); } } });
+  inp.addEventListener('blur', () => setTimeout(() => { if (!done) close(); }, 150));
+}
+function renameGroupInPlace(g, x, y) {
+  document.querySelector('.rename-pop')?.remove(); const old = g.title || 'Group';
+  const inp = h('input', { class: 'input2', value: old, 'aria-label': `New name for ${old}` });
+  const pop = h('div', { class: 'rename-pop', role: 'dialog', 'aria-label': `Rename ${old}` }, inp, h('span', { class: 'hint' }, 'Enter to save · Esc to cancel'));
+  document.body.append(pop); const r = pop.getBoundingClientRect(); pop.style.left = `${Math.max(4, Math.min(x, innerWidth - r.width - 4))}px`; pop.style.top = `${Math.max(4, Math.min(y - r.height / 2, innerHeight - r.height - 4))}px`;
+  inp.focus(); inp.select(); let done = false; const close = () => { done = true; pop.remove(); };
+  inp.addEventListener('keydown', async (e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } if (e.key === 'Enter') { e.preventDefault(); const n = inp.value.trim(); if (!n || n === old) { close(); return; } const res = await api(`/api/conversations/${g.id}`, { method: 'PATCH', body: { title: n } }).catch((err) => ({ error: err.message })); if (res.error) { notify(res.error, true); return; } close(); await syncConvs(); notify(`Renamed to ${n}.`); route(); } });
   inp.addEventListener('blur', () => setTimeout(() => { if (!done) close(); }, 150));
 }
 async function workflowEditor(id) {
