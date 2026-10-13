@@ -419,3 +419,22 @@ test('files an assistant saves during a chat reply appear in that chat as file c
   assert.match(run, /chat\.add\(\{ conversation_id: conv\.id, role: 'assistant', kind: 'result', sender: agentId, content: 'Saved a file', job_id: job\.id, artifact_id: a\.id/);
   assert.match(run, /id NOT IN \(SELECT artifact_id FROM messages WHERE artifact_id IS NOT NULL AND conversation_id = \?\)/, 'never twice');
 });
+
+test('browser approvals: the outbox and the permission runner never perform or consume them; allowing one starts exactly one turn that carries it out', async () => {
+  const s = setup(); const approvals = new ApprovalStore(s.db); const actions = new ActionStore(s.db, approvals);
+  const c = s.chat.create({ workspace_id: s.ws.id });
+  const turn = s.chat.send(c.id, 'apply to this posting', s.defs).job;
+  const content = JSON.stringify({ url: 'https://boards.example-ats.test/acme/jobs/1', action: 'click', key: null, element: { role: 'button', name: 'Submit application' }, typed_sha256: 'x' });
+  const ap = approvals.request({ job_id: turn.id, action_kind: 'send', target: 'https://boards.example-ats.test/acme/jobs/1 — button "Submit application"', content });
+  approvals.decide(ap.id, 'approved', 'owner');
+  const out = await actions.perform({ job_id: turn.id, idempotency_key: `approval:${ap.id}`, kind: 'send', target: ap.target, content, approval_id: ap.id, actor: 'owner' });
+  assert.equal(out.status, 'refused'); assert.match((out as { reason: string }).reason, /browser action/);
+  assert.equal(approvals.get(ap.id)!.status, 'approved', 'not consumed'); assert.equal((s.db.prepare('SELECT count(*) AS n FROM actions').get() as { n: number }).n, 0, 'nothing written to the outbox');
+  s.store.transition(turn.id, 'leased', 'test'); s.store.transition(turn.id, 'running', 'test'); s.store.transition(turn.id, 'completed', 'test');
+  const r1 = s.chat.resumeForApproval(ap.id, s.defs)!; const r2 = s.chat.resumeForApproval(ap.id, s.defs)!;
+  assert.ok(r1); assert.equal(r1.id, r2.id, 'one turn per approval'); assert.equal(r1.agent_role, turn.agent_role); assert.equal(r1.conversation_id, c.id);
+  assert.match(s.chat.messages(c.id).find((m) => m.kind === 'wake')!.content, new RegExp(`approval_id ${ap.id}`));
+  // an email approval is not resumed this way (it runs through the executor)
+  const em = approvals.request({ job_id: turn.id, action_kind: 'send', target: 'email to a@example.test', content: 'To: a@example.test\nSubject: x\n\nhi' }); approvals.decide(em.id, 'approved', 'owner');
+  assert.equal(s.chat.resumeForApproval(em.id, s.defs), null);
+});

@@ -1,4 +1,5 @@
 /** claudebot engine supervisor: API/UI, scheduler, dispatcher, watchdog, backups. */
+import { isBrowserRequest } from '../actions/store.ts';
 import { governorTick, seedMorningRoutine } from '../cos/supervise.ts';
 import { TelegramBridge } from '../telegram/bridge.ts';
 import { getPermission, expireDuePermissions } from '../approvals/permissions.ts';
@@ -93,6 +94,7 @@ let permRunning = false;
 timers.push(setInterval(async () => { if (permRunning) return; permRunning = true; try {
   for (const a of db.prepare("SELECT id, job_id, action_kind, target, content, decided_by FROM approvals WHERE status = 'approved' AND decided_by LIKE 'permission:%'").all() as Array<{ id: string; job_id: string | null; action_kind: string; target: string; content: string; decided_by: string }>) {
     if (actions.byKey(`approval:${a.id}`)) continue;
+    if (isBrowserRequest(a.content)) continue;   // performed by the assistant in the browser (browser_act), never by this runner
     // Revoked, expired, or the task stopped since it was allowed: nothing runs, and the card says why.
     const pm = getPermission(db, a.decided_by.slice('permission:'.length)); const jobState = a.job_id ? store.get(a.job_id)?.state : null;
     if (!pm || pm.status !== 'active' || pm.expires_at <= new Date().toISOString() || jobState === 'cancelled') { db.prepare("UPDATE approvals SET status = 'stale', decision_note = ? WHERE id = ? AND status = 'approved'").run(!pm || pm.status !== 'active' ? 'permission revoked before it ran' : jobState === 'cancelled' ? 'task stopped before it ran' : 'permission expired before it ran', a.id); store.event(a.job_id, 'system', 'permission.skipped', { approval: a.id }); api.broadcast('approvals', { id: a.id }); continue; }

@@ -325,6 +325,27 @@ export class ChatStore {
     }
   }
 
+  /**
+   * The owner allowed a browser action an assistant asked for during a chat reply. That reply has already ended, so nothing would
+   * pick the approval up: start one turn for the same assistant in the same conversation that performs exactly that action
+   * (browser_act with the approval id), reads the page and reports. Idempotent per approval.
+   */
+  resumeForApproval(approvalId: string, defs: Definitions): Job | null {
+    const ap = this.db.prepare("SELECT id, job_id, status, target, content FROM approvals WHERE id = ?").get(approvalId) as { id: string; job_id: string | null; status: string; target: string; content: string } | undefined;
+    if (!ap || ap.status !== 'approved' || !ap.job_id) return null;
+    let browser = false; try { const j = JSON.parse(ap.content) as Record<string, unknown>; browser = typeof j.url === 'string' && typeof j.action === 'string'; } catch { /* */ }
+    const origin = this.store.get(ap.job_id); if (!browser || !origin || origin.kind !== CHAT_WORKFLOW || !origin.conversation_id) return null;
+    const conv = this.get(origin.conversation_id); if (!conv || conv.status !== 'active') return null;
+    const key = `resume:${ap.id}`; const prior = this.db.prepare('SELECT id FROM jobs WHERE idempotency_key = ?').get(key) as { id: string } | undefined; if (prior) return this.store.get(prior.id) ?? null;
+    const wf = defs.getWorkflow(CHAT_WORKFLOW); if (!wf) return null;
+    const who = (this.db.prepare('SELECT name FROM agent_definitions WHERE id = ?').get(origin.agent_role) as { name: string } | undefined)?.name ?? origin.agent_role;
+    const msg = this.add({ conversation_id: conv.id, role: 'system', kind: 'wake', content: `You allowed: ${ap.target.slice(0, 300)} (approval ${ap.id}). ${who} is continuing. Take a new snapshot of the task tab, run browser_act again with approval_id ${ap.id} on the same control, read what the site did, and report it.`, meta: { automatic: true, resume_approval: ap.id, reporter: origin.agent_role } });
+    const r = this.createTurn({ idempotency_key: key, kind: CHAT_WORKFLOW, objective: `Continue after the owner allowed ${ap.id}`, success_contract: wf.contract, agent_role: origin.agent_role, workspace_id: conv.workspace_id, priority: 2, inputs: { conversation_id: conv.id, message_id: msg.id, chain_root: msg.id, automatic: true, resume_approval: ap.id } }, 'engine', conv.id, msg.id);
+    this.db.prepare('UPDATE messages SET job_id = ? WHERE id = ?').run(r.job.id, msg.id);
+    this.store.event(r.job.id, 'engine', 'approval.resumed', { approval: ap.id, from_job: origin.id });
+    return r.job;
+  }
+
   /** The owner message submitted with this client id, if any (idempotent submission). */
   byClientId(conversationId: string, clientId: string): Message | null { const r = this.db.prepare("SELECT id FROM messages WHERE conversation_id = ? AND role = 'owner' AND json_extract(meta, '$.client_id') = ? ORDER BY seq LIMIT 1").get(conversationId, clientId) as { id: string } | undefined; return r ? (this.message(r.id) ?? null) : null; }
 

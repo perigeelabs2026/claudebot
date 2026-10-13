@@ -12,7 +12,7 @@ export type Executor = (action: { id: string; kind: string; target: string; cont
 export type ActionOutcome =
   | { status: 'performed'; action: ActionRow; result: unknown }
   | { status: 'already_performed'; action: ActionRow }
-  | { status: 'refused'; action: ActionRow; reason: string }
+  | { status: 'refused'; action: ActionRow | null; reason: string }
   | { status: 'failed'; action: ActionRow; error: string }
   | { status: 'uncertain'; action: ActionRow; reason: string };
 
@@ -59,6 +59,9 @@ export class ActionStore {
   }
 
   async perform(input: { job_id?: string | null; idempotency_key: string; kind: string; target: string; content: string; approval_id?: string | null; actor: string }): Promise<ActionOutcome> {
+    // A browser approval (its content is the exact page/control request) is carried out only by the assistant's browser_act, on the
+    // real page. The outbox never performs or consumes it: doing so would mark it used while nothing reached the site.
+    if (isBrowserRequest(input.content)) return { status: 'refused', action: null, reason: 'this is a browser action; the assistant performs it in the browser, not the outbox' };
     const existing = this.byKey(input.idempotency_key);
     if (existing && existing.status === 'performed') return { status: 'already_performed', action: existing };
     if (existing && existing.status === 'uncertain') return { status: 'uncertain', action: existing, reason: 'the earlier attempt has an unknown outcome; the owner must check and resolve it before anything is tried again' };
@@ -127,3 +130,6 @@ export class ActionStore {
     return this.get(id)!;
   }
 }
+
+/** Approval content written by browser_act (approvalContent: url + action + element). */
+export function isBrowserRequest(content: string): boolean { try { const j = JSON.parse(String(content)) as Record<string, unknown>; return !!j && typeof j.url === 'string' && typeof j.action === 'string' && 'element' in j; } catch { return false; } }

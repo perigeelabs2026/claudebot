@@ -102,6 +102,7 @@ export class TelegramBridge {
       else {
         this.d.approvals.decide(ap.id, m[3] === 'allow' ? 'approved' : 'rejected', 'owner', m[3] === 'allow' ? 'allowed from the bound Telegram chat' : 'denied from the bound Telegram chat');
         if (ap.job_id) { const j = this.d.store.get(ap.job_id); if (j && j.state === 'waiting_for_approval') this.d.store.transition(j.id, 'queued', 'owner', { waiting_on: null, blocker_code: null, operator_action: null, next_action: 'resume after owner decision' }, { approval: ap.id, via: 'telegram' }); }
+        if (m[3] === 'allow') this.d.chat.resumeForApproval(ap.id, this.d.defs);
         ev(db, 'telegram.decided', { approval: ap.id, decision: m[3] }); text = m[3] === 'allow' ? 'Allowed once.' : 'Denied.';
         const conv = ap.job_id ? (db.prepare('SELECT conversation_id FROM jobs WHERE id = ?').get(ap.job_id) as { conversation_id: string | null } | undefined)?.conversation_id : null; if (conv) this.d.onChange?.(conv);
       }
