@@ -14,6 +14,15 @@ import { ChatStore } from '../chat/store.ts';
 const OWNER_ONLY = /\b(pass(word|code|phrase)|verification code|one[- ]time|otp|mfa|2fa|captcha|sign[- ]?in|log[- ]?in|payment|purchase|credit card|spend)\b/i;
 export const requeueKey = (jobId: string) => `requeue:${jobId}`;
 
+/** The labelled system note a re-queued task's prompt carries, so it does not block again the same way. Not an owner direction. */
+export function requeueNote(inputs: Record<string, unknown>): string {
+  if (typeof inputs.unblock !== 'string' || !inputs.unblock.trim()) return '';
+  const answers = Array.isArray(inputs.bank_answers) ? inputs.bank_answers.map(String).filter(Boolean) : [];
+  return `\n\nSystem note (ClaudeBot, not the owner): this task was blocked before and is running again. ${answers.length
+    ? `The owner's saved answers cover what blocked it; use them exactly and finish, do not ask the owner:\n${answers.map((a) => `- ${a}`).join('\n')}`
+    : 'What blocked it is an essay or free-text answer: draft this from the resume, work history and memory; do not ask the owner.'}`;
+}
+
 export interface Requeued { from: string; to: string; how: 'bank' | 'draft' }
 
 /** Re-queue each recently blocked task whose question the bank answers (or that is an essay), at most once per task. */

@@ -722,6 +722,13 @@ test('a task blocked on something the answer bank answers (or an essay) is re-qu
   assert.equal(q2.state, 'queued'); assert.equal(qi.company, 'Acme', 'original inputs kept'); assert.deepEqual(qi.bank_answers, ['Quota attainment: 70% across all quarters']); assert.match(qi.unblock, /do not ask the owner/);
   const team = s.chat.teamConversation()!; assert.ok(s.chat.messages(team).some((m) => /Back to Scout: "Apply q"/.test(m.content)), 'posted to the team group');
   assert.deepEqual(requeueBankKnownBlockers(s.db, s.store, { bankDir: bank }), [], 'at most one re-queue per task');
+  const prompts: Record<string, string> = {}; const orig = s.runtime.startTurn.bind(s.runtime); s.runtime.startTurn = async (req) => { prompts[req.jobId] = req.prompt; return orig(req); };
+  for (let i = 0; i < 2; i++) { const l = s.store.lease({ owner: 'worker:test', leaseSeconds: 30, fair: true }); assert.ok(l); await runJob(s.deps, l.id); }
+  const e2 = r.find((x) => x.from === essay.id)!.to;
+  assert.match(prompts[q2.id] ?? '', /System note \(ClaudeBot, not the owner\)[\s\S]*- Quota attainment: 70% across all quarters/, 'the re-queued prompt carries the bank answer');
+  assert.match(prompts[e2] ?? '', /draft this from the resume, work history and memory; do not ask the owner/, 'the re-queued essay prompt carries the drafting note');
+  assert.equal(s.db.prepare("SELECT COUNT(*) AS n FROM job_events WHERE type = 'owner.direction' AND job_id IN (?, ?)").get(q2.id, e2) && (s.db.prepare("SELECT COUNT(*) AS n FROM job_events WHERE type = 'owner.direction' AND job_id IN (?, ?)").get(q2.id, e2) as { n: number }).n, 0, 'not written as an owner direction');
+  s.runtime.startTurn = orig;
   s.store.patch(q2.id, { state: 'failed_terminal', blocker_code: 'BLOCKED', failure_detail: 'blocked: the form needs quota attainment again' } as never);
   assert.deepEqual(requeueBankKnownBlockers(s.db, s.store, { bankDir: bank }), [], 'a re-queued task that blocks again is not re-queued again');
   void pw; void salary;
