@@ -39,7 +39,10 @@ test('1: a model is checked against the connection\'s own list, at startup and o
   const gw = { advertisedModels: async () => ({ models: ['default', 'opus', 'sonnet', 'haiku'], reply: 'Available models: default, opus, sonnet, haiku' }) };
   const v = await validateModel(gw, 'claude-fable-5-1'); assert.equal(v.ok, false); assert.match((v as { reason: string }).reason, /does not offer "claude-fable-5-1" \(it is sent as "fable"\)\. It says: Available models: default, opus, sonnet, haiku/);
   assert.deepEqual(await validateModel(gw, 'claude-opus-5-5'), { ok: true });
-  assert.deepEqual((await advertised(null)).models, ['default', 'opus', 'fable', 'sonnet', 'haiku'], 'no list from the connection: the verified fallback list');
+  assert.deepEqual(await advertised(null), { models: ['default', 'opus', 'sonnet', 'haiku'], reply: null, verified: false }, 'no list from the connection: the live-verified list, without Fable');
+  const offline = await validateModel(null, 'claude-fable-5-1'); assert.equal(offline.ok, false); assert.match((offline as { reason: string }).reason, /^Could not verify "claude-fable-5-1"/, 'unverifiable is reported, never passed');
+  assert.deepEqual(await validateModel(null, 'claude-sonnet-5-5'), { ok: true });
+  assert.deepEqual(await validateModel({ advertisedModels: async () => ({ models: ['default', 'opus', 'fable', 'sonnet', 'haiku'], reply: 'x' }) }, 'claude-fable-5-1'), { ok: true }, 'listed live: passes');
   const s = setup(); s.defs.upsertAgent({ ...s.defs.getAgent('researcher')!, model: 'claude-fable-5-1' }, 'owner');
   const probs = checkModelAliases(s.db, (id) => s.defs.previousModel(id), (await advertised(gw)).models);
   assert.deepEqual(probs.map((p) => [p.agent, p.model]), [['researcher', 'claude-fable-5-1']], 'this morning\'s alias would have been caught at startup');
@@ -52,13 +55,19 @@ test('1: a model is checked against the connection\'s own list, at startup and o
 
 test('1: three failures by one assistant in 30 minutes post once (group and owner) and pause its queue until a turn works', () => {
   const s = setup(); const t0 = Date.now();
+  const flaky = s.job('flaky', 'One flaky task');
+  for (let i = 0; i < 3; i++) s.store.event(flaky.id, 'w', 'job.transition', { from: 'running', to: 'retry_scheduled', reason: 'socket hang up' });
+  assert.deepEqual(failureStreaks(s.db, s.store, t0), [], 'one task retrying three times is not a streak');
+  s.store.transition(flaky.id, 'cancelled', 'owner');
   for (let i = 1; i <= STREAK.failures; i++) { const j = s.job(`f${i}`, `Apply ${i}`); s.store.transition(j.id, 'leased', 'w'); s.store.transition(j.id, 'running', 'w'); s.store.failRetryable(j.id, 'w', 'turn failed: model_refused'); }
   const waiting = s.job('next', 'Apply next');
   assert.deepEqual(failureStreaks(s.db, s.store, t0), ['researcher']);
   assert.deepEqual(failureStreaks(s.db, s.store, t0 + 1000), [], 'posted once per streak');
-  const l = s.lines(); assert.equal(l.length, 1); assert.match(l[0].content, /Researcher failed 3 times in the last 30 minutes \(last: turn failed: model_refused\)\. Researcher's queue is paused/);
+  const l = s.lines(); assert.equal(l.length, 1); assert.match(l[0].content, /Researcher failed 6 times in the last 30 minutes \(last: turn failed: model_refused\)\. Researcher's queue is paused/);
   assert.equal((l[0].meta as { owner_alert?: boolean }).owner_alert, true, 'the owner hears it too');
   assert.equal(s.store.lease({ owner: 'w9', leaseSeconds: 30 }), undefined, 'the paused assistant\'s queue does not start');
+  const owner = s.store.create({ idempotency_key: 'owner-msg', kind: 'chat.turn', objective: 'Jude, what happened?', success_contract: {}, agent_role: 'researcher', workspace_id: s.ws.id, inputs: {} } as never, 'owner').job;
+  assert.equal(s.store.lease({ owner: 'w9', leaseSeconds: 30 })?.id, owner.id, 'the owner\'s message still runs: a paused assistant never ignores the owner');
   s.db.prepare("DELETE FROM runtime_state WHERE key = 'agent.paused.researcher'").run();   // what a successful turn or a model change does
   assert.equal(s.store.lease({ owner: 'w9', leaseSeconds: 30 })?.id, waiting.id);
 });
@@ -132,4 +141,20 @@ test('1: engine-restart cancellations never count toward a failure streak', () =
   const s = setup();
   for (let i = 0; i < 3; i++) { const j = s.job(`r${i}`, 'x'); s.store.event(j.id, 'worker', 'job.transition', { from: 'running', to: 'retry_scheduled', reason: 'cancelled: interrupted by an engine shutdown or restart' }); }
   assert.deepEqual(failureStreaks(s.db, s.store), []);
+});
+
+test('5b: a task held by its own assistant or project limit while workers are free is surfaced (Jude at 1 behind a long browser task)', () => {
+  const s = setup(); const now = Date.now(); s.db.prepare('UPDATE agent_definitions SET concurrency_limit = 1 WHERE id = ?').run('researcher');
+  s.job('long', 'Fill the Workday application'); s.store.lease({ owner: 'w1', leaseSeconds: 3600 });
+  const late = s.job('late', 'Apply to Globex'); s.db.prepare('UPDATE jobs SET updated_at = ? WHERE id = ?').run(new Date(now - 25 * 60_000).toISOString(), late.id);
+  assert.equal(starvation(s.db, s.store, 3, now), late.id);
+  assert.match(s.lines()[0].content, /"Apply to Globex" has waited over 20 minutes while workers are free: Researcher runs 1 task at a time and is busy with "Fill the Workday application"/);
+});
+
+test('1: the refusal cache is per assistant and model: a new session of the same assistant does not ask again', async () => {
+  const rt = new ClaudeAcpRuntime({ gateway: {} as never, log, claudeExecutable: '/bin/false', claudeConfigDir: '/tmp/none' }) as unknown as { command: (m: string) => Promise<string>; ensureModel: (k: string, m?: string, f?: string, role?: string) => Promise<unknown> };
+  const sent: string[] = []; rt.command = async (m) => { sent.push(m); return /claude-mystery-9/.test(m) ? 'ACP error: unknown model' : 'ok'; };
+  await rt.ensureModel('s1', 'claude-mystery-9', 'claude-opus-5-5', 'researcher'); await rt.ensureModel('s2', 'claude-mystery-9', 'claude-opus-5-5', 'researcher');
+  assert.equal(sent.filter((m) => m.includes('claude-mystery-9')).length, 1);
+  await rt.ensureModel('s3', 'claude-mystery-9', 'claude-opus-5-5', 'builder'); assert.equal(sent.filter((m) => m.includes('claude-mystery-9')).length, 2, 'another assistant asks for itself');
 });

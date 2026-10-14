@@ -17,20 +17,20 @@ const names = (db: DB) => new Map((db.prepare('SELECT id, name FROM agent_defini
 
 /** An engine restart cancels or re-queues work on purpose: never counted as a failure. */
 const NOT_RESTART = "COALESCE(json_extract(e.detail, '$.reason'), '') NOT LIKE '%engine shutdown or restart%'";
-export const STREAK = { failures: 3, windowMs: 30 * 60_000, pauseMs: 30 * 60_000 };
+export const STREAK = { failures: 3, tasks: 2, windowMs: 30 * 60_000, pauseMs: 30 * 60_000 };
 
 /** 1. Three failures by one assistant within 30 minutes (since its last successful turn): one owner line, and its queue pauses until a
  *  turn succeeds, its model is changed, or 30 minutes pass (then one task runs as a probe). */
 export function failureStreaks(db: DB, store: JobStore, nowMs = Date.now()): string[] {
   const since = iso(nowMs - STREAK.windowMs); const who = names(db); const out: string[] = [];
-  const rows = db.prepare(`SELECT j.agent_role AS agent, COUNT(*) AS n, GROUP_CONCAT(COALESCE(json_extract(e.detail, '$.reason'), j.failure_detail), ' | ') AS reasons
+  const rows = db.prepare(`SELECT j.agent_role AS agent, COUNT(*) AS n, COUNT(DISTINCT j.id) AS tasks, GROUP_CONCAT(COALESCE(json_extract(e.detail, '$.reason'), j.failure_detail), ' | ') AS reasons
     FROM job_events e JOIN jobs j ON j.id = e.job_id
     WHERE e.type = 'job.transition' AND json_extract(e.detail, '$.to') IN ('failed_terminal', 'retry_scheduled') AND e.at > ? AND ${REAL_PROJECT} AND ${NOT_RESTART}
-    GROUP BY j.agent_role HAVING n >= ?`).all(since, STREAK.failures) as Array<{ agent: string; n: number; reasons: string | null }>;
+    GROUP BY j.agent_role HAVING n >= ? AND tasks >= ?`).all(since, STREAK.failures, STREAK.tasks) as Array<{ agent: string; n: number; reasons: string | null }>;
   for (const r of rows) {
     const lastOk = String(getRs(db, `agent.last_ok.${r.agent}`) ?? '');
-    const n = (db.prepare(`SELECT COUNT(*) AS n FROM job_events e JOIN jobs j ON j.id = e.job_id WHERE e.type = 'job.transition' AND json_extract(e.detail, '$.to') IN ('failed_terminal', 'retry_scheduled') AND e.at > ? AND e.at > ? AND j.agent_role = ? AND ${REAL_PROJECT} AND ${NOT_RESTART}`).get(since, lastOk || '0', r.agent) as { n: number }).n;
-    if (n < STREAK.failures) continue;
+    const c = (db.prepare(`SELECT COUNT(*) AS n, COUNT(DISTINCT e.job_id) AS tasks FROM job_events e JOIN jobs j ON j.id = e.job_id WHERE e.type = 'job.transition' AND json_extract(e.detail, '$.to') IN ('failed_terminal', 'retry_scheduled') AND e.at > ? AND e.at > ? AND j.agent_role = ? AND ${REAL_PROJECT} AND ${NOT_RESTART}`).get(since, lastOk || '0', r.agent) as { n: number; tasks: number });
+    const n = c.n; if (n < STREAK.failures || c.tasks < STREAK.tasks) continue;   // one flaky task retrying is not a streak
     const paused = getRs(db, `agent.paused.${r.agent}`) as { until?: string; since?: string } | null;
     if (paused?.since && paused.since > lastOk) continue;   // this streak is already paused and reported
     const t = iso(nowMs); setRs(db, `agent.paused.${r.agent}`, { since: t, until: iso(nowMs + STREAK.pauseMs), failures: n }, 'failure streak');
@@ -83,7 +83,20 @@ export function governorLine(db: DB, store: JobStore, nowMs = Date.now()): strin
 /** 5. A queue starved behind long tasks: a task queued for 20 minutes while every worker is busy. */
 export function starvation(db: DB, store: JobStore, workerLimit: number, nowMs = Date.now()): string | null {
   const active = db.prepare("SELECT id, objective, agent_role, kind FROM jobs WHERE state IN ('leased', 'running') AND COALESCE(waiting_on, '') NOT LIKE 'children:%' ORDER BY updated_at").all() as Array<{ id: string; objective: string; agent_role: string; kind: string }>;
-  if (active.length < workerLimit) return null;
+  if (active.length < workerLimit) {
+    // Workers are free, yet a task waits: its assistant or its project is at its own limit (Jude at 1 behind a long browser task).
+    const held = db.prepare(`SELECT j.id, j.objective, j.agent_role, j.workspace_id, a.concurrency_limit AS alimit, w.worker_limit AS wlimit, w.name AS wname,
+        (SELECT COUNT(*) FROM jobs x WHERE x.agent_role = j.agent_role AND x.state IN ('leased','running') AND COALESCE(x.waiting_on, '') NOT LIKE 'children:%') AS abusy,
+        (SELECT COUNT(*) FROM jobs x WHERE x.workspace_id IS j.workspace_id AND x.state IN ('leased','running') AND COALESCE(x.waiting_on, '') NOT LIKE 'children:%') AS wbusy
+      FROM jobs j LEFT JOIN agent_definitions a ON a.id = j.agent_role LEFT JOIN workspaces w ON w.id = j.workspace_id
+      WHERE j.state = 'queued' AND j.updated_at < ? AND ${REAL_PROJECT} ORDER BY j.updated_at`).all(iso(nowMs - 20 * 60_000)) as Array<{ id: string; objective: string; agent_role: string; alimit: number | null; wlimit: number | null; wname: string | null; abusy: number; wbusy: number }>;
+    const h = held.find((x) => (x.alimit !== null && x.abusy >= x.alimit) || (x.wlimit !== null && x.wbusy >= x.wlimit)); if (!h) return null;
+    const who = names(db); const name = who.get(h.agent_role) ?? h.agent_role;
+    const behind = active.filter((a) => a.agent_role === h.agent_role).map((a) => `"${taskTitle(a.objective)}"`).join('; ');
+    const why = h.alimit !== null && h.abusy >= h.alimit ? `${name} runs ${h.alimit} task${h.alimit === 1 ? '' : 's'} at a time${behind ? ` and is busy with ${behind}` : ''}` : `the project "${h.wname ?? 'this project'}" runs ${h.wlimit} task${h.wlimit === 1 ? '' : 's'} at a time`;
+    teamLine(db, store, { key: `held:${h.id}`, jobId: h.id, text: `"${taskTitle(h.objective)}" has waited over 20 minutes while workers are free: ${why}. Raise the limit in Edit assistant or let it wait.` });
+    return h.id;
+  }
   const old = db.prepare(`SELECT j.id, j.objective, j.agent_role, j.created_at FROM jobs j WHERE j.state = 'queued' AND j.updated_at < ? AND ${REAL_PROJECT} ORDER BY j.updated_at LIMIT 1`).get(iso(nowMs - 20 * 60_000)) as { id: string; objective: string; agent_role: string } | undefined;
   if (!old) return null;
   const who = names(db); const waiting = (db.prepare("SELECT COUNT(*) AS n FROM jobs WHERE state = 'queued' AND updated_at < ?").get(iso(nowMs - 20 * 60_000)) as { n: number }).n;

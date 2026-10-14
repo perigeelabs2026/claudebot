@@ -46,6 +46,7 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Assistants can open zip and tar archives you give them: files are extracted into a new folder inside the task. Links, paths that escape the folder, and oversized archives are refused. Documents and PDFs also get text copies the assistants can read.
 
 ### Fixed
+- An assistant paused after a failure streak still answers the owner's messages. A streak needs at least two failing tasks; one flaky task retrying doesn't count. When the Claude connection doesn't list its models, a model that hasn't been verified live (Fable) is reported as "could not verify" instead of passing. A task held by its own assistant's or project's limit while workers sit free is now surfaced. The refused-model cache is kept per assistant and model.
 - No more silent idling. These problems now post one line in the team group; the ones that concern the owner also go to Telegram, held during quiet hours.
   - A refused model is its own failure class and is never retried. The turn falls back to the assistant's last accepted model, and that model is not requested again for an hour. Models are checked against the Claude connection's own list at startup and whenever an assistant is saved, and a model the connection doesn't offer is refused with the connection's own words.
   - Three failures by one assistant within 30 minutes pause that assistant's queue until a turn works, its model is changed, or 30 minutes pass.

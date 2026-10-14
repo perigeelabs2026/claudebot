@@ -30,7 +30,7 @@ test('every turn carries its assistant\'s model; a refused model falls back once
   assert.match(run, /withModelFallback\(deps, job\.id, agent, agent\?\.model, ctx\.defs\.previousModel\(agentId\)/, 'workflow stages pass their model (with a fallback if it is refused)');
   assert.match(run, /const turnModel = replan && replanModel \? replanModel : agent\?\.model;/, 'the lead re-plans on the opt-in replan_model when delegated work came back blocked or partial'); assert.match(run, /key = 'replan_model'/);
   const acp = src('src/runtime/claude-acp.ts');
-  assert.match(acp, /if \(!req\.probeOnly\) modelFallback = await this\.ensureModel\(sessionKey, req\.model, req\.fallbackModel\);/);
+  assert.match(acp, /if \(!req\.probeOnly\) modelFallback = await this\.ensureModel\(sessionKey, req\.model, req\.fallbackModel, req\.role\);/);
   assert.match(acp, /throw new GatewayError\('MODEL_REFUSED'/);
 });
 
@@ -68,8 +68,9 @@ test('startup check: every configured model must resolve; a bad alias is posted 
   const { checkModelAliases, reportModelProblem, resolves } = await import('../../src/runtime/model-check.ts');
   const { JobStore } = await import('../../src/jobs/store.ts'); const { ChatStore } = await import('../../src/chat/store.ts');
   const db = openDatabase(':memory:'); migrate(db); const d = new Definitions(db); d.seedSystemDefaults(); const store = new JobStore(db);
-  for (const m of AGENT_MODELS) assert.ok(resolves(m), m);
-  assert.deepEqual(checkModelAliases(db, (id) => d.previousModel(id)), [], 'the shipped models all resolve');
+  for (const m of AGENT_MODELS.filter((x) => x !== 'claude-fable-5-1')) assert.ok(resolves(m), m);
+  assert.equal(resolves('claude-fable-5-1'), false, 'Fable is not in the offline list until verified live');
+  assert.deepEqual(checkModelAliases(db, (id) => d.previousModel(id)), [], 'the shipped default models all resolve');
   d.upsertAgent({ ...d.getAgent('researcher')!, model: 'claude-fable-5-1[1m]' }, 'owner');
   db.prepare("INSERT INTO settings(key, value, updated_at, updated_by) VALUES ('replan_model', ?, ?, 'test') ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify('claude-mystery-9'), new Date().toISOString());
   const probs = checkModelAliases(db, (id) => d.previousModel(id));

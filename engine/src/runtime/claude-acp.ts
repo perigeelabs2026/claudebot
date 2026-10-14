@@ -175,11 +175,11 @@ export class ClaudeAcpRuntime implements ModelRuntime {
     const models = [...new Set((reply.match(/\b(default|opus|fable|sonnet|haiku|claude-[a-z0-9.-]+(?:\[1m\])?)\b/gi) ?? []).map((m) => m.toLowerCase()))];
     return models.length ? { models, reply: redact(reply).replace(/\s+/g, ' ').slice(0, 300) } : null;
   }
-  private async ensureModel(sessionKey: string, model: string | undefined, fallback?: string): Promise<ModelFallback | null> {
+  private async ensureModel(sessionKey: string, model: string | undefined, fallback?: string, role = ''): Promise<ModelFallback | null> {
     if (!model || this.models.get(sessionKey) === model) return null;
     const refused = (reply: string) => /ACP error|unknown|invalid|not (available|allowed|supported|found)|unsupported|usage:/i.test(reply);
-    // A model refused in the last hour is not requested again: the turn goes straight to the fallback.
-    const cachedKey = `${sessionKey}|${model}`; const cached = this.refusedModels.get(cachedKey);
+    // A model refused for this assistant in the last hour is not requested again: the turn goes straight to the fallback.
+    const cachedKey = `${role || sessionKey}|${model}`; const cached = this.refusedModels.get(cachedKey);   // per assistant and model: a new session of the same assistant does not ask again
     let reason: string;
     if (cached && cached.until > Date.now()) reason = cached.reason;
     else {
@@ -220,7 +220,7 @@ export class ClaudeAcpRuntime implements ModelRuntime {
       await gw.connect();
       sessionKey = await this.ensureSession(req);
       if (!req.probeOnly) await this.ensureTimeout(sessionKey, req.timeoutMs);
-      if (!req.probeOnly) modelFallback = await this.ensureModel(sessionKey, req.model, req.fallbackModel);
+      if (!req.probeOnly) modelFallback = await this.ensureModel(sessionKey, req.model, req.fallbackModel, req.role);
       req.onSession?.(sessionKey);
       req.onHeartbeat?.(`acp session ${sessionKey}`);
       if (req.signal?.aborted) { await this.cancel(sessionKey); return { ok: false, category: 'cancelled', message: 'stopped before the turn started', retryable: true, runtimeSessionId: sessionKey }; }

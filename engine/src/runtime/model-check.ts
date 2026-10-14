@@ -10,20 +10,22 @@ import type { ModelRuntime } from './types.ts';
 import { acpModel } from './claude-acp.ts';
 import { teamLine } from '../cos/alerts.ts';
 
-/** Used only when the connection does not list its models: the aliases Claude Code's ACP agent advertised when last verified live. */
-export const ADVERTISED_MODELS = ['default', 'opus', 'fable', 'sonnet', 'haiku'] as const;
+/** Used only when the connection does not list its models: the aliases verified live (haiku, sonnet, opus). Fable is not in it until
+ *  it is verified live; when the connection lists nothing, Fable reports "could not verify" instead of passing. */
+export const ADVERTISED_MODELS = ['default', 'opus', 'sonnet', 'haiku'] as const;
 export const resolves = (model: string, advertised: readonly string[] = ADVERTISED_MODELS): boolean => advertised.map((a) => a.toLowerCase()).includes(acpModel(model).toLowerCase());
 
 /** The connection's own list, or the fallback list when it names none. */
-export async function advertised(runtime: Pick<ModelRuntime, 'advertisedModels'> | null | undefined): Promise<{ models: readonly string[]; reply: string | null }> {
-  try { const r = await runtime?.advertisedModels?.(); if (r && r.models.length) return r; } catch { /* the fallback list */ }
-  return { models: ADVERTISED_MODELS, reply: null };
+export async function advertised(runtime: Pick<ModelRuntime, 'advertisedModels'> | null | undefined): Promise<{ models: readonly string[]; reply: string | null; verified: boolean }> {
+  try { const r = await runtime?.advertisedModels?.(); if (r && r.models.length) return { ...r, verified: true }; } catch { /* the fallback list */ }
+  return { models: ADVERTISED_MODELS, reply: null, verified: false };
 }
 
 /** Whether a model may be saved on an assistant; when not, the reason in the connection's own words. */
 export async function validateModel(runtime: Pick<ModelRuntime, 'advertisedModels'> | null | undefined, model: string): Promise<{ ok: true } | { ok: false; reason: string }> {
   const a = await advertised(runtime);
   if (resolves(model, a.models)) return { ok: true };
+  if (!a.verified) return { ok: false, reason: `Could not verify "${model}": the Claude connection did not list its models, and "${acpModel(model)}" has not been verified live. Pick ${a.models.filter((m) => m !== 'default').join(', ')}, or try again when the connection is up.` };
   return { ok: false, reason: `The Claude connection does not offer "${model}" (it is sent as "${acpModel(model)}"). ${a.reply ? `It says: ${a.reply}` : `It offers: ${a.models.join(', ')}.`}` };
 }
 

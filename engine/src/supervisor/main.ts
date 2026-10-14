@@ -114,7 +114,7 @@ const runWorkLog = (why: string) => { try { const r = rollupWorkLogs(db); if (r.
 runWorkLog('startup');
 // Bank-known and essay blockers go back to the team once (cos/requeue.ts), whether or not Telegram is set up.
 // Every configured model must resolve to one the Claude connection advertises; a bad alias is reported now, not when a turn fails.
-void (async () => { try { const defs0 = new Definitions(db); const a = await advertised(runtime); for (const p of checkModelAliases(db, (id) => defs0.previousModel(id), a.models)) { log.warn('model does not resolve', { ...p }); reportModelProblem(db, store, { ...p, reason: a.reply ? `it says: ${a.reply}` : 'not one of the models it offers' }); } } catch (e) { log.warn('model check failed', { err: (e as Error).message }); } })();
+void (async () => { try { const defs0 = new Definitions(db); const a = await advertised(runtime); for (const p of checkModelAliases(db, (id) => defs0.previousModel(id), a.models)) { log.warn('model does not resolve', { ...p }); reportModelProblem(db, store, { ...p, reason: a.reply ? `it says: ${a.reply}` : a.verified ? 'not one of the models it offers' : 'could not verify: the connection did not list its models' }); } } catch (e) { log.warn('model check failed', { err: (e as Error).message }); } })();
 // Silent-idle watch: failure streaks, routine results, governor pauses, a starved queue, a lapsed plan limit, unanswered decisions.
 timers.push(setInterval(() => watchTick(db, store, { workerLimit: dispatcher.desired }), 60_000));
 timers.push(setInterval(() => { try { const r = requeueBankKnownBlockers(db, store); if (r.length) log.info('blocked tasks re-queued', { tasks: r.length }); } catch (e) { log.warn('re-queue failed', { err: (e as Error).message }); } }, 60_000));

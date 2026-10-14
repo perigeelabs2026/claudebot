@@ -85,8 +85,9 @@ export class JobStore {
       const depClause = `AND NOT EXISTS (SELECT 1 FROM json_each(j.depends_on) d LEFT JOIN jobs p ON p.id = d.value WHERE p.id IS NULL OR p.state != 'completed')`
         // An assistant that is turned off keeps its work queued (a note sent while it was paused is delivered when it is turned back on).
         + ` AND NOT EXISTS (SELECT 1 FROM agent_definitions ad WHERE ad.id = j.agent_role AND ad.enabled = 0)`
-        // An assistant paused after a failure streak (cos/watch.ts) keeps its work queued until the pause ends or a turn succeeds.
-        + ` AND NOT EXISTS (SELECT 1 FROM runtime_state ps WHERE ps.key = 'agent.paused.' || j.agent_role AND json_extract(ps.value, '$.until') > '${t}')`
+        // An assistant paused after a failure streak (cos/watch.ts) keeps its tasks queued until the pause ends or a turn succeeds;
+        // the owner's own messages (chat turns) always run, so a paused assistant never ignores the owner.
+        + ` AND (j.kind = 'chat.turn' OR NOT EXISTS (SELECT 1 FROM runtime_state ps WHERE ps.key = 'agent.paused.' || j.agent_role AND json_extract(ps.value, '$.until') > '${t}'))`
         // One persistent session per assistant per conversation: its turns run strictly one after another, oldest first.
         + ` AND NOT (j.kind = 'chat.turn' AND j.conversation_id IS NOT NULL AND EXISTS (SELECT 1 FROM jobs x WHERE x.kind = 'chat.turn' AND x.conversation_id = j.conversation_id AND x.agent_role = j.agent_role AND x.id != j.id AND (x.state IN ('leased','running') OR (x.state IN ('queued','retry_scheduled') AND (x.created_at < j.created_at OR (x.created_at = j.created_at AND x.rowid < j.rowid))))))`;   /* an older turn waiting to retry (e.g. interrupted by an engine restart) keeps its place: a later message never jumps ahead of it */
       const sql = opts.fair
