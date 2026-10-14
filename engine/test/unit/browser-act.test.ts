@@ -120,3 +120,40 @@ test('browser_act: a download lands in the task folder and is registered with it
   assert.equal(art.sha256, crypto.createHash('sha256').update('PDF-BYTES').digest('hex'));
   fs.rmSync(s.tmp, { recursive: true, force: true });
 });
+
+test('account passwords: set_account_password stores a generated password and fill_secret types it; the value never reaches the model, events or the transcript', async () => {
+  const { looksSecret } = await import('../../src/memory/vault.ts');
+  const { AccountSecrets } = await import('../../src/secrets/accounts.ts');
+  const s = setup(); recordTaskTab(s.db, s.job.id, 'TAB1');
+  const cap = issueCapability(path.join(s.tmp, 'run'), s.job, s.wsDir, [...s.cap.tools, 'set_account_password']);
+  const typed: Array<{ tab: string; text: string }> = []; s.broker.secretTyper = async (tab, text) => { typed.push({ tab, text }); return true; };
+  const results: string[] = [];
+  let r = await s.broker.call(cap, 'browser_act', { action: 'fill_secret', ref: 'e50', account: 'jobs.example.com:owner@example.com' }); results.push(JSON.stringify(r));
+  assert.equal(r.ok, false); assert.match(r.text, /set_account_password/); assert.equal(typed.length, 0, 'nothing typed without a stored password');
+  r = await s.broker.call(cap, 'set_account_password', { account: 'Jobs.Example.com:owner@example.com' }); results.push(JSON.stringify(r)); assert.equal(r.ok, true);
+  const stored = (await new AccountSecrets({ secretsDir: path.join(s.tmp, 'secrets') }).get('jobs.example.com:owner@example.com'))!;
+  assert.equal(stored.length, 20); assert.match(stored, /[A-Z]/); assert.match(stored, /[a-z]/); assert.match(stored, /\d/); assert.match(stored, /[!#$%*+\-=?@_]/);
+  r = await s.broker.call(cap, 'browser_act', { action: 'fill_secret', ref: 'e5', account: 'jobs.example.com:owner@example.com' }); results.push(JSON.stringify(r));
+  assert.equal(r.ok, false); assert.match(r.text, /only into a password field/); assert.equal(typed.length, 0);
+  r = await s.broker.call(cap, 'browser_act', { action: 'fill_secret', ref: 'e50', account: 'jobs.example.com:owner@example.com' }); results.push(JSON.stringify(r));
+  assert.equal(r.ok, true); assert.deepEqual(typed, [{ tab: 'TAB1', text: stored }], 'the stored value is typed into the task tab');
+  assert.deepEqual(acts(s, 'click').at(-1), ['click', 'e50', '--target-id', 'TAB1'], 'the field is focused first');
+  const events = (s.db.prepare('SELECT detail FROM job_events').all() as Array<{ detail: string }>).map((e) => e.detail).join('\n');
+  const transcript = [...results, events, JSON.stringify(s.calls)].join('\n');
+  for (const t of [...results, events, transcript]) { assert.equal(looksSecret(t), null); assert.ok(!t.includes(stored), 'the value appears nowhere the model or a log can read'); }
+  assert.match(events, /"action":"fill_secret"/); assert.match(events, /account\.password_set|jobs\.example\.com/);
+  const mode = fs.statSync(path.join(s.tmp, 'secrets', 'accounts.json')).mode & 0o777; assert.equal(mode, 0o600, 'off macOS the store is a 0600 file');
+});
+
+test('account passwords: on macOS the value goes to the Keychain through the security tool', async () => {
+  const { AccountSecrets } = await import('../../src/secrets/accounts.ts');
+  const calls: string[][] = []; const kc = new Map<string, string>();
+  const exec = async (cmd: string, args: string[]) => { calls.push([cmd, ...args]); const a = args[args.indexOf('-a') + 1];
+    if (args[0] === 'add-generic-password') { kc.set(a, args[args.indexOf('-w') + 1]); return { ok: true, stdout: '' }; }
+    return kc.has(a) ? { ok: true, stdout: `${kc.get(a)}\n` } : { ok: false, stdout: '' }; };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kc-')); const sec = new AccountSecrets({ secretsDir: dir, platform: 'darwin', exec });
+  assert.equal(await sec.get('a:b@c.d'), null);
+  assert.equal(await sec.set('A:b@c.d', 'Xy7!secretvalue'), true); assert.equal(await sec.get('a:b@c.d'), 'Xy7!secretvalue');
+  assert.deepEqual(calls[1].slice(0, 7), ['/usr/bin/security', 'add-generic-password', '-U', '-a', 'a:b@c.d', '-s', 'claudebot.account']);
+  assert.equal(fs.readdirSync(dir).length, 0, 'nothing written to disk on macOS');
+});

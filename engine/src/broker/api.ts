@@ -8,6 +8,7 @@ import { recordTaskTab, taskTab, newTabId } from '../browser/tabs.ts';
 import type { DB } from '../db/open.ts';
 import { JobStore, newId, now } from '../jobs/store.ts';
 import { ApprovalStore, CONSEQUENTIAL_KINDS } from '../approvals/store.ts';
+import { AccountSecrets, accountKey, generatePassword } from '../secrets/accounts.ts';
 import { Definitions } from '../model/definitions.ts';
 import { ChatStore, ChatRuleError } from '../chat/store.ts';
 import { Assistants, ownerAsked, CHAT_CREATE_DAILY_LIMIT } from '../chat/assistants.ts';
@@ -441,6 +442,7 @@ export class BrokerApi {
         } catch (e) { return { ok: false, text: `not scheduled: ${(e as Error).message}` }; }
       }
       case 'browser_act': return this.browserAct(cap, a, actor);
+      case 'set_account_password': return this.setAccountPassword(cap, actor, String(a.account ?? ''));
       case 'wait_for_children': {
         const ids = Array.isArray(a.ids) ? a.ids.map(String) : (db.prepare("SELECT id FROM jobs WHERE parent_id = ?").all(cap.job_id) as Array<{ id: string }>).map((r) => r.id);
         const r = await waitForChildren(db, this.store, cap.job_id, ids, Number(a.max_seconds ?? 50) * 1000);
@@ -504,6 +506,7 @@ export class BrokerApi {
     if (req.action === 'snapshot') { this.store.event(cap.job_id, actor, 'browser.act', { action: 'snapshot' }); return { ok: true, text: snap.stdout.slice(0, 60_000) }; }
     const els = parseSnapshot(snap.stdout); const byRef = (r?: string) => els.find((e) => e.ref === r);
     const el = byRef(req.ref);
+    if (String(a.action) === 'fill_secret') return this.fillSecret(cap, actor, tab, el, req.ref, String(a.account ?? ''));
     const lastTyped = db.prepare("SELECT detail FROM job_events WHERE job_id = ? AND type = 'browser.act' ORDER BY seq DESC LIMIT 1").get(cap.job_id) as { detail: string } | undefined;
     const focused = req.action === 'press' ? (() => { try { const d = JSON.parse(lastTyped?.detail ?? '{}') as { ref?: string }; return byRef(d.ref); } catch { return undefined; } })() : undefined;
     const verdict = decide(req, el, focused, els);
@@ -606,6 +609,44 @@ export class BrokerApi {
     this.store.event(cap.job_id, actor, r.ok ? 'browser.act' : 'browser.act_failed', { action: req.action, ...elementLog, url: urlNow, why: verdict.reason, ...(verdict.verdict === 'allow' && verdict.commit ? { commit: true } : {}), ...extra });   // commit: a submit-type control, allowed (not on the allowlist) and audited
     if (!r.ok) return { ok: false, text: `the browser could not ${req.action}: ${(r.stderr || r.stdout).replace(/\s+/g, ' ').slice(0, 200)}` };
     return { ok: true, text: `${req.action} done (${verdict.reason}).${req.action === 'download' && extra.artifact_id ? ` Saved as artifact ${extra.artifact_id} (${extra.bytes} bytes).` : ''}${req.action === 'upload' ? ` The page now holds ${String(extra.file)}; click the form's own submit/upload button next.` : ''} Take a snapshot to see the page now.`, data: extra };
+  }
+
+  /** Account passwords (secrets/accounts.ts): Keychain on macOS, a 0600 file elsewhere. */
+  accounts = (): AccountSecrets => new AccountSecrets({ secretsDir: this.cfg.secretsDir });
+  /** Types text into the focused element of a tab over the DevTools protocol: no process arguments, no probe registry, no log. */
+  secretTyper = async (tab: string, text: string): Promise<boolean> => {
+    try {
+      const list = (await (await fetch(`http://127.0.0.1:${this.cfg.browserCdpPort}/json`, { signal: AbortSignal.timeout(3000) })).json()) as Array<{ id: string; webSocketDebuggerUrl?: string }>;
+      const ws = list.find((t) => t.id === tab)?.webSocketDebuggerUrl; if (!ws) return false;
+      return await new Promise<boolean>((resolve) => {
+        const sock = new WebSocket(ws); const done = (ok: boolean) => { try { sock.close(); } catch { /* */ } resolve(ok); };
+        const timer = setTimeout(() => done(false), 8000);
+        sock.onopen = () => sock.send(JSON.stringify({ id: 1, method: 'Input.insertText', params: { text } }));
+        sock.onmessage = (ev) => { try { const m = JSON.parse(String(ev.data)) as { id?: number; error?: unknown }; if (m.id === 1) { clearTimeout(timer); done(!m.error); } } catch { /* */ } };
+        sock.onerror = () => { clearTimeout(timer); done(false); };
+      });
+    } catch { return false; }
+  };
+
+  /** Create (or replace) the password for an account the assistant is signing up for; the value never leaves the broker. */
+  private async setAccountPassword(cap: Capability, actor: string, account: string): Promise<{ ok: boolean; text: string }> {
+    const key = accountKey(account); if (!key) return { ok: false, text: 'account is required, e.g. "myworkdayjobs.com:name@example.com"' };
+    const ok = await this.accounts().set(key, generatePassword());
+    if (!ok) return { ok: false, text: 'The password store could not save it. Nothing was typed.' };
+    this.store.event(cap.job_id, actor, 'account.password_set', { account: key });
+    return { ok: true, text: `A strong password for ${key} is stored. Type it with browser_act action "fill_secret", ref = the password field, account = "${key}" (and the confirm field too). You never see the value.` };
+  }
+
+  private async fillSecret(cap: Capability, actor: string, tab: string, el: SnapshotElement | undefined, ref: string | undefined, account: string): Promise<{ ok: boolean; text: string }> {
+    const key = accountKey(account);
+    if (!el || !(el.role === 'password' || /\bpass(word|code|phrase)?\b/i.test(el.name))) return { ok: false, text: `fill_secret types only into a password field; ${ref ?? '?'} is not one. Take a new snapshot and use the password field's ref.` };
+    const value = key ? await this.accounts().get(key) : null;
+    if (!value) return { ok: false, text: `No stored password for "${key || account}". Call set_account_password for it first (or the owner types it during takeover).` };
+    const focus = await this.browserRunner(['click', el.ref, '--target-id', tab], 'browser.click');
+    const typed = focus.ok && await this.secretTyper(tab, value);
+    const urlNow = await this.tabUrl(tab);
+    this.store.event(cap.job_id, actor, typed ? 'browser.act' : 'browser.act_failed', { action: 'fill_secret', ref: el.ref, role: el.role, name: el.name.slice(0, 200), account: key, url: urlNow });
+    return typed ? { ok: true, text: `Typed the stored password for ${key} into ${el.role} "${el.name}". The value is never shown to you.` } : { ok: false, text: 'Could not type into that field. Nothing was typed; take a new snapshot and try the password field again.' };
   }
 
   private async tabUrl(tab: string): Promise<string> { try { const r = await fetch(`http://127.0.0.1:${this.cfg.browserCdpPort}/json`, { signal: AbortSignal.timeout(1500) }); const t = ((await r.json()) as Array<{ id: string; url: string }>).find((x) => x.id === tab); return t?.url ?? 'unknown page'; } catch { return 'unknown page'; } }

@@ -698,12 +698,17 @@ test('ask-back: an essay question or a fact the answer bank holds is bounced bac
   try {
     const s = setup([{ kind: 'ok', text: 'The form has a "Why do you want to join?" essay. Should I draft the essay from your resume?' }, { kind: 'ok', text: 'ok' },
       { kind: 'ok', text: 'The form asks for quota attainment. Should I enter it from your saved answers?' }, { kind: 'ok', text: 'ok' },
-      { kind: 'ok', text: 'The form asks your desired salary. Should I enter $120K?' }]);
+      { kind: 'ok', text: 'The form asks your desired salary. Should I enter $120K?' },
+      { kind: 'ok', text: 'Workday needs a new account. What password should I use for the new account?' }, { kind: 'ok', text: 'ok' },
+      { kind: 'ok', text: 'The site sent a verification code to your phone. Can you tell me the code?' }]);
     const d = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] });
     const bounced = async (text: string) => { const { job } = s.chat.send(d.id, text, s.defs); assert.equal(await run(s, job.id), 'completed'); const b = s.db.prepare('SELECT id FROM jobs WHERE idempotency_key = ?').get(`engine:askback:${job.id}`) as { id: string } | undefined; if (b) assert.equal(await run(s, b.id), 'completed'); return !!b; };
     assert.equal(await bounced('Fill the first form'), true, 'an essay is drafted by the team');
     assert.equal(await bounced('Fill the second form'), true, 'the bank holds the quota answer');
     assert.equal(await bounced('Fill the third form'), false, 'salary is not in the bank: the owner may be asked');
+    assert.equal(await bounced('Fill the fourth form'), true, 'a new account password the team sets itself');
+    const pwBounce = s.db.prepare("SELECT content FROM messages WHERE content LIKE 'ClaudeBot: do not ask the owner for a new account password%'").get() as { content: string } | undefined; assert.match(pwBounce?.content ?? '', /set_account_password[\s\S]*fill_secret/);
+    assert.equal(await bounced('Fill the fifth form'), false, 'a verification code is still the owner\'s');
   } finally { delete process.env.CLAUDEBOT_MEMORY_DIR; }
 });
 
