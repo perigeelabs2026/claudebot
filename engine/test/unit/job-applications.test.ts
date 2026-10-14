@@ -101,3 +101,14 @@ test('upload: sets the file field directly, falls back to the chooser, and only 
   calls.length = 0; holdAfter = 99;
   const bad = await s.call(turn, 'browser_act', { action: 'upload', ref: 'ax18', artifact_id: art }); assert.equal(bad.ok, false); assert.match(bad.text, /Not attached: the page does not show/);
 });
+
+test('dry-run projects never submit: the final click is stopped even with the job-application permission on', async () => {
+  const s = setupBroker(); const { Workspaces } = await import('../../src/model/workspaces.ts'); const os2 = await import('node:os'); const p2 = await import('node:path');
+  const ws = new Workspaces(s.db, p2.join(os2.tmpdir(), `dry-${Date.now()}`)).create({ name: 'Dry run', policies: { dry_run: true } }, 'test');
+  const c = s.chat.create({ workspace_id: ws.id, type: 'group', members: ['coordinator', 'researcher'] }); const turn = s.chat.send(c.id, '@researcher fill it', s.defs).job;
+  grantJobApplications(s.db, 'owner'); const { recordTaskTab } = await import('../../src/browser/tabs.ts'); recordTaskTab(s.db, turn.id, 'tab-1');
+  const clicks: string[][] = [];
+  (s.broker as unknown as { browserRunner: (a: string[]) => Promise<{ ok: boolean; stdout: string; stderr: string }> }).browserRunner = async (args) => { if (args[0] === 'click') clicks.push(args); return { ok: true, stdout: args[0] === 'snapshot' ? '- button "Submit application" [ref=e9]' : '', stderr: '' }; };
+  (s.broker as unknown as { tabUrl: () => Promise<string> }).tabUrl = async () => 'https://job-boards.greenhouse.io/x/jobs/1';
+  const r = await s.call(turn, 'browser_act', { action: 'click', ref: 'e9' }); assert.equal(r.ok, false); assert.match(r.text, /Dry run: stopped before "Submit application"/); assert.equal(clicks.length, 0);
+});

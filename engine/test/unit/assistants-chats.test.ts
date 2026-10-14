@@ -518,3 +518,12 @@ test('every turn knows the owner by name, so "Abdul, make a resume" is for the o
   const c = s.chat.create({ workspace_id: s.ws.id }); const t1 = s.chat.send(c.id, 'Abdul, make me a resume', s.defs).job; await run(s, t1.id);
   assert.match(s.runtime.history[0].prompt, /The owner is Sam Rivera; when the owner writes "Chief, …" they are talking to you|The owner is Sam Rivera; when the owner writes "[^"]+, …" they are talking to you/);
 });
+
+test('the lead adds a missing wait to a task that has not started (applications wait for the resumes); finished tasks and cycles are refused (launch rehearsal finding)', async () => {
+  const s = setup(); const c = s.chat.create({ workspace_id: s.ws.id }); const lead = s.chat.send(c.id, 'go', s.defs).job;
+  const mk = async (o: string) => (await s.broker.call(cap(lead, ['create_job']), 'create_job', { kind: 'document.create', objective: o, agent_role: 'builder' })).data as { id: string };
+  const resumes = await mk('resumes'); const apply = await mk('apply');
+  const r = await s.broker.call(cap(lead, ['add_dependency']), 'add_dependency', { task_id: apply.id, depends_on: [resumes.id] }); assert.equal(r.ok, true, r.text);
+  assert.deepEqual(JSON.parse(s.store.get(apply.id)!.depends_on), [resumes.id]);
+  assert.match((await s.broker.call(cap(lead, ['add_dependency']), 'add_dependency', { task_id: resumes.id, depends_on: [apply.id] })).text, /wait for each other/);
+});

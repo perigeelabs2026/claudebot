@@ -292,6 +292,16 @@ export class BrokerApi {
         if (!on && a.id) { return revokePermission(db, String(a.id), 'owner:chat') ? { ok: true, text: 'permission revoked' } : { ok: false, text: 'no active permission with that id' }; }
         return { ok: false, text: 'permission must be "job_applications" (or give id with on=false to revoke another one); email permissions are created from the email\'s own card in the app' };
       }
+      case 'add_dependency': {   // the lead makes a waiting task also wait for another one (e.g. applications wait for the tailored resumes)
+        const me = this.store.get(cap.job_id); const target = this.store.get(String(a.task_id ?? ''));
+        if (!me || !target || target.conversation_id !== me.conversation_id) return { ok: false, text: 'that task is not part of this conversation' };
+        if (!['queued', 'retry_scheduled', 'drafted'].includes(target.state)) return { ok: false, text: `that task has already ${target.state === 'completed' ? 'finished' : 'started'}; create a new one that waits instead` };
+        const add = (Array.isArray(a.depends_on) ? a.depends_on : [a.depends_on]).map(String).filter(Boolean);
+        for (const d of add) { const dj = this.store.get(d); if (!dj || dj.conversation_id !== me.conversation_id) return { ok: false, text: `task ${d} is not part of this conversation` }; if (d === target.id || (JSON.parse(dj.depends_on || '[]') as string[]).includes(target.id)) return { ok: false, text: 'that would make the tasks wait for each other' }; }
+        const cur = JSON.parse(target.depends_on || '[]') as string[]; const next = [...new Set([...cur, ...add])];
+        db.prepare('UPDATE jobs SET depends_on = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(next), now(), target.id); this.store.event(target.id, actor, 'job.dependency_added', { added: add, by: cap.job_id });
+        return { ok: true, text: `Done: that task now also waits for ${add.length} more task(s) and gets their results.` };
+      }
       case 'create_group': case 'edit_group': {   // the lead, on the owner's own words
         const asked = ownerAsked(db, cap.job_id, a.owner_words); if (!asked.ok) return { ok: false, text: `Not done: ${asked.reason}.` };
         const defs = new Definitions(db); const chat = new ChatStore(db, this.store); const me = this.store.get(cap.job_id)!;
@@ -461,6 +471,8 @@ export class BrokerApi {
       typed.push(req.text ?? '');
     }
     if (verdict.verdict === 'needs_approval') {
+      // Dry-run projects (workspace policies.dry_run): everything up to the final submit, never the submit itself, whatever permission is on.
+      try { const pol = JSON.parse((db.prepare('SELECT w.policies FROM jobs j JOIN workspaces w ON w.id = j.workspace_id WHERE j.id = ?').get(cap.job_id) as { policies: string } | undefined)?.policies || '{}') as { dry_run?: boolean }; if (pol.dry_run) { this.store.event(cap.job_id, actor, 'browser.dry_run_stop', { url: urlNow, control: el?.name ?? null }); return { ok: false, text: `Dry run: stopped before "${el?.name ?? 'submit'}". Nothing was submitted. The form stays filled; report what is filled and attached.` }; } } catch { /* no policy */ }
       const target = `${urlNow} — ${el ? `${el.role} "${el.name}"` : `key ${req.key}`}`;
       const content = approvalContent({ url: urlNow, element: el ?? focused, action: req.action === 'type' ? 'press' : req.action, key: req.key ?? (req.submit ? 'Enter' : undefined), typed });
       const shown = JSON.stringify({ page: urlNow, control: el ? `${el.role} "${el.name}"` : `Enter${focused ? ` in ${focused.role} "${focused.name}"` : ''}`, values_entered_in_this_tab: typed }, null, 1);
@@ -513,9 +525,9 @@ export class BrokerApi {
         if (inVmU) { staged = path.posix.join(await computerTmpRoot(), 'uploads', jobDir, path.basename(f.path)); const cp = await toComputer(staged, f.buf); if (!cp.ok) return { ok: false, text: `Not attached: could not hand the file to the assistants' computer (${cp.error}).` }; }
         else { const stage = path.join('/tmp/openclaw/uploads', jobDir); fs.mkdirSync(stage, { recursive: true, mode: 0o700 }); staged = path.join(stage, path.basename(f.path)); fs.writeFileSync(staged, f.buf, { mode: 0o600 }); }
         // Set the file input directly first (works for hidden inputs behind "Attach" buttons); fall back to clicking the chooser.
-        // Then check the page really holds the file, so "attached" is never claimed for a stuck upload.
+        // Then check the page really holds the file (in a file field, or shown by name after the form re-renders, as Greenhouse does), so "attached" is never claimed for a stuck upload.
         const fname = path.basename(staged);
-        const holds = async () => { const ev = await this.browserRunner(['evaluate', '--fn', `() => [...document.querySelectorAll('input[type=file]')].some((i) => [...(i.files || [])].some((f) => f.name === ${JSON.stringify(fname)}))`, ...tgt], 'browser.evaluate', 20_000); return ev.ok && /true/.test(ev.stdout); };
+        const holds = async () => { const ev = await this.browserRunner(['evaluate', '--fn', `() => [...document.querySelectorAll('input[type=file]')].some((i) => [...(i.files || [])].some((f) => f.name === ${JSON.stringify(fname)})) || (document.body.innerText || '').includes(${JSON.stringify(fname)})`, ...tgt], 'browser.evaluate', 20_000); return ev.ok && /true/.test(ev.stdout); };
         const tries: string[][] = a.file_input === false ? [['--ref', req.ref!], ['--input-ref', req.ref!]] : [['--input-ref', req.ref!], ['--ref', req.ref!]];
         r = { ok: false, stdout: '', stderr: 'not attempted' };
         for (const how of tries) { r = await this.browserRunner(['upload', staged, ...how, '--timeout-ms', '20000', ...tgt], 'browser.upload', 45_000); if (r.ok && await holds()) break; r = { ...r, ok: false, stderr: r.stderr || 'the page does not hold the file after this attempt' }; }
