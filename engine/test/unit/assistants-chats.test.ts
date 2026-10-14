@@ -668,3 +668,12 @@ test('the answer bank only counts a fact whose own label matches the question (a
   assert.equal(bankKnows('Why do you want to join Acme? (essay)', dir), false);
   assert.equal(bankKnows('the form needs quota attainment for each of the last 4 years', dir), true);
 });
+
+test('generic labels (Company, Role, Title, Dates, Name, Email, Phone, Location) never count as the answer to an unrelated question', async () => {
+  const { bankKnows } = await import('../../src/memory/answer-bank.ts');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bank3-')); fs.mkdirSync(path.join(dir, 'Owner'));
+  fs.writeFileSync(path.join(dir, 'Owner', 'Work history.md'), '- Company: Globex\n- Role: Account Executive\n- Title: AE\n- Dates: Jan 2020 – Dec 2021\n- Location: Springfield\n- Quota attainment: 70% across all quarters\n');
+  assert.equal(bankKnows('Why do you want to join our company in this role?', dir), false);
+  assert.equal(bankKnows('What is your desired title and location preference?', dir), false);
+  assert.equal(bankKnows('quota attainment for the last 4 years', dir), true);
+});

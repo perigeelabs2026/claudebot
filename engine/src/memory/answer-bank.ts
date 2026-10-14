@@ -27,9 +27,12 @@ function facts(dir: string): Array<{ text: string; key: string; source: string }
 }
 
 /** The best matching facts for a form question, strongest first; empty means the bank does not know. */
+// Labels so generic they would match almost any question; they never count as a key hit for the strict check.
+const GENERIC_KEYS = new Set(['company', 'role', 'title', 'date', 'dates', 'name', 'email', 'phone', 'location', 'first', 'last']);
+
 export function lookupAnswer(question: string, dir: string = vaultDir(), limit = 3, opts: { keyMatch?: boolean } = {}): Answer[] {
   const q = new Set(words(question)); if (!q.size) return [];
-  const scored = facts(dir).map((f) => { const k = new Set(words(f.key)); const all = new Set(words(f.text)); let s = 0; let keyHit = false; for (const w of q) { if (k.has(w)) { s += 2; keyHit = true; } else if (all.has(w)) s += 1; } return { text: f.text, source: f.source, score: s, keyHit }; });
+  const scored = facts(dir).map((f) => { const k = new Set(words(f.key).filter((w) => !opts.keyMatch || !GENERIC_KEYS.has(w))); const all = new Set(words(f.text)); let s = 0; let keyHit = false; for (const w of q) { if (k.has(w)) { s += 2; keyHit = true; } else if (all.has(w)) s += 1; } return { text: f.text, source: f.source, score: s, keyHit }; });
   return scored.filter((a) => a.score >= 2 && (!opts.keyMatch || a.keyHit)).map(({ keyHit: _k, ...a }) => a).sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
