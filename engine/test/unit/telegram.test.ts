@@ -171,3 +171,34 @@ test('T7: quiet hours send nothing (held, never sent later) and test projects ne
   const texts = f.calls.filter((x) => x.method === 'sendMessage').map((x) => String(x.body.text)); assert.ok(texts.some((x) => x.includes('real morning news'))); assert.ok(!texts.some((x) => x.includes('rehearsal chatter')));
   f.close();
 });
+
+test('T8: when quiet hours end, one good-morning summary goes out and decisions still waiting arrive as cards; held chatter stays in the app; /status answers', async () => {
+  const f = await fakeTelegram(); const s = setup(f.base); saveToken(s.secrets, TOKEN);
+  const { code } = newPairingCode(s.db); f.push(msg(1, 777, `/start ${code}`)); await s.bridge.cycle(0);
+  const c = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] });
+  const turn = s.chat.send(c.id, '@researcher apply to the Dragos role', s.defs).job;
+  const setQuiet = (ms: number) => s.db.prepare("INSERT INTO runtime_state(key, value, evidence, observed_at) VALUES ('telegram.quiet_until', ?, '{}', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify({ until: new Date(Date.now() + ms).toISOString() }), new Date().toISOString());
+  setQuiet(3600_000);
+  s.chat.add({ conversation_id: c.id, role: 'assistant', sender: 'coordinator', content: 'night news' });
+  const open = s.approvals.request({ job_id: turn.id, action_kind: 'send', target: 'email to hm@example.test', content: 'To: hm@example.test\nSubject: Follow-up\n\nHi.' });
+  s.chat.add({ conversation_id: c.id, role: 'system', kind: 'decision', content: 'decision', approval_id: open.id, job_id: turn.id });
+  const gone = s.approvals.request({ job_id: turn.id, action_kind: 'send', target: 'email to other@example.test', content: 'To: other@example.test\nSubject: Old\n\nHi.' });
+  s.chat.add({ conversation_id: c.id, role: 'system', kind: 'decision', content: 'decision', approval_id: gone.id, job_id: turn.id });
+  f.calls.length = 0; await s.bridge.cycle(0);
+  assert.equal(f.calls.filter((x) => x.method === 'sendMessage').length, 0, 'nothing during quiet hours');
+  s.approvals.decide(gone.id, 'rejected', 'owner');   // decided in the app overnight
+  setQuiet(-1000); f.calls.length = 0; await s.bridge.cycle(0);
+  const texts = f.calls.filter((x) => x.method === 'sendMessage').map((x) => String(x.body.text));
+  assert.equal(texts.filter((t) => t.startsWith('Good morning. Quiet hours are over.')).length, 1);
+  assert.match(texts.find((t) => t.startsWith('Good morning'))!, /held 3 updates.*1 decision waits on you/);
+  assert.equal(texts.filter((t) => t.startsWith('Needs your decision')).length, 1); assert.ok(texts.some((t) => t.includes('Subject: Follow-up')), 'the waiting card');
+  assert.ok(!texts.some((t) => t.includes('night news') || t.includes('Subject: Old')), 'held chatter and settled decisions stay in the app');
+  f.calls.length = 0; await s.bridge.cycle(0); assert.ok(!f.calls.some((x) => x.method === 'sendMessage' && String(x.body.text).startsWith('Good morning')), 'the summary goes once');
+  s.store.create({ idempotency_key: 'k8', kind: 'research.report', objective: 'Apply to Dragos', success_contract: {}, agent_role: 'researcher', workspace_id: s.ws.id }, 'owner');
+  // a quiet night: the summary still says ClaudeBot is live, once
+  setQuiet(60_000); await s.bridge.cycle(0); setQuiet(-500); f.calls.length = 0; await s.bridge.cycle(0); await s.bridge.cycle(0);
+  assert.deepEqual(f.calls.filter((x) => x.method === 'sendMessage').map((x) => String(x.body.text)).filter((t) => t.startsWith('Good morning')), ['Good morning. Quiet hours are over. Nothing came in overnight. Nothing needs you. Send /status for what is running.']);
+  f.push(msg(2, 777, '/status')); f.calls.length = 0; await s.bridge.cycle(0);
+  assert.ok(f.calls.some((x) => x.method === 'sendMessage' && /Apply to Dragos/.test(String(x.body.text))));
+  f.close();
+});

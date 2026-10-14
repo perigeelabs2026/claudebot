@@ -38,6 +38,7 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Assistants can open zip and tar archives you give them: files are extracted into a new folder inside the task. Links, paths that escape the folder, and oversized archives are refused. Documents and PDFs also get text copies the assistants can read.
 
 ### Fixed
+- When Telegram quiet hours end, you get one good-morning summary plus the decision cards still waiting, with their buttons (held cards were never sent before). Notices from test projects are labelled as test instead of held.
 - Assistants' replies no longer start with their mid-turn notes.
 - Windows land on the right screen when two assistants open one at once, and the first browse after a computer restart opens the assistant's own window.
 - A file that attached correctly is no longer reported as failed when the form re-renders and shows it by name (Greenhouse).

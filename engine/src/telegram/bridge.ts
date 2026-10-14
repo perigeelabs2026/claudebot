@@ -170,14 +170,27 @@ export class TelegramBridge {
   async flush(limit = 20, onlyIds: string[] | null = null): Promise<number> {
     const db = this.d.db; const b = binding(db); if (!b) return 0;
     const since = String((rs(db, KEY_SINCE) as { since?: string } | null)?.since ?? now());
+    // Quiet hours over: one short good-morning summary, once per quiet window; decisions still waiting are sent again as cards (other held notices stay in the app).
+    let n = 0; const quietTill = String((rs(db, 'telegram.quiet_until') as { until?: string } | null)?.until ?? '');
+    if (!onlyIds && quietTill && quietTill <= now() && String((rs(db, 'telegram.quiet_summary') as { for?: string } | null)?.for ?? '') !== quietTill) {
+      const held = db.prepare("SELECT o.message_id, m.kind, m.approval_id FROM telegram_outbox o JOIN messages m ON m.id = o.message_id WHERE o.kind = 'held-quiet' AND o.chat_id = ?").all(b.chat_id) as Array<{ message_id: string; kind: string; approval_id: string | null }>;
+      const waiting = held.filter((x) => x.kind === 'decision' && x.approval_id && this.d.approvals.get(x.approval_id)?.status === 'pending');
+      setRs(db, 'telegram.quiet_summary', { for: quietTill, held: held.length, waiting: waiting.length, at: now() });   // recorded first: a failed send never repeats the summary
+      db.prepare("UPDATE telegram_outbox SET kind = 'held-quiet-summarized' WHERE kind = 'held-quiet' AND chat_id = ?").run(b.chat_id);
+      for (const w of waiting) db.prepare('DELETE FROM telegram_outbox WHERE message_id = ? AND chat_id = ?').run(w.message_id, b.chat_id);
+      {   // always one line when quiet ends, so the owner knows ClaudeBot is live
+        const text = `Good morning. Quiet hours are over. ${held.length ? `While you slept I held ${held.length} update${held.length === 1 ? '' : 's'} here; everything is in the app.` : 'Nothing came in overnight.'}${waiting.length ? ` ${waiting.length} decision${waiting.length === 1 ? ' waits' : 's wait'} on you; ${waiting.length === 1 ? 'the card follows' : 'the cards follow'}.` : ' Nothing needs you.'} Send /status for what is running.`;
+        await this.api('sendMessage', { chat_id: b.chat_id, text }).then(() => { n++; }).catch(() => {});
+      }
+      ev(db, 'telegram.quiet_ended', { held: held.length, waiting: waiting.length });
+    }
     const rows = db.prepare(`SELECT m.id, m.conversation_id, m.kind, m.role, m.sender, m.content, m.approval_id, c.title, c.type FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE ${onlyIds ? `m.id IN (${onlyIds.map(() => '?').join(',')}) AND ? <> ''` : 'm.created_at >= ?'} AND ((m.role = 'assistant' AND m.kind = 'text' AND m.sender = 'coordinator' AND COALESCE(json_extract(m.meta, '$.update'), 0) = 0) OR m.kind = 'decision' OR (m.kind = 'result' AND m.artifact_id IS NOT NULL AND c.type = 'direct' AND EXISTS (SELECT 1 FROM conversation_members cm WHERE cm.conversation_id = c.id AND cm.agent_id = 'coordinator'))) AND NOT EXISTS (SELECT 1 FROM telegram_outbox o WHERE o.message_id = m.id) ORDER BY m.created_at LIMIT ?`).all(...(onlyIds ?? []), since, limit) as Array<{ id: string; conversation_id: string; kind: string; role: string; sender: string; content: string; approval_id: string | null; title: string; type: string }>;
-    let n = 0;
     // Quiet hours (runtime_state telegram.quiet_until) and test projects (workspace policies.telegram === false): nothing is sent;
     // the notice is marked held so it never goes later either.
     const quiet = String((rs(db, 'telegram.quiet_until') as { until?: string } | null)?.until ?? ''); const isQuiet = !onlyIds && quiet > now();
     const testConv = (convId: string) => { try { const w = db.prepare('SELECT w.policies FROM conversations c JOIN workspaces w ON w.id = c.workspace_id WHERE c.id = ?').get(convId) as { policies: string } | undefined; return !!w && (JSON.parse(w.policies || '{}') as { telegram?: boolean }).telegram === false; } catch { return false; } };
     for (const r of rows) {
-      if (testConv(r.conversation_id) || isQuiet) { db.prepare('INSERT OR IGNORE INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?,?,?,?,?)').run(r.id, b.chat_id, null, isQuiet ? 'held-quiet' : 'skipped-test', now()); continue; }
+      { const isTest = testConv(r.conversation_id); if (isTest || isQuiet) { db.prepare('INSERT OR IGNORE INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?,?,?,?,?)').run(r.id, b.chat_id, null, isTest ? 'skipped-test' : 'held-quiet', now()); continue; } }
       const who = this.d.defs.getAgent(r.sender)?.name ?? (r.kind === 'result' ? 'Result' : 'ClaudeBot'); const where = r.title ? ` · ${r.title}` : '';
       let body: Record<string, unknown>;
       if (r.kind === 'decision' && r.approval_id) {
