@@ -97,6 +97,10 @@ test('step 1: run_project_check runs test and typecheck in the build worktree on
   const bad = await s.broker.call(cap(turn, ['create_job']), 'create_job', { kind: 'build.task', objective: 'y', model: 'gpt-5' }); assert.equal(bad.ok, false); assert.match(bad.text, /alias/);
   const none = await s.broker.call(cap(job, ['run_project_check']), 'run_project_check', { profile: 'test' }); assert.equal(none.ok, false, 'no worktree yet');
   const sh = localShell(process.env.CLAUDEBOT_BUILD_LOCAL_ROOT!); fs.mkdirSync(path.dirname(sh.tokenFile), { recursive: true }); fs.writeFileSync(sh.tokenFile, 'ghp_' + 'a'.repeat(36), { mode: 0o600 });
+  // A token that can push is refused (here the origin is a local folder, which any token can write to).
+  const pushy = await ensureClone(sh, { app: 'demo', url: s.url }); assert.equal(pushy.ok, false); assert.equal((pushy as { terminal?: boolean }).terminal, true); assert.match((pushy as { error: string }).error, /can push.*read-only/);
+  assert.ok(!(pushy as { error: string }).error.includes('a'.repeat(36)));
+  fs.rmSync(sh.tokenFile);
   const cl = await ensureClone(sh, { app: 'demo', url: s.url }); assert.equal(cl.ok, true, JSON.stringify(cl));
   const { prepareWorktree } = await import('../../src/build/repo.ts'); const w = await prepareWorktree(sh, { app: 'demo', url: s.url }, job.id, 'coordinator'); assert.ok(w.ok);
   s.db.prepare('UPDATE jobs SET inputs = ? WHERE id = ?').run(JSON.stringify({ worktree: (w as { dir: string }).dir, repo_where: 'local', branch: (w as { branch: string }).branch }), job.id);
@@ -106,6 +110,53 @@ test('step 1: run_project_check runs test and typecheck in the build worktree on
   const tc = await s.broker.call(cap(job, ['run_project_check'], ws), 'run_project_check', { profile: 'typecheck' }); assert.equal(tc.ok, false); assert.match(tc.text, /not run/);
   const all = JSON.stringify(s.db.prepare('SELECT detail FROM job_events').all()) + fs.readdirSync(ws).map((f) => fs.readFileSync(path.join(ws, f), 'utf8')).join('');
   assert.ok(!all.includes('a'.repeat(36)), 'the token is in no event or output');
+});
+
+test('step 1: a resumed build task whose worktree folder was removed gets it back on its existing branch', async () => {
+  const s = setup(); const sh = localShell(process.env.CLAUDEBOT_BUILD_LOCAL_ROOT!); const repo = { app: 'demo', url: s.url };
+  assert.ok((await ensureClone(sh, repo)).ok); const { prepareWorktree } = await import('../../src/build/repo.ts');
+  const w1 = await prepareWorktree(sh, repo, 'job-r1', 'coordinator'); assert.ok(w1.ok); const dir = (w1 as { dir: string }).dir;
+  fs.writeFileSync(path.join(dir, 'greet.js'), 'exports.greet = (n) => n;\n'); git(dir, 'commit', '-qam', 'wip'); const tip = git(dir, 'rev-parse', 'HEAD');
+  fs.rmSync(dir, { recursive: true, force: true });
+  const w2 = await prepareWorktree(sh, repo, 'job-r1', 'coordinator'); assert.equal(w2.ok, true, JSON.stringify(w2));
+  assert.equal(git(dir, 'rev-parse', 'HEAD'), tip, 'the same branch, with its earlier commit');
+});
+
+/** A real second uid stands in for the builder: root uses runuser, others passwordless sudo; skipped when neither is available. */
+function builderCmd(home: string): string | null {
+  const node = path.dirname(process.execPath); const envs = `env HOME=${home} PATH=${node}:/usr/bin:/bin`;
+  try { if (process.getuid?.() === 0) { execFileSync('runuser', ['-u', 'nobody', '--', `${node}/node`, '-v']); return `runuser -u nobody -- ${envs}`; } } catch { return null; }
+  try { execFileSync('sudo', ['-n', '-u', 'nobody', `${node}/node`, '-v']); return `sudo -n -u nobody ${envs}`; } catch { return null; }
+}
+test('step 1 isolation: the checks run as the builder uid, which cannot read the token, the clone\'s .git or another worktree, and cannot move main even bypassing the hooks', { skip: process.platform !== 'linux' && 'the builder uid lives in the Linux computer' }, async (t) => {
+  const s = setup(); const home = path.join(s.tmp, 'builder-home'); fs.mkdirSync(home, { mode: 0o777 }); fs.chmodSync(home, 0o777);
+  const cmd = builderCmd(home); if (!cmd) { t.skip('no second uid available (needs root or passwordless sudo)'); return; }
+  fs.chmodSync(s.tmp, 0o755); process.env.CLAUDEBOT_BUILD_BUILDER = cmd;
+  try {
+    const root = process.env.CLAUDEBOT_BUILD_LOCAL_ROOT!; const sh = localShell(root); const repo = { app: 'demo', url: s.url };
+    assert.ok((await ensureClone(sh, repo)).ok); fs.mkdirSync(path.dirname(sh.tokenFile), { recursive: true, mode: 0o700 }); const secret = path.join(path.dirname(sh.tokenFile), 'gateway.token'); fs.writeFileSync(secret, 'secret', { mode: 0o600 });
+    const { prepareWorktree } = await import('../../src/build/repo.ts'); const other = await prepareWorktree(sh, repo, 'job-other', 'coordinator'); assert.ok(other.ok);
+    const job = await delegate(s, 'try to escape'); const orig = s.runtime.startTurn.bind(s.runtime);
+    const probes = { token: secret, other: (other as { dir: string }).dir, clone: path.join(root, 'demo', '.git', 'config') };
+    s.runtime.startTurn = async (req) => {   // what a hostile change would put in the test script: every probe must fail
+      fs.writeFileSync(path.join(req.cwd, 'test', 'escape.test.js'), `const { test } = require('node:test'); const assert = require('node:assert'); const fs = require('node:fs'); const cp = require('node:child_process');
+const p = ${JSON.stringify(probes)};
+test('builder is not the engine user', () => assert.notEqual(process.getuid(), ${process.getuid?.() ?? -1}));
+test('token unreadable', () => assert.throws(() => fs.readFileSync(p.token)));
+test('other worktree unreadable', () => assert.throws(() => fs.readdirSync(p.other)));
+test('clone .git unreadable', () => assert.throws(() => fs.readFileSync(p.clone)));
+test('main cannot move', () => assert.throws(() => cp.execFileSync('git', ['update-ref', 'refs/heads/main', 'HEAD'], { stdio: 'pipe' })));
+test('hooks bypass cannot commit', () => assert.throws(() => cp.execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '--allow-empty', '-m', 'x'], { stdio: 'pipe' })));
+`);
+      return orig(req); };
+    const before = git(path.join(root, 'demo'), 'rev-parse', 'main');
+    const done = await runAll(s, job.id);
+    assert.equal(done.state, 'completed', JSON.stringify(s.db.prepare('SELECT type, detail FROM job_events WHERE job_id = ? ORDER BY seq').all(job.id)).slice(-2000));
+    const ran = JSON.stringify(s.db.prepare("SELECT detail FROM job_events WHERE job_id = ? AND type = 'command.ran'").all(job.id)); assert.match(ran, /npm test/);
+    assert.equal(git(path.join(root, 'demo'), 'rev-parse', 'main'), before, 'main unchanged');
+    const wt = path.join(root, 'demo-worktrees', job.id); assert.equal(fs.statSync(wt).uid, process.getuid!(), 'the worktree is handed back after the check');
+    assert.equal(fs.statSync(path.join(wt, 'test', 'escape.test.js')).uid, process.getuid!());
+  } finally { delete process.env.CLAUDEBOT_BUILD_BUILDER; }
 });
 
 test('failingTests reads node --test spec and TAP output', () => {

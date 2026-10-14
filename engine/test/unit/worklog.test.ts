@@ -18,7 +18,7 @@ function setup() {
   const db = openDatabase(':memory:'); const store = new JobStore(db); const defs = new Definitions(db); defs.seedSystemDefaults();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'worklog-'));
   const ws = new Workspaces(db, path.join(tmp, 'ws')).create({ name: 'Job search' }, 'test');
-  const testWs = new Workspaces(db, path.join(tmp, 'ws')).create({ name: 'Rehearsal (test)', policies: { telegram: false, dry_run: true } }, 'test');
+  const testWs = new Workspaces(db, path.join(tmp, 'ws')).create({ name: 'Rehearsal (test)', policies: { test: true, telegram: false, dry_run: true } }, 'test');
   db.prepare("UPDATE agent_definitions SET name = 'Jude' WHERE id = 'researcher'").run();
   const vault = new Vault(path.join(tmp, 'vault'));
   return { db, store, defs, ws, testWs, vault, tmp };

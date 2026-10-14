@@ -1,6 +1,6 @@
 import { lookupAnswer } from '../memory/answer-bank.ts';
 import { safeExtract, sourceAllowed } from './archive.ts';
-import { matchPermission, jobApplicationPermission, emailPermission, grantEmails, EMAILS, emailRecipients, teamPermissionState, untilText, webmailName, isJobSite, isApplicationControl, isApplicationFormControl, contentRecipients, grantJobApplications, revokePermission, JOB_APPLICATIONS } from '../approvals/permissions.ts';
+import { matchPermission, jobApplicationPermission, emailPermission, grantEmails, EMAILS, emailRecipients, teamPermissionState, untilText, webmailName, CODES, codesPermission, grantVerificationCodes, isJobSite, isApplicationControl, isApplicationFormControl, contentRecipients, grantJobApplications, revokePermission, JOB_APPLICATIONS } from '../approvals/permissions.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { runProbe } from '../infra/probe.ts';
@@ -20,7 +20,7 @@ import { searchScoped } from '../search/index.ts';
 import { delegationBudget, waitForChildren, childStatus } from '../coord/delegation.ts';
 import { runCheck, allowedRepo, type CheckProfile } from '../worker/project-check.ts';
 import { TOOL_SCHEMAS } from './capabilities.ts';
-import { parseSnapshot, decide, approvalContent, type ActRequest, type SnapshotElement } from '../browser/act-policy.ts';
+import { parseSnapshot, decide, isCodeField, approvalContent, type ActRequest, type SnapshotElement } from '../browser/act-policy.ts';
 import crypto from 'node:crypto';
 import { markdownToHtml, renderDocument } from '../documents/render.ts';
 import { Vault } from '../memory/vault.ts';
@@ -97,8 +97,8 @@ export class BrokerApi {
       case 'propose_memory_change': { const id = newId('prop'); db.prepare('INSERT INTO memory_proposals(id, job_id, title, body, rationale, status, created_at) VALUES (?,?,?,?,?,?,?)').run(id, cap.job_id, String(a.title), String(a.body), String(a.rationale), 'proposed', t); return { ok: true, text: `proposal ${id} recorded for owner review`, data: { id } }; }
       case 'report_progress': { this.store.patch(cap.job_id, { next_action: String(a.note).slice(0, 200) }); this.store.event(cap.job_id, actor, 'agent.progress', { note: String(a.note).slice(0, 500) });
         // Background tasks post their progress to the team group too (all work shows there), labelled with the assistant and task.
-        try { const me = this.store.get(cap.job_id); const chat = new ChatStore(db, this.store); const team = chat.teamConversation(); const pol = me?.workspace_id ? JSON.parse(((db.prepare('SELECT policies FROM workspaces WHERE id = ?').get(me.workspace_id) as { policies: string } | undefined)?.policies) || '{}') as { telegram?: boolean; dry_run?: boolean } : {};
-          if (team && me && me.kind !== 'chat.turn' && pol.telegram !== false && !pol.dry_run) chat.add({ conversation_id: team, role: 'system', kind: 'activity', content: `${new Definitions(db).getAgent(me.agent_role)?.name ?? me.agent_role} (task): ${String(a.note).replace(/\s+/g, ' ').slice(0, 500)}`, job_id: me.id, meta: { mirror_of: `progress:${cap.job_id}`, task_progress: true } }); } catch { /* progress still recorded on the task */ } return { ok: true, text: 'noted' }; }
+        try { const me = this.store.get(cap.job_id); const chat = new ChatStore(db, this.store); const team = chat.teamConversation(); const pol = me?.workspace_id ? JSON.parse(((db.prepare('SELECT policies FROM workspaces WHERE id = ?').get(me.workspace_id) as { policies: string } | undefined)?.policies) || '{}') as { telegram?: boolean; test?: boolean; dry_run?: boolean } : {};
+          if (team && me && me.kind !== 'chat.turn' && pol.test !== true && !pol.dry_run) chat.add({ conversation_id: team, role: 'system', kind: 'activity', content: `${new Definitions(db).getAgent(me.agent_role)?.name ?? me.agent_role} (task): ${String(a.note).replace(/\s+/g, ' ').slice(0, 500)}`, job_id: me.id, meta: { mirror_of: `progress:${cap.job_id}`, task_progress: true } }); } catch { /* progress still recorded on the task */ } return { ok: true, text: 'noted' }; }
       case 'create_job': {
         const defs = new Definitions(db); const wf = defs.getWorkflow(String(a.kind)); if (!wf || !wf.enabled) return { ok: false, text: `unknown workflow ${a.kind}; available: ${defs.listWorkflows().filter((w) => w.id !== 'chat.turn').map((w) => w.id).join(', ')}` };
         if (['chat.turn', 'assistant.draft', 'report.morning', 'priority.rank'].includes(wf.id)) return { ok: false, text: wf.id === 'chat.turn' ? 'chat turns cannot be delegated' : 'new assistants are drafted with propose_assistant, not delegated' };
@@ -279,8 +279,8 @@ export class BrokerApi {
         db.prepare('INSERT INTO records(id, type, data, job_id, created_at, updated_at) VALUES (?,?,?,?,?,?)').run(recId, 'application', JSON.stringify({ title: `${company} – ${role}`, company, role, url: urlNow, submitted_at: rt, confirmation: conf, receipt_artifact: shotArt, verified: true }), cap.job_id, rt, rt);
         this.store.event(cap.job_id, actor, 'application.verified', { record: recId, company, role, url: urlNow, confirmation: conf, receipt: shotArt });
         // The receipt shows in the team group too (all work shows there).
-        try { const chat = new ChatStore(db, this.store); const team = chat.teamConversation(); const me = this.store.get(cap.job_id); const pol = me?.workspace_id ? JSON.parse(((db.prepare('SELECT policies FROM workspaces WHERE id = ?').get(me.workspace_id) as { policies: string } | undefined)?.policies) || '{}') as { telegram?: boolean; dry_run?: boolean } : {};
-          if (team && pol.telegram !== false && !pol.dry_run) chat.add({ conversation_id: team, role: 'system', kind: 'activity', content: `Applied: ${company}, ${role}. Confirmation page seen and receipt saved.`, job_id: cap.job_id, meta: { mirror_of: `receipt:${recId}`, receipt: recId } }); } catch { /* the record stands */ }
+        try { const chat = new ChatStore(db, this.store); const team = chat.teamConversation(); const me = this.store.get(cap.job_id); const pol = me?.workspace_id ? JSON.parse(((db.prepare('SELECT policies FROM workspaces WHERE id = ?').get(me.workspace_id) as { policies: string } | undefined)?.policies) || '{}') as { telegram?: boolean; test?: boolean; dry_run?: boolean } : {};
+          if (team && pol.test !== true && !pol.dry_run) chat.add({ conversation_id: team, role: 'system', kind: 'activity', content: `Applied: ${company}, ${role}. Confirmation page seen and receipt saved.`, job_id: cap.job_id, meta: { mirror_of: `receipt:${recId}`, receipt: recId } }); } catch { /* the record stands */ }
         return { ok: true, text: `Recorded and verified: ${company} – ${role}. Confirmation on the page: "${conf}". ${shotArt ? 'The receipt screenshot shows as a file card under your reply.' : ''} You may now tell the owner it was submitted.`, data: { record_id: recId, receipt: shotArt } };
       }
       // ---- conversation tools (chat replies) ----
@@ -363,7 +363,11 @@ export class BrokerApi {
           const live = db.prepare("SELECT id FROM standing_permissions WHERE status = 'active' AND action_kind = ?").all(EMAILS) as Array<{ id: string }>; for (const x of live) revokePermission(db, x.id, 'owner:chat'); return { ok: true, text: live.length ? 'Switched off: every email asks the owner again.' : 'It was already off.' };
         }
         if (!on && a.id) { return revokePermission(db, String(a.id), 'owner:chat') ? { ok: true, text: 'permission revoked' } : { ok: false, text: 'no active permission with that id' }; }
-        return { ok: false, text: 'permission must be "job_applications" or "emails" (or give id with on=false to revoke another one)' };
+        if (which === 'verification_codes') {
+          if (on) { const p2 = grantVerificationCodes(db, 'owner:chat', { reason: `owner asked in chat (${asked.source})`, days: a.days === undefined || a.days === null ? null : Number(a.days) }); return { ok: true, text: `"Type emailed verification codes" is on (${untilText(p2)}). Assistants may read a code a job site emailed the owner and type it into that site's code field; never passwords or payment fields. Each code typed shows in the team chat.` }; }
+          const live = db.prepare("SELECT id FROM standing_permissions WHERE status = 'active' AND action_kind = ?").all(CODES) as Array<{ id: string }>; for (const x of live) revokePermission(db, x.id, 'owner:chat'); return { ok: true, text: live.length ? 'Switched off: verification codes go back to the owner.' : 'It was already off.' };
+        }
+        return { ok: false, text: 'permission must be "job_applications", "emails" or "verification_codes" (or give id with on=false to revoke another one)' };
       }
       case 'add_dependency': {   // the lead makes a waiting task also wait for another one (e.g. applications wait for the tailored resumes)
         const me = this.store.get(cap.job_id); const target = this.store.get(String(a.task_id ?? ''));
@@ -574,8 +578,21 @@ export class BrokerApi {
     if (String(a.action) === 'fill_secret') return this.fillSecret(cap, actor, tab, el, req.ref, String(a.account ?? ''));
     const lastTyped = db.prepare("SELECT detail FROM job_events WHERE job_id = ? AND type = 'browser.act' ORDER BY seq DESC LIMIT 1").get(cap.job_id) as { detail: string } | undefined;
     const focused = req.action === 'press' ? (() => { try { const d = JSON.parse(lastTyped?.detail ?? '{}') as { ref?: string }; return byRef(d.ref); } catch { return undefined; } })() : undefined;
-    const verdict = decide(req, el, focused, els);
     const urlNow = await this.tabUrl(tab);
+    // "Type emailed verification codes" (off by default): an emailed code typed into a job site's code field, recorded in the team chat.
+    if (req.action === 'type' && !req.submit && isCodeField(el, els) && isJobSite(urlNow) && /^[A-Za-z0-9-]{4,10}$/.test(String(req.text ?? '').trim())) {
+      const cp = codesPermission(db);
+      if (cp) {
+        const code = String(req.text).trim(); const tr = await this.browserRunner(['type', req.ref!, code, ...tgt], 'browser.type');
+        if (!tr.ok) return { ok: false, text: `the browser could not type: ${(tr.stderr || tr.stdout).replace(/\s+/g, ' ').slice(0, 200)}` };
+        const host = (() => { try { return new URL(urlNow).hostname; } catch { return 'the job site'; } })(); const masked = `${'•'.repeat(Math.max(0, code.length - 2))}${code.slice(-2)}`;
+        this.store.event(cap.job_id, actor, 'browser.act', { action: 'type', ref: el!.ref, role: el!.role, name: el!.name.slice(0, 200), url: urlNow, why: 'verification code (standing permission)', value: masked });
+        this.store.event(cap.job_id, actor, 'permission.used', { permission: cp.id, kind: CODES, url: urlNow, field: el!.name.slice(0, 120) });
+        try { const chat = new ChatStore(db, this.store); const team = chat.teamConversation(); if (team) chat.add({ conversation_id: team, role: 'system', kind: 'activity', job_id: cap.job_id, content: `Verification code ${masked} typed into "${el!.name.slice(0, 80)}" on ${host}, under your standing permission.`, meta: { verification_code: cp.id } } as never); } catch { /* recorded on the task */ }
+        return { ok: true, text: `Typed the verification code into ${el!.role} "${el!.name}" (recorded in the team chat). Continue the application.` };
+      }
+    }
+    const verdict = decide(req, el, focused, els);
     const typed: string[] = (db.prepare("SELECT detail FROM job_events WHERE job_id = ? AND type = 'browser.act' ORDER BY seq").all(cap.job_id) as Array<{ detail: string }>).map((r) => { try { const d = JSON.parse(r.detail) as { url?: string; value?: string; values?: string[] }; return d.url === urlNow ? [d.value, ...(d.values ?? [])].filter((x): x is string => typeof x === 'string') : []; } catch { return []; } }).flat();
     const elementLog = el ? { ref: el.ref, role: el.role, name: el.name.slice(0, 200) } : { ref: req.ref ?? null };
     if (verdict.verdict === 'refuse') { this.store.event(cap.job_id, actor, 'browser.act_refused', { action: req.action, ...elementLog, reason: verdict.reason, url: urlNow }); return { ok: false, text: `Refused and recorded: ${verdict.reason}.` }; }
@@ -604,9 +621,11 @@ export class BrokerApi {
         if (perm) { const ap = this.approvals.request({ job_id: cap.job_id, action_kind: verdict.action_kind, target, content, evidence: [{ shown_to_owner: shown }] }); this.approvals.decide(ap.id, 'approved', `permission:${perm.id}`, 'covered by "Submit job applications without asking"'); this.store.event(cap.job_id, actor, 'permission.used', { permission: perm.id, approval: ap.id, kind: 'job_application', url: urlNow, control: ctl }); approvalId = ap.id; }
       }
       // Webmail Send in the team browser (Gmail, Outlook, Yahoo) is covered by "Send emails without asking" (recorded like an approval, shown in the team group).
-      const webmail = webmailName(urlNow);
+      const webmail = webmailName(urlNow); let emailWhy = '';
       if (!approvalId && verdict.action_kind === 'send' && webmail && /^send\b/i.test(ctl)) {
-        const ep = emailPermission(db);
+        const est = teamPermissionState(db, EMAILS); const ep = est.live;
+        if (est.capped) { emailWhy = `; the daily email cap of ${est.capped.max_per_day} is reached`; teamLine(db, this.store, { key: `email-cap:${est.capped.id}:${now().slice(0, 10)}`, owner: true, jobId: cap.job_id, text: `Daily email cap of ${est.capped.max_per_day} reached: further emails today wait for your approval. To raise it, tell your Chief of Staff the new number.` }); }
+        else if (est.expired) emailWhy = `; the owner's "Send emails without asking" permission expired on ${est.expired.expires_at.slice(0, 10)} (they can reply "renew" to turn it back on)`;
         if (ep) { const ap = this.approvals.request({ job_id: cap.job_id, action_kind: verdict.action_kind, target, content, evidence: [{ shown_to_owner: shown }] }); this.approvals.decide(ap.id, 'approved', `permission:${ep.id}`, 'covered by "Send emails without asking"'); this.store.event(cap.job_id, actor, 'permission.used', { permission: ep.id, approval: ap.id }); approvalId = ap.id;
           try { const chat = new ChatStore(db, this.store); const team = chat.teamConversation(); if (team) chat.add({ conversation_id: team, role: 'system', kind: 'activity', content: `Email sent from ${webmail} under your standing permission (the page and text are recorded on the task).`, job_id: cap.job_id, meta: { mirror_of: `email:${ap.id}`, email: ap.id } }); } catch { /* recorded */ } }
       }
@@ -616,7 +635,7 @@ export class BrokerApi {
         const pending = db.prepare("SELECT id FROM approvals WHERE job_id = ? AND status = 'pending' AND action_kind = ? AND target = ? AND content_hash = ?").get(cap.job_id, verdict.action_kind, target, crypto.createHash('sha256').update(content).digest('hex')) as { id: string } | undefined;
         const apr = pending ? { id: pending.id } : this.approvals.request({ job_id: cap.job_id, action_kind: verdict.action_kind, target, content, evidence: [{ shown_to_owner: shown }] });
         this.store.event(cap.job_id, actor, 'browser.act_refused', { action: req.action, ...elementLog, reason: v ? `approval ${v.reason}` : 'needs the owner\'s approval', approval_id: apr.id, url: urlNow });
-        return { ok: false, text: `Not done: ${verdict.reason}. This needs the owner's approval of exactly this page, control and the values entered (${apr.id}${v ? `; the approval given was ${v.reason}` : ''}). Nothing was submitted. Report that it is waiting for the owner's decision; do not try another way to submit.`, data: { approval_id: apr.id } };
+        return { ok: false, text: `Not done: ${verdict.reason}. This needs the owner's approval of exactly this page, control and the values entered (${apr.id}${v ? `; the approval given was ${v.reason}` : ''}${emailWhy}). Nothing was submitted. Report that it is waiting for the owner's decision; do not try another way to submit.`, data: { approval_id: apr.id } };
       }
       // Approved for exactly this content: perform once.
       const key = `browser:${approvalId}`;

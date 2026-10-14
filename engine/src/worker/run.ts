@@ -26,6 +26,7 @@ import { requeueNote } from '../cos/requeue.ts';
 import { honestyNotes, ledgerStatus, statusNote } from '../cos/honesty.ts';
 import { reportModelProblem } from '../runtime/model-check.ts';
 import { bankKnows } from '../memory/answer-bank.ts';
+import { untilText } from '../approvals/permissions.ts';
 
 export interface RunDeps {
   db: DB; store: JobStore; approvals: ApprovalStore; actions: ActionStore; runtime: ModelRuntime; log: Logger;
@@ -260,7 +261,7 @@ Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-�
       if (isGroup) { const gp = (deps.db.prepare('SELECT title, purpose FROM conversations WHERE id = ?').get(conv.id) as { title: string; purpose: string } | undefined); if (gp?.purpose) parts.push(`This group ("${gp.title || 'Group'}") exists for: ${gp.purpose}`); }
       { // Standing permissions the owner switched on, so no assistant asks the owner to switch on something that is already on.
         const perms = deps.db.prepare("SELECT action_kind, scope_text, expires_at FROM standing_permissions WHERE status = 'active' AND expires_at > ?").all(new Date().toISOString()) as Array<{ action_kind: string; scope_text: string; expires_at: string }>;
-        if (perms.length) parts.push(`The owner's standing permissions (already on; never ask the owner to turn these on):\n${perms.map((p) => `- ${p.scope_text.split(':')[0]}${p.action_kind === 'job_application' ? ' — on job sites, apply/next/submit is done at once and recorded; just do it and post the receipt' : ''} (until ${p.expires_at.slice(0, 10)})`).join('\n')}`);
+        if (perms.length) parts.push(`The owner's standing permissions (already on; never ask the owner to turn these on):\n${perms.map((p) => `- ${p.scope_text.split(':')[0]}${p.action_kind === 'job_application' ? ' — on job sites, apply/next/submit is done at once and recorded; just do it and post the receipt' : ''} (${untilText(p)})`).join('\n')}`);
       }
       if ((deps.runtime as { sharedFolder?: boolean }).sharedFolder) parts.push('Your computer: you work inside the assistants\' private Linux computer. You have a real shell there (your Bash tool): run code (python3, node), process files, and install what you need for yourself (pip install --user, npm install in your folder). Use it to check your own work. It cannot reach the owner\'s Mac; results for the owner still go through write_artifact or render_document.');
       if ((deps.runtime as { sharedFolder?: boolean }).sharedFolder) parts.push('Team folder: ./shared in your working folder is the team\'s shared folder in the assistants\' computer. Every assistant sees the same files there, across chats and tasks. Put things teammates will reuse there (for example resumes/, applications/, notes/); results the owner should see still go through write_artifact or render_document.');

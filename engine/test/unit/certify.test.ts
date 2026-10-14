@@ -29,7 +29,7 @@ const byName = (r: ReturnType<typeof certify>, name: string) => r.checks.find((c
 
 test('only rehearsal (telegram:false / dry_run) evidence is a NO-GO, and a still-active rehearsal job is called out', () => {
   const { db, store } = base();
-  workspace(db, 'rehearsal', { telegram: false, dry_run: true });
+  workspace(db, 'rehearsal', { test: true, telegram: false, dry_run: true });
   evidence(db, store, 'rehearsal');
   store.create({ idempotency_key: 'left-over', kind: 'research.report', objective: 'x', success_contract: {}, agent_role: 'coordinator', workspace_id: 'rehearsal' });   // queued
   const r = certify(db);
@@ -54,7 +54,7 @@ test('dry_run alone also marks a test project', () => {
 test('a real verified application, a delivered Telegram message and completed turns are a GO (finished rehearsals do not block it)', () => {
   const { db, store } = base();
   workspace(db, 'main', {});
-  workspace(db, 'rehearsal', { telegram: false });
+  workspace(db, 'rehearsal', { test: true, telegram: false });
   evidence(db, store, 'main');
   evidence(db, store, 'rehearsal');   // finished rehearsal work: ignored, not active
   db.prepare("UPDATE jobs SET state = 'completed' WHERE workspace_id = 'rehearsal'").run();

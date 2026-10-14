@@ -1,24 +1,31 @@
 /**
  * Build jobs work on the app's own repository inside the assistants' computer (the Linux VM), never on the Mac and never through a
  * host mount (Abdul builder plan, step 1). The clone lives at <repos>/<app> in the VM; each build.task works in its own git worktree
- * on the branch <lead>/<job-id>, cut from origin's default branch. main is never writable: hooks in the clone refuse a commit on
- * main/master and any update of refs/heads/main or refs/heads/master, and the clone has no push URL (step 1 never pushes).
+ * on the branch <lead>/<job-id>, cut from origin's default branch. The clone has no push URL (step 1 never pushes).
  * Fetching uses a read-only token from the VM secret store, read inside the VM through GIT_ASKPASS: it never reaches the Mac, argv,
- * the transcript or the logs. A public repository needs no token.
+ * the transcript or the logs. A public repository needs no token. At every prepare the token is tried with a dry-run push: a token
+ * that could push is refused, so a leaked token can never write to the repository.
+ * The checks (npm ci, the test script, typecheck) run as a separate builder uid with no sudo that cannot read the secret store, the
+ * clone's .git (owned by the engine's user, so the builder can never move refs/heads/main), or any other worktree. While a check
+ * runs, only that worktree belongs to the builder (minus its .git pointer and .claudebot/); afterwards it is handed back.
+ * The hooks (no commit on main, no update of refs/heads/main) guard the engine's own mistakes only; the uid split is the real guard.
  * Tests (and Linux CI) run the same shell scripts locally under CLAUDEBOT_BUILD_LOCAL_ROOT.
  */
 import { execFile } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import type { DB } from '../db/open.ts';
-import { VM_DATA, VM_WORKSPACES } from '../runtime/computer.ts';
+import { VM_DATA, VM_REPOS } from '../runtime/computer.ts';
+export { VM_REPOS };
 
-export interface RepoShell { where: 'vm' | 'local'; root: string; tokenFile: string; run(script: string, opts?: { timeoutMs?: number }): Promise<{ code: number; out: string }> }
+/** builder: how to run a script as the builder uid (null: no separate uid, as on a developer machine); sudo: how the engine's user
+ *  runs chown (empty when it is root). */
+export interface RepoShell { where: 'vm' | 'local'; root: string; tokenFile: string; builder: string | null; sudo: string; run(script: string, opts?: { timeoutMs?: number }): Promise<{ code: number; out: string }> }
 export interface BuildRepo { app: string; url: string }
 export type BuildCheck = 'test' | 'typecheck';
 
 const NAME = process.env.CLAUDEBOT_COMPUTER_NAME ?? 'claudebot-computer';
-export const VM_REPOS = `${VM_WORKSPACES}/repos`;
+export const BUILDER = 'claudebot-builder';
 /** The VM secret store holds the repository token (read-only scope); only the VM reads it. */
 export const VM_REPO_TOKEN = `${VM_DATA}/secrets/repo-token`;
 export const q = (s: string) => `'${String(s).replace(/'/g, `'\\''`)}'`;
@@ -35,11 +42,12 @@ function exec(bin: string, args: string[], input: string, timeoutMs: number): Pr
 /** The assistants' computer: every script runs there over ssh (stdin), never on the Mac. */
 export function vmShell(): RepoShell {
   const cfg = path.join(os.homedir(), '.lima', NAME, 'ssh.config');
-  return { where: 'vm', root: VM_REPOS, tokenFile: VM_REPO_TOKEN, run: (script, o = {}) => exec('ssh', ['-F', cfg, '-o', 'BatchMode=yes', `lima-${NAME}`, 'bash -s'], script, o.timeoutMs ?? 10 * 60_000) };
+  return { where: 'vm', root: VM_REPOS, tokenFile: VM_REPO_TOKEN, builder: `sudo -n -u ${BUILDER} -H env PATH=/opt/node/bin:/usr/bin:/bin`, sudo: 'sudo -n ', run: (script, o = {}) => exec('ssh', ['-F', cfg, '-o', 'BatchMode=yes', `lima-${NAME}`, 'bash -s'], script, o.timeoutMs ?? 10 * 60_000) };
 }
-/** Tests and Linux CI: the same scripts in a local folder. */
-export function localShell(root: string): RepoShell {
-  return { where: 'local', root: path.resolve(root), tokenFile: path.join(path.resolve(root), '.secrets', 'repo-token'), run: (script, o = {}) => exec('bash', ['-s'], script, o.timeoutMs ?? 10 * 60_000) };
+/** Tests and Linux CI: the same scripts in a local folder. CLAUDEBOT_BUILD_BUILDER (tests) is the command that runs a script as
+ *  another uid, standing in for the builder. */
+export function localShell(root: string, env: NodeJS.ProcessEnv = process.env): RepoShell {
+  return { where: 'local', root: path.resolve(root), tokenFile: path.join(path.resolve(root), '.secrets', 'repo-token'), builder: env.CLAUDEBOT_BUILD_BUILDER || null, sudo: process.getuid?.() === 0 ? '' : 'sudo -n ', run: (script, o = {}) => exec('bash', ['-s'], script, o.timeoutMs ?? 10 * 60_000) };
 }
 /** Where build jobs run: the local root when CLAUDEBOT_BUILD_LOCAL_ROOT is set (tests), else the VM when the assistants' computer is on. */
 export function buildShell(vmOn: boolean, env: NodeJS.ProcessEnv = process.env): RepoShell | null {
@@ -80,13 +88,15 @@ trap '[ -n "$ask" ] && rm -f "$ask"' EXIT`;
 }
 
 /** Clone the app's repository once (no push URL, main protected by hooks), and fetch. */
-export async function ensureClone(sh: RepoShell, repo: BuildRepo): Promise<{ ok: true; dir: string } | { ok: false; error: string }> {
+export async function ensureClone(sh: RepoShell, repo: BuildRepo): Promise<{ ok: true; dir: string } | { ok: false; error: string; terminal?: boolean }> {
   const dir = `${sh.root}/${repo.app}`;
   const r = await sh.run(`set -e
 umask 022
 ${authGit(sh)}
-mkdir -p ${q(sh.root)}
+mkdir -p ${q(sh.root)} ${q(`${dir}-worktrees`)}
+chmod 711 ${q(sh.root)} ${q(`${dir}-worktrees`)}
 if [ ! -d ${q(dir)}/.git ]; then g clone --quiet ${q(repo.url)} ${q(dir)}; fi
+chmod 700 ${q(dir)}
 cd ${q(dir)}
 git remote set-url --push origin no-push-from-build-jobs
 mkdir -p .git/hooks
@@ -96,7 +106,9 @@ cat > .git/hooks/reference-transaction <<'HOOK'
 ${REFTX}HOOK
 chmod 755 .git/hooks/pre-commit .git/hooks/reference-transaction
 g fetch --quiet origin
+if [ -n "$ask" ] && g push --dry-run --quiet "$(git remote get-url origin)" HEAD:refs/heads/claudebot-push-probe >/dev/null 2>&1; then echo TOKEN_CAN_PUSH; exit 5; fi
 echo CLONE_OK`, { timeoutMs: 10 * 60_000 });
+  if (r.out.includes('TOKEN_CAN_PUSH')) return { ok: false, terminal: true, error: `the repository token can push to ${repo.url}. Build tasks only accept a read-only token: replace it with one that has read access only (contents: read).` };
   return r.code === 0 && r.out.includes('CLONE_OK') ? { ok: true, dir } : { ok: false, error: redactToken(r.out).slice(-600) };
 }
 
@@ -107,7 +119,12 @@ export async function prepareWorktree(sh: RepoShell, repo: BuildRepo, jobId: str
   const r = await sh.run(`set -e
 cd ${q(clone)}
 base=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main)
-if [ ! -d ${q(dir)} ]; then mkdir -p ${q(path.posix.dirname(dir))}; git worktree add --quiet -b ${q(branch)} ${q(dir)} "$base"; fi
+if [ ! -d ${q(dir)} ]; then
+  mkdir -p ${q(path.posix.dirname(dir))}; git worktree prune
+  # A resumed job whose folder was removed (cleanup, a reset computer) gets its folder back on the branch it already has.
+  if git show-ref --verify --quiet ${q(`refs/heads/${branch}`)}; then git worktree add --quiet ${q(dir)} ${q(branch)}; else git worktree add --quiet -b ${q(branch)} ${q(dir)} "$base"; fi
+fi
+chmod 700 ${q(dir)}
 cd ${q(dir)}
 for p in .mcp.json .claudebot/ shared CHANGES.md; do grep -qxF "$p" "$(git rev-parse --git-common-dir)/info/exclude" 2>/dev/null || echo "$p" >> "$(git rev-parse --git-common-dir)/info/exclude"; done
 echo "BASE=$base"; echo "BRANCH=$(git symbolic-ref --short HEAD)"`, { timeoutMs: 120_000 });
@@ -121,13 +138,24 @@ echo "BASE=$base"; echo "BRANCH=$(git symbolic-ref --short HEAD)"`, { timeoutMs:
 export async function runBuildCheck(sh: RepoShell, dir: string, check: BuildCheck, timeoutMs = 10 * 60_000): Promise<{ ok: boolean; notRun: boolean; label: string; output: string; failing: string[] }> {
   const cmd = check === 'test' ? `if node -e 'process.exit(require("./package.json").scripts?.test?0:1)'; then echo '$ npm test'; npm test --silent; elif [ -d test ]; then echo '$ node --test'; node --test; else echo 'NOT_RUN: no test script'; exit 3; fi`
     : `if node -e 'process.exit(require("./package.json").scripts?.typecheck?0:1)'; then echo '$ npm run typecheck'; npm run typecheck --silent; elif [ -f tsconfig.json ] && [ -x node_modules/.bin/tsc ]; then echo '$ tsc --noEmit'; node_modules/.bin/tsc --noEmit -p .; else echo 'NOT_RUN: no typecheck script or TypeScript config'; exit 3; fi`;
-  const r = await sh.run(`cd ${q(dir)} || exit 2
+  const inner = `cd ${q(dir)} || exit 2
 [ -f package.json ] || { [ -f engine/package.json ] && cd engine; }
 [ -f package.json ] || { echo 'NOT_RUN: no package.json'; exit 3; }
 if [ -f package-lock.json ] && [ ! -d node_modules ]; then npm ci --silent --no-audit --no-fund >/dev/null 2>&1 || echo 'npm ci failed; checks run without a fresh install'; fi
 export CI=1 NO_COLOR=1
 unset NODE_OPTIONS NODE_TEST_CONTEXT
-${cmd}`, { timeoutMs });
+${cmd}`;
+  // As the builder: the worktree is the builder's for the length of the check (not its .git pointer or .claudebot/), then handed back.
+  const script = sh.builder ? `me=$(id -un)
+own() { find ${q(dir)} -mindepth 1 \\( -path ${q(`${dir}/.git`)} -o -path ${q(`${dir}/.claudebot`)} \\) -prune -o -exec ${sh.sudo}chown -h "$1" {} + ; ${sh.sudo}chown "$1" ${q(dir)}; }
+own ${q(sh.builder.match(/-u (\S+)/)?.[1] ?? BUILDER)}
+${sh.builder} bash -s <<'CLAUDEBOT_CHECK'
+${inner}
+CLAUDEBOT_CHECK
+rc=$?
+own "$me"
+exit $rc` : inner;
+  const r = await sh.run(script, { timeoutMs });
   const notRun = r.code === 3 && /NOT_RUN:/.test(r.out);
   const label = /^\$ (.+)$/m.exec(r.out)?.[1] ?? check;
   return { ok: r.code === 0, notRun, label, output: r.out, failing: r.code === 0 ? [] : failingTests(r.out) };

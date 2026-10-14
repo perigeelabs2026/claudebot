@@ -39,8 +39,8 @@ const LIVE_STATES = "('queued','leased','running','retry_scheduled','waiting_for
 export interface LiveTask { id: string; title: string; agent: string; state: string; kind: string; updated_at: string }
 /** What the team is doing right now, from live task state: every task (chat replies and continuation rounds included) that is
  *  queued, leased, running or waiting, with the assistant and the objective. Continuation rounds are titled by their goal. */
-/** Tasks of the owner's real projects: test projects (policies telegram:false or dry_run) left out. */
-export const REAL_PROJECT = "(j.workspace_id IS NULL OR NOT EXISTS (SELECT 1 FROM workspaces w WHERE w.id = j.workspace_id AND (COALESCE(json_extract(w.policies, '$.telegram'), 1) = 0 OR COALESCE(json_extract(w.policies, '$.dry_run'), 0) <> 0)))";
+/** Tasks of the owner's real projects: test projects (policies test or dry_run) left out. */
+export const REAL_PROJECT = "(j.workspace_id IS NULL OR NOT EXISTS (SELECT 1 FROM workspaces w WHERE w.id = j.workspace_id AND (COALESCE(json_extract(w.policies, '$.test'), 0) <> 0 OR COALESCE(json_extract(w.policies, '$.dry_run'), 0) <> 0)))";
 export function liveTasks(db: DB, opts: { workspace?: string | null; limit?: number; realOnly?: boolean } = {}): LiveTask[] {
   const names = new Map((db.prepare('SELECT id, name FROM agent_definitions').all() as Array<{ id: string; name: string }>).map((a) => [a.id, a.name]));
   const ws = opts.workspace ?? null;

@@ -57,7 +57,7 @@ export const EMAILS = 'email_send';
 export const EMAILS_SCOPE = 'Send emails without asking: assistants may send the emails they write (follow-ups and outreach to hiring managers and recruiters) without asking. Each email is recorded and shown in the team chat. Spending, public posts and deletes still ask.';
 /** A permission the owner gave with no time limit: expires_at holds this sentinel (the column is NOT NULL). */
 /** Webmail whose Send button the emails permission covers in the team browser (Gmail, Outlook, Yahoo); null for any other page. */
-const WEBMAIL = [{ name: 'Gmail', host: /(^|\.)mail\.google\.com$/ }, { name: 'Outlook', host: /(^|\.)outlook\.(live|office|office365)\.com$/ }, { name: 'Yahoo Mail', host: /(^|\.)mail\.yahoo\.com$/ }];
+const WEBMAIL = [{ name: 'Gmail', host: /(^|\.)mail\.google\.com$/ }, { name: 'Outlook', host: /(^|\.)outlook\.((live|office|office365)\.com|cloud\.microsoft)$/ }, { name: 'Yahoo Mail', host: /(^|\.)mail\.yahoo\.com$/ }];
 export function webmailName(url: string): string | null { let h = ''; try { h = new URL(url).hostname; } catch { return null; } return WEBMAIL.find((w) => w.host.test(h))?.name ?? null; }
 export const NO_EXPIRY = '9999-12-31T23:59:59.000Z';
 export const untilText = (p: { expires_at: string }) => p.expires_at >= NO_EXPIRY ? 'with no end date' : `until ${p.expires_at.slice(0, 10)}`;
@@ -85,14 +85,35 @@ export function grantEmails(db: DB, by: string, opts: { max_per_day?: number; da
   ev(db, by, 'permission.created', { id, agent: '*', kind: EMAILS, max_per_day: max, expires_at: expires, reason: opts.reason ?? null });
   return getPermission(db, id)!;
 }
-/** The owner said "renew": turn back on each team-wide permission that expired, for the same length (or no end date) and daily limit. */
+export const CODES = 'verification_code';
+export const CODES_SCOPE = 'Type emailed verification codes: assistants may open your webmail in the team browser, read a verification code a job site emailed you, and type it into that job site\'s code field. Never into password or payment fields; each code typed is recorded in the team chat.';
+/** The live "Type emailed verification codes" permission, if on. */
+export function codesPermission(db: DB, at = now()): StandingPermission | null { return teamPermissionState(db, CODES, at).live; }
+/** Switch "Type emailed verification codes" on (off by default; only on the owner's words). days = null means no end date. */
+export function grantVerificationCodes(db: DB, by: string, opts: { max_per_day?: number; days?: number | null; reason?: string } = {}): StandingPermission {
+  const st = teamPermissionState(db, CODES); const cur = st.live ?? st.capped; if (cur) return cur;
+  const t = now(); const max = Math.max(1, Math.min(200, Math.round(Number(opts.max_per_day ?? 50))));
+  const id = newId('perm'); const expires = opts.days === null || opts.days === undefined ? NO_EXPIRY : new Date(Date.parse(t) + Math.max(1, Math.min(365, Math.round(Number(opts.days)))) * 86400_000).toISOString();
+  db.prepare("INSERT INTO standing_permissions(id, agent_id, action_kind, target, max_per_day, expires_at, reason, scope_text, scope_hash, status, from_approval, created_by, created_at, activated_at) VALUES (?,?,?,?,?,?,?,?,?,'active',NULL,?,?,?)")
+    .run(id, '*', CODES, 'verification code fields on job sites', max, expires, String(opts.reason ?? '').slice(0, 300), CODES_SCOPE, sha256(CODES_SCOPE), by, t, t);
+  ev(db, by, 'permission.created', { id, agent: '*', kind: CODES, max_per_day: max, expires_at: expires, reason: opts.reason ?? null });
+  return getPermission(db, id)!;
+}
+/** The owner said "renew": turn back on each team-wide permission that expired, and extend one that ends within a week, for the same
+ *  length and daily limit. */
 export function renewExpired(db: DB, by: string): StandingPermission[] {
   const out: StandingPermission[] = [];
-  for (const kind of [EMAILS, JOB_APPLICATIONS]) {
-    const st = teamPermissionState(db, kind); if (st.live || st.capped || !st.expired) continue; const e = st.expired;
+  for (const kind of [EMAILS, JOB_APPLICATIONS, CODES]) {
+    const st = teamPermissionState(db, kind); const cur = st.live ?? st.capped;
+    if (cur && cur.expires_at < NO_EXPIRY && Date.parse(cur.expires_at) - Date.now() <= 7 * 86400_000) {
+      const len = Math.max(86400_000, Date.parse(cur.expires_at) - Date.parse(cur.activated_at ?? cur.created_at));
+      db.prepare('UPDATE standing_permissions SET expires_at = ? WHERE id = ?').run(new Date(Date.parse(cur.expires_at) + len).toISOString(), cur.id); ev(db, by, 'permission.renewed', { id: cur.id });
+      out.push(getPermission(db, cur.id)!); continue;
+    }
+    if (cur || !st.expired) continue; const e = st.expired;
     const days = Math.max(1, Math.round((Date.parse(e.expires_at) - Date.parse(e.activated_at ?? e.created_at)) / 86400_000));
     const o = { max_per_day: e.max_per_day, days, reason: `owner renewed it (${by})` };
-    out.push(kind === EMAILS ? grantEmails(db, by, o) : grantJobApplications(db, by, o));
+    out.push(kind === EMAILS ? grantEmails(db, by, o) : kind === CODES ? grantVerificationCodes(db, by, o) : grantJobApplications(db, by, o));
   }
   return out;
 }

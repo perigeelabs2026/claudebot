@@ -1,6 +1,6 @@
 /**
  * Go/no-go certification from live evidence. Read-only: it only SELECTs.
- * Rehearsal evidence never counts: workspaces whose policies say telegram:false or dry_run:true are test projects,
+ * Rehearsal evidence never counts: workspaces whose policies say test or dry_run:true are test projects,
  * and their jobs, events and messages are excluded from every positive check.
  */
 import type { DB } from '../db/open.ts';
@@ -9,7 +9,7 @@ export interface CertifyCheck { name: string; ok: boolean; evidence: string }
 export interface CertifyResult { go: boolean; since: string; now: string; checks: CertifyCheck[] }
 
 /** SQL predicate: the workspace alias `w` is a test project. A job with no workspace (or a missing one) is not a test project. */
-const TEST_WS = (w: string) => `(${w}.id IS NOT NULL AND (COALESCE(json_extract(${w}.policies, '$.telegram'), 1) = 0 OR COALESCE(json_extract(${w}.policies, '$.dry_run'), 0) <> 0))`;
+const TEST_WS = (w: string) => `(${w}.id IS NOT NULL AND (COALESCE(json_extract(${w}.policies, '$.test'), 0) <> 0 OR COALESCE(json_extract(${w}.policies, '$.dry_run'), 0) <> 0))`;
 const ACTIVE = `('queued','leased','running')`;
 
 export function certify(db: DB, opts: { now?: Date | string; hours?: number } = {}): CertifyResult {

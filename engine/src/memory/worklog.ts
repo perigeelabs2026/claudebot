@@ -1,7 +1,7 @@
 /**
  * Nightly work-log rollup: what each assistant actually did, per day, built from the ledger with no model call and written under
  * "## Work log" in the assistant's vault note (Assistants/<Name>.md). Each day lists applications submitted and verified (company,
- * role), tasks finished, tasks blocked with the reason, and files saved. Test projects (policies telegram:false or dry_run) are
+ * role), tasks finished, tasks blocked with the reason, and files saved. Test projects (policies test or dry_run) are
  * left out. Re-running is idempotent: a day's entry is rebuilt from the ledger and replaced; the last 14 days are kept.
  */
 import type { DB } from '../db/open.ts';
@@ -9,7 +9,7 @@ import { Vault, localDay } from './vault.ts';
 
 const CHAT_TURN = 'chat.turn';
 const NOT_TASKS = `('${CHAT_TURN}','owner.upload')`;
-const REAL_PROJECT = `(j.workspace_id IS NULL OR NOT EXISTS (SELECT 1 FROM workspaces w WHERE w.id = j.workspace_id AND (COALESCE(json_extract(w.policies, '$.telegram'), 1) = 0 OR COALESCE(json_extract(w.policies, '$.dry_run'), 0) <> 0)))`;
+const REAL_PROJECT = `(j.workspace_id IS NULL OR NOT EXISTS (SELECT 1 FROM workspaces w WHERE w.id = j.workspace_id AND (COALESCE(json_extract(w.policies, '$.test'), 0) <> 0 OR COALESCE(json_extract(w.policies, '$.dry_run'), 0) <> 0)))`;
 
 const one = (s: unknown, max = 140) => { const t = String(s ?? '').replace(/\s+/g, ' ').trim(); return t.length > max ? `${t.slice(0, max - 1)}…` : t; };
 const title = (objective: string) => { const goal = /^Continuing \(round/i.test(objective) ? (objective.match(/^Goal:\s*(.+)$/m)?.[1] ?? objective) : objective; return one(goal.split('\n')[0], 120); };

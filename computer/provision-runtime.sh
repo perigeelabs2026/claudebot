@@ -16,6 +16,10 @@ install -d -m 755 /opt/claudebot/bin /opt/claudebot/acp
 install -m 755 /etc/claudebot/claude-acp /opt/claudebot/bin/claude-acp; install -m 755 /etc/claudebot/chromium-wayland /opt/claudebot/bin/chromium-wayland; install -m 644 /etc/claudebot/broker-bridge.mjs /opt/claudebot/broker-bridge.mjs
 CC=$(jq -r .runtime.claude_code $V); [ "$(sudo -u "$U" "$HOME_U/.local/bin/claude" --version 2>/dev/null | cut -d' ' -f1)" = "$CC" ] || sudo -u "$U" bash -c "curl -fsSL https://claude.ai/install.sh -o /tmp/claude-install.sh && bash /tmp/claude-install.sh $CC"
 install -d -o "$U" -m 700 "$D/claude" "$D/openclaw" "$D/secrets" "$D/logs" "$D/workspace" "$D/workspace/_control"
+# Build tasks: the checks (npm ci, tests, typecheck) run as a builder uid with no sudo that cannot read $D/secrets, the clone's .git
+# or other worktrees; $D/repos is traverse-only so the builder reaches only the worktree it was handed.
+id claudebot-builder >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/claudebot-builder --shell /bin/bash claudebot-builder
+install -d -o "$U" -m 711 "$D/repos"
 [ -s "$D/secrets/gateway.token" ] || (umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$D/secrets/gateway.token"); chown "$U" "$D/secrets/gateway.token"
 sudo -u "$U" env OPENCLAW_STATE_DIR="$D/openclaw" PATH=$PATH bash -c "[ -d '$D/openclaw/npm/projects' ] && ls '$D/openclaw/npm/projects' | grep -q acpx || openclaw --profile computer plugins install $(jq -r .runtime.acpx_plugin $V)"
 install -o "$U" -m 600 /etc/claudebot/openclaw.json "$D/openclaw/openclaw.json"

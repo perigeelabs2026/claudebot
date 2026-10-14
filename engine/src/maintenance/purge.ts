@@ -9,8 +9,11 @@ import path from 'node:path';
 import type { DB } from '../db/open.ts';
 import { snapshot } from '../supervisor/backup.ts';
 
-// 'Arizona' was dropped on 2026-10-07: real research legitimately cites Arizona sources (the owner is in Arizona), and the remaining markers still identify every historical fixture.
-export const FIXTURE_MARKERS = ['HVAC', 'MARIGOLD', 'install day', 'discovery calls', 'ROUTE-OK', 'code word', 'in exactly three bullet points', 'List the names of every tool'];
+/** The one marker a fixture carries: a fixed token that cannot occur in real work. Ordinary words ('HVAC', 'discovery calls', …) were
+ *  markers once and matched real answers ("I run discovery calls and virtual demos daily"), so a purge could delete real work. A row is
+ *  removed only when it (or the fixture job it belongs to) carries this token. */
+export const FIXTURE_SENTINEL = 'FIXTURE-7c1e2a9d-4b3f-4e8a-9d61-claudebot';
+export const FIXTURE_MARKERS: readonly string[] = [FIXTURE_SENTINEL];
 
 export function allTextColumns(db: DB): Array<[string, string]> {
   const out: Array<[string, string]> = [];
@@ -36,6 +39,12 @@ export function markerHits(db: DB, markers = FIXTURE_MARKERS): Array<{ table: st
   return hits;
 }
 
+/** Jobs that carry the fixture token, with their project and whether it is a test project (policies test or dry_run). */
+export function fixtureJobs(db: DB): Array<{ id: string; workspace: string | null; workspace_name: string | null; test: boolean }> {
+  const rows = db.prepare(`SELECT DISTINCT j.id, j.workspace_id AS workspace, w.name AS workspace_name, w.policies FROM jobs j LEFT JOIN checkpoints c ON c.job_id = j.id LEFT JOIN workspaces w ON w.id = j.workspace_id WHERE ${FIXTURE_MARKERS.map(() => 'instr(j.objective, ?) > 0 OR instr(c.payload, ?) > 0').join(' OR ')}`).all(...FIXTURE_MARKERS.flatMap((m) => [m, m])) as Array<{ id: string; workspace: string | null; workspace_name: string | null; policies: string | null }>;
+  return rows.map((r) => { let test = false; try { const p = JSON.parse(r.policies || '{}') as { test?: boolean; dry_run?: boolean }; test = p.test === true || !!p.dry_run; } catch { /* not a test project */ } return { id: r.id, workspace: r.workspace, workspace_name: r.workspace_name, test }; });
+}
+
 /** Claude Code names a project transcript directory after its cwd with `/`, `.` and `_` replaced by `-`. */
 export function encodeProjectDir(absPath: string): string { let real = absPath; try { real = fs.realpathSync(absPath); } catch { /* not yet created: resolve the nearest existing parent */ let dir = absPath; const rest: string[] = []; while (!fs.existsSync(dir) && path.dirname(dir) !== dir) { rest.unshift(path.basename(dir)); dir = path.dirname(dir); } try { real = path.join(fs.realpathSync(dir), ...rest); } catch { /* keep as is */ } } return real.replace(/[\/._]/g, '-'); }
 
@@ -55,17 +64,22 @@ export function cleanSnapshot(db: DB, backupsDir: string, label: string): string
   db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`); fs.chmodSync(file, 0o600); return file;
 }
 
-export interface PurgeOptions { db: DB; dbPath: string; backupsDir: string; workspacesDir: string; claudeConfigDir: string; runDir: string; mode: 'all' | 'markers'; actor?: string }
-export interface PurgeResult { before: PurgeCounts; after: PurgeCounts; preBackup: string; postBackup: string; removedWorkspaces: string[]; removedTranscripts: string[]; removedBackups: string[]; activeCancelled: string[]; compaction: { vacuumed: boolean; wal: Record<string, unknown> | null; note: string } }
+export interface PurgeOptions { db: DB; dbPath: string; backupsDir: string; workspacesDir: string; claudeConfigDir: string; runDir: string; mode: 'all' | 'markers'; actor?: string; allowRealProjects?: boolean }
+export interface PurgeResult { before: PurgeCounts; after: PurgeCounts; preBackup: string; postBackup: string; removedWorkspaces: string[]; removedTranscripts: string[]; removedBackups: string[]; quarantinedBackups: string[]; activeCancelled: string[]; compaction: { vacuumed: boolean; wal: Record<string, unknown> | null; note: string } }
 
 export async function purgeSyntheticData(o: PurgeOptions): Promise<PurgeResult> {
   const db = o.db; const actor = o.actor ?? 'maintenance';
   const before = businessCounts(db);
+  // A fixture in a real project (not a test project) is refused unless the caller says so: the hits are in the error, nothing is touched.
+  if (o.mode === 'markers' && !o.allowRealProjects) {
+    const real = fixtureJobs(db).filter((j) => j.workspace && !j.test);
+    if (real.length) throw new Error(`refusing to purge: ${real.length} task(s) carrying the fixture token are in real projects (${[...new Set(real.map((j) => j.workspace_name ?? j.workspace))].join(', ')}): ${real.slice(0, 10).map((j) => j.id).join(', ')}. Nothing was changed.`);
+  }
   const preBackup = await snapshot(db, o.backupsDir, 50, 'pre-purge');
   // 1. Which jobs go: all business data (mode all) or marker-matching jobs and their trees (mode markers).
   const jobIds: string[] = o.mode === 'all'
     ? (db.prepare('SELECT id FROM jobs').all() as Array<{ id: string }>).map((r) => r.id)
-    : (db.prepare(`SELECT DISTINCT j.id FROM jobs j LEFT JOIN checkpoints c ON c.job_id = j.id WHERE ${FIXTURE_MARKERS.map(() => 'j.objective LIKE ? OR c.payload LIKE ?').join(' OR ')}`).all(...FIXTURE_MARKERS.flatMap((m) => [`%${m}%`, `%${m}%`])) as Array<{ id: string }>).map((r) => r.id);
+    : fixtureJobs(db).map((r) => r.id);
   // include children
   const withChildren = new Set(jobIds);
   for (const id of jobIds) for (const c of db.prepare('SELECT id FROM jobs WHERE parent_id = ?').all(id) as Array<{ id: string }>) withChildren.add(c.id);
@@ -84,8 +98,8 @@ export async function purgeSyntheticData(o: PurgeOptions): Promise<PurgeResult> 
     } else {
       for (const t of ['job_events', 'checkpoints', 'artifacts', 'actions', 'approvals', 'memory_evidence', 'memory_proposals', 'records', 'incidents']) del(`DELETE FROM ${t} WHERE job_id IN (${inList})`, ids);
       del(`DELETE FROM jobs WHERE id IN (${inList})`, ids);
-      del(`DELETE FROM objectives WHERE ${FIXTURE_MARKERS.map(() => 'title LIKE ? OR description LIKE ?').join(' OR ')}`, FIXTURE_MARKERS.flatMap((m) => [`%${m}%`, `%${m}%`]));
-      for (const t of ['job_events', 'checkpoints', 'artifacts', 'memory_evidence', 'memory_proposals', 'records']) { const col = t === 'job_events' ? 'detail' : t === 'checkpoints' ? 'payload' : t === 'records' ? 'data' : t === 'artifacts' ? 'title' : 'body'; del(`DELETE FROM ${t} WHERE ${FIXTURE_MARKERS.map(() => `${col} LIKE ?`).join(' OR ')}`, FIXTURE_MARKERS.map((m) => `%${m}%`)); }
+      del(`DELETE FROM objectives WHERE ${FIXTURE_MARKERS.map(() => 'instr(title, ?) > 0 OR instr(description, ?) > 0').join(' OR ')}`, FIXTURE_MARKERS.flatMap((m) => [m, m]));
+      for (const t of ['job_events', 'checkpoints', 'artifacts', 'memory_evidence', 'memory_proposals', 'records']) { const col = t === 'job_events' ? 'detail' : t === 'checkpoints' ? 'payload' : t === 'records' ? 'data' : t === 'artifacts' ? 'title' : 'body'; del(`DELETE FROM ${t} WHERE ${FIXTURE_MARKERS.map(() => `instr(${col}, ?) > 0`).join(' OR ')}`, [...FIXTURE_MARKERS]); }
     }
     del("DELETE FROM runtime_state WHERE key IN ('claude.capacity','health.report') OR key LIKE 'recovery.%'");
     rebuildSearchIndex(db);   // the search index holds copies of message/evidence/result text
@@ -95,7 +109,7 @@ export async function purgeSyntheticData(o: PurgeOptions): Promise<PurgeResult> 
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
   // 4. Dependent files: job workspaces, capability files, Claude project transcripts whose path encodes a removed workspace, and automatic backups containing markers.
-  const removedWorkspaces: string[] = []; const removedTranscripts: string[] = []; const removedBackups: string[] = [];
+  const removedWorkspaces: string[] = []; const removedTranscripts: string[] = []; const removedBackups: string[] = []; const quarantinedBackups: string[] = [];
   // Task directories live at <workspace root>/tasks/<job id> (legacy builds used <workspacesDir>/<role>/<job id>).
   const roots = new Set<string>((db.prepare('SELECT root_path FROM workspaces').all() as Array<{ root_path: string }>).map((r) => r.root_path));
   if (fs.existsSync(o.workspacesDir)) for (const d of fs.readdirSync(o.workspacesDir)) { const p = path.join(o.workspacesDir, d); if (fs.statSync(p).isDirectory()) roots.add(p); }
@@ -106,19 +120,21 @@ export async function purgeSyntheticData(o: PurgeOptions): Promise<PurgeResult> 
   const projects = path.join(o.claudeConfigDir, 'projects');
   const wsPrefix = encodeProjectDir(path.resolve(o.workspacesDir));
   if (fs.existsSync(projects)) for (const d of fs.readdirSync(projects)) {
+    // Only transcripts of this product's task folders that the purge removed (every one in mode all): never a folder matched by name alone.
     const isProductWorkspace = d.startsWith(wsPrefix);
-    const isTemp = /-T-(ros|tmp|claudebot)-/.test(d);   // transcripts from temporary test/parity engine homes
-    if (isTemp || (isProductWorkspace && (o.mode === 'all' || ids.some((id) => d.includes(encodeProjectDir(id)))))) { fs.rmSync(path.join(projects, d), { recursive: true, force: true }); removedTranscripts.push(d); }
+    if (isProductWorkspace && (o.mode === 'all' || ids.some((id) => d.includes(encodeProjectDir(id))))) { fs.rmSync(path.join(projects, d), { recursive: true, force: true }); removedTranscripts.push(d); }
   }
   // 5. Reclaim free pages so purged bytes leave the main file and WAL, then take a compact post-purge snapshot (VACUUM INTO: no free pages).
   const compaction = compact(db);
   const after = businessCounts(db);
   const postBackup = cleanSnapshot(db, o.backupsDir, 'post-purge');
-  // 6. Scan automatic backups AFTER the post-purge snapshot exists, so the purge's own output is covered too.
+  // 6. Scan automatic backups AFTER the post-purge snapshot exists, so the purge's own output is covered too. A backup holding the fixture
+  //    token may also be the only copy of real data from that time, so it is moved to backups/quarantine (0600), never deleted.
+  const quarantine = path.join(o.backupsDir, 'quarantine');
   if (fs.existsSync(o.backupsDir)) for (const f of fs.readdirSync(o.backupsDir)) {
     const p = path.join(o.backupsDir, f); if (!f.endsWith('.sqlite') || /pre-purge|pre-migration|correction-/.test(f) || !fs.statSync(p).isFile()) continue;   // explicit rollback points are kept (0600)
-    const buf = fs.readFileSync(p); if (FIXTURE_MARKERS.some((m) => buf.includes(m))) { fs.rmSync(p); removedBackups.push(f); }
+    const buf = fs.readFileSync(p); if (FIXTURE_MARKERS.some((m) => buf.includes(m))) { fs.mkdirSync(quarantine, { recursive: true, mode: 0o700 }); fs.renameSync(p, path.join(quarantine, f)); fs.chmodSync(path.join(quarantine, f), 0o600); quarantinedBackups.push(f); }
   }
-  if (!fs.existsSync(postBackup)) throw new Error('post-purge snapshot still contained fixture bytes and was removed; compaction failed: ' + compaction.note);
-  return { before, after, preBackup, postBackup, removedWorkspaces, removedTranscripts, removedBackups, activeCancelled: active, compaction };
+  if (quarantinedBackups.includes(path.basename(postBackup))) throw new Error('post-purge snapshot still contained fixture bytes and was quarantined; compaction failed: ' + compaction.note);
+  return { before, after, preBackup, postBackup, removedWorkspaces, removedTranscripts, removedBackups, quarantinedBackups, activeCancelled: active, compaction };
 }

@@ -8,7 +8,9 @@ export async function snapshot(db: DB, backupsDir: string, keep = 20, label = 'a
   // VACUUM INTO writes a compact copy without free pages, so deleted bytes never travel into a backup.
   db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
   fs.chmodSync(file, 0o600);
-  const files = fs.readdirSync(backupsDir).filter((f) => f.startsWith('claudebot-') && f.endsWith('.sqlite')).sort();
+  // Rotation keeps the newest `keep` of this label only: rollback points (pre-purge, pre-migration, correction-…) are never rotated out
+  // by the automatic snapshots.
+  const files = fs.readdirSync(backupsDir).filter((f) => f.startsWith('claudebot-') && f.endsWith(`-${label}.sqlite`)).sort();
   for (const old of files.slice(0, Math.max(0, files.length - keep))) fs.rmSync(path.join(backupsDir, old));
   return file;
 }

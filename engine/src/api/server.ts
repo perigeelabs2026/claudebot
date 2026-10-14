@@ -37,7 +37,7 @@ import { Assistants } from '../chat/assistants.ts';
 import { homeSnapshot } from '../model/home.ts';
 import { saveAttachment, AttachmentError, exportConversation } from '../chat/attachments.ts';
 import { hasToken, saveToken, checkToken, newPairingCode, binding as tgBinding, unbind as tgUnbind } from '../telegram/bridge.ts';
-import { proposePermission, activatePermission, revokePermission, listPermissions, grantJobApplications } from '../approvals/permissions.ts';
+import { proposePermission, activatePermission, revokePermission, listPermissions, grantJobApplications, untilText } from '../approvals/permissions.ts';
 import { computeGovernor, setOverride, revokeOverride, deferralOf, refreshGovernor, perTurnWeeklyCost, resetTime } from '../usage/governor.ts';
 import { latestReport, priorityOf } from '../cos/report.ts';
 import type { BrowserLive } from '../browser/live.ts';
@@ -269,9 +269,9 @@ export class ApiServer {
     if (p === '/api/telegram/pair' && m === 'POST') { if (!hasToken(this.d.cfg.secretsDir)) return this.json(res, 409, { error: 'paste the bot token first' }); return this.json(res, 200, newPairingCode(db)); }
     if (p === '/api/telegram/unbind' && m === 'POST') { tgUnbind(db); return this.json(res, 200, { bound: false }); }
     // Standing permissions: proposed from a real approval in the owner's app session, active only after the owner's native confirmation of the exact scope.
-    if (p === '/api/permissions' && m === 'GET') return this.json(res, 200, listPermissions(db).map((x) => ({ ...x, agent_name: defs.getAgent(x.agent_id)?.name ?? x.agent_id })));
+    if (p === '/api/permissions' && m === 'GET') return this.json(res, 200, listPermissions(db).map((x) => ({ ...x, until: untilText(x), agent_name: defs.getAgent(x.agent_id)?.name ?? x.agent_id })));
     if (p === '/api/permissions/propose' && m === 'POST') { if (req.headers['x-claudebot-token']) return this.json(res, 403, { error: 'standing permissions are created in the ClaudeBot app' }); const b = await this.body(req); try { const ap = approvals.get(String(b.approval_id ?? '')); const agent = ap?.job_id ? store.get(ap.job_id)?.agent_role : null; const pm = proposePermission(db, { approval_id: String(b.approval_id ?? ''), max_per_day: b.max_per_day as number | undefined, days: b.days as number | undefined, reason: b.reason ? String(b.reason) : undefined, agent_name: agent ? defs.getAgent(agent)?.name : undefined }, 'owner'); return this.json(res, 201, pm); } catch (e) { return this.json(res, 400, { error: (e as Error).message }); } }
-    if (p === '/api/permissions/job-applications' && m === 'POST') { if (req.headers['x-claudebot-token']) return this.json(res, 403, { error: 'switched on from the app only' }); const pm = grantJobApplications(db, 'owner', { reason: 'switched on in Settings' }); this.broadcast('approvals', {}); return this.json(res, 200, pm); }
+    if (p === '/api/permissions/job-applications' && m === 'POST') { if (req.headers['x-claudebot-token']) return this.json(res, 403, { error: 'switched on from the app only' }); const pm = grantJobApplications(db, 'owner', { reason: 'switched on in Settings', days: null }); this.broadcast('approvals', {}); return this.json(res, 200, pm); }
     const pmm = p.match(/^\/api\/permissions\/([^/]+)\/(activate|revoke)$/);
     if (pmm && m === 'POST') {
       if (pmm[2] === 'revoke') { const ok = revokePermission(db, pmm[1], 'owner'); this.broadcast('settings', { permission: pmm[1] }); return ok ? this.json(res, 200, { revoked: true }) : this.json(res, 404, { error: 'no active permission with that id' }); }

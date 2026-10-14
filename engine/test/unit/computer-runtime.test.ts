@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ComputerRuntime, vmPath, capabilityKey, VM_WORKSPACES } from '../../src/runtime/computer.ts';
+import { ComputerRuntime, vmPath, capabilityKey, VM_WORKSPACES, VM_REPOS } from '../../src/runtime/computer.ts';
 import { issueCapability, mcpJson } from '../../src/broker/capabilities.ts';
 import type { ModelRuntime, TurnRequest } from '../../src/runtime/types.ts';
 
@@ -61,11 +61,13 @@ test('step 1: a build turn runs in its worktree inside the computer (vmCwd): cap
   const calls: Array<{ cmd: string; args: string[]; input?: string }> = []; let seenCwd = '';
   const inner = { id: 'claude-acp', describe: () => ({ label: 'x', route: 'r', account: '' }), health: async () => ({}) as never, cancel: async () => {}, startTurn: async (r: TurnRequest) => { seenCwd = r.cwd; return { ok: true, text: 'done' } as never; } } as unknown as ModelRuntime;
   const rt = new ComputerRuntime(inner, { hostWorkspaces: ws, runDir, enginePort: 48311, log: { info: () => {}, warn: () => {} }, exec: async (cmd, args, input) => { calls.push({ cmd, args, input }); return ''; } });
-  const wt = `${VM_WORKSPACES}/repos/claudebot-worktrees/job-b1`;
+  const wt = `${VM_REPOS}/claudebot-worktrees/job-b1`;
   const r = await rt.startTurn({ jobId: 'job-b1', sessionRef: 'job-b1', role: 'coordinator', cwd: dir, vmCwd: wt, prompt: 'p', resume: false, timeoutMs: 1000 });
   assert.equal(r.ok, true); assert.equal(seenCwd, wt, 'the turn runs in the worktree');
   assert.equal(calls.filter((c) => c.cmd === 'rsync').length, 0, 'nothing copied into or out of the worktree');
   assert.ok(calls.some((c) => c.cmd === 'ssh' && c.args.at(-1)!.includes(`'${wt}'/.claudebot/capability.json`)), 'the capability goes into the worktree');
+  assert.ok(calls.some((c) => c.cmd === 'ssh' && c.args.at(-1) === `rm -f '${wt}'/.claudebot/capability.json`), 'and is removed when the turn ends');
+  assert.ok(calls.findIndex((c) => c.args.at(-1)?.startsWith('rm -f')) > calls.findIndex((c) => c.args.at(-1)?.includes('capability.json') && c.input), 'after it was written');
   const bad = await rt.startTurn({ jobId: 'job-b1', sessionRef: 'job-b1', role: 'coordinator', cwd: dir, vmCwd: `${VM_WORKSPACES}/general`, prompt: 'p', resume: false, timeoutMs: 1000 });
   assert.equal(bad.ok, false); assert.match((bad as { message: string }).message, /build worktree/);
 });

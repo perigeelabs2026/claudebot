@@ -156,7 +156,7 @@ export class ChatStore {
     const set = this.db.prepare("SELECT value FROM settings WHERE key = 'team_conversation_id'").get() as { value: string } | undefined;
     const want = set ? String(JSON.parse(set.value) ?? '') : ''; if (want && (this.db.prepare("SELECT 1 FROM conversations WHERE id = ? AND status = 'active'").get(want))) return want;
     const r = this.db.prepare(`SELECT c.id FROM conversations c JOIN workspaces w ON w.id = c.workspace_id WHERE c.type = 'group' AND c.status = 'active'
-      AND COALESCE(json_extract(w.policies, '$.telegram'), 1) <> 0 AND COALESCE(json_extract(w.policies, '$.dry_run'), 0) = 0
+      AND COALESCE(json_extract(w.policies, '$.test'), 0) = 0 AND COALESCE(json_extract(w.policies, '$.dry_run'), 0) = 0
       AND EXISTS (SELECT 1 FROM conversation_members cm WHERE cm.conversation_id = c.id AND cm.agent_id = 'coordinator')
       ORDER BY (SELECT count(*) FROM conversation_members cm WHERE cm.conversation_id = c.id) DESC, c.last_message_at DESC LIMIT 1`).get() as { id: string } | undefined;
     return r?.id ?? null;
@@ -170,7 +170,7 @@ export class ChatStore {
     const work = msg.role === 'owner' || msg.role === 'assistant' || ['delegation', 'handoff', 'result', 'blocker', 'status'].includes(msg.kind); if (!work) return;
     const team = this.teamConversation(); if (!team || team === msg.conversation_id) return;
     const src = this.db.prepare('SELECT c.title, c.type, w.policies FROM conversations c JOIN workspaces w ON w.id = c.workspace_id WHERE c.id = ?').get(msg.conversation_id) as { title: string | null; type: string; policies: string } | undefined; if (!src) return;
-    try { const pol = JSON.parse(src.policies || '{}') as { telegram?: boolean; dry_run?: boolean }; if (pol.telegram === false || pol.dry_run) return; } catch { /* treat as real */ }
+    try { const pol = JSON.parse(src.policies || '{}') as { telegram?: boolean; test?: boolean; dry_run?: boolean }; if (pol.test === true || pol.dry_run) return; } catch { /* treat as real */ }
     const names = (id: string) => (this.db.prepare('SELECT name FROM agent_definitions WHERE id = ?').get(id) as { name: string } | undefined)?.name ?? id;
     const viaTelegram = !!this.db.prepare("SELECT 1 FROM telegram_outbox o JOIN messages m ON m.id = o.message_id WHERE o.kind = 'inbound' AND m.conversation_id = ? LIMIT 1").get(msg.conversation_id);
     const where = viaTelegram ? 'Telegram' : src.type === 'direct' ? `direct chat${src.title ? ` "${src.title}"` : ''}` : `"${src.title ?? 'another chat'}"`;
@@ -339,7 +339,7 @@ export class ChatStore {
   /** What happened recently in this assistant's other conversations (a direct chat cannot see the group chat or Telegram otherwise):
    *  the owner's words, this assistant's own replies, the lead's replies and results/blockers from the last 72 hours; up to
    *  `limit` (default 10) per conversation, grouped under each conversation's title (least recently active first, oldest message first
-   *  within each group); test projects (telegram:false or dry_run) are left out. */
+   *  within each group); test projects (policies test or dry_run) are left out. */
   elsewhere(agentId: string, exceptConversationId: string, opts: { hours?: number; limit?: number; each?: number; conversations?: number } = {}): string {
     const since = new Date(Date.now() - (opts.hours ?? 72) * 3600_000).toISOString();
     const perConv = Math.max(1, opts.limit ?? 10); const maxConvs = Math.max(1, opts.conversations ?? 12);
@@ -347,7 +347,7 @@ export class ChatStore {
           ROW_NUMBER() OVER (PARTITION BY m.conversation_id ORDER BY m.created_at DESC, m.seq DESC) AS rn
         FROM messages m JOIN conversations c ON c.id = m.conversation_id JOIN workspaces w ON w.id = c.workspace_id
         WHERE m.conversation_id <> ? AND m.created_at >= ? AND EXISTS (SELECT 1 FROM conversation_members cm WHERE cm.conversation_id = c.id AND cm.agent_id = ?)
-          AND COALESCE(json_extract(w.policies, '$.telegram'), 1) <> 0 AND COALESCE(json_extract(w.policies, '$.dry_run'), 0) = 0
+          AND COALESCE(json_extract(w.policies, '$.test'), 0) = 0 AND COALESCE(json_extract(w.policies, '$.dry_run'), 0) = 0
           AND (m.role = 'owner' OR (m.role = 'assistant' AND (m.sender = ? OR m.sender = 'coordinator')) OR m.kind IN ('result','blocker') OR json_extract(m.meta, '$.mirror_of') IS NOT NULL))
       WHERE rn <= ? ORDER BY created_at, seq`).all(exceptConversationId, since, agentId, agentId, perConv) as Array<{ id: string; seq: number; role: string; sender: string; kind: string; content: string; artifact_id: string | null; created_at: string; conversation_id: string; title: string | null; type: string }>;
     if (!rows.length) return '';

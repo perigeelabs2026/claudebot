@@ -170,7 +170,7 @@ test('T7: quiet hours send nothing (held, never sent later) and test projects ne
   assert.ok(!f.calls.some((x) => x.method === 'sendMessage' && String(x.body.text).includes('night news')), 'nothing during quiet hours');
   s.db.prepare("DELETE FROM runtime_state WHERE key = 'telegram.quiet_until'").run(); await s.bridge.cycle(0);
   assert.ok(!f.calls.some((x) => x.method === 'sendMessage' && String(x.body.text).includes('night news')), 'held notices are not sent later');
-  const ws2 = new Workspaces(s.db, path.join(os.tmpdir(), `tg-ws-${Date.now()}`)).create({ name: 'Test project', policies: { telegram: false } }, 'test');
+  const ws2 = new Workspaces(s.db, path.join(os.tmpdir(), `tg-ws-${Date.now()}`)).create({ name: 'Test project', policies: { test: true, telegram: false } }, 'test');
   const c2 = s.chat.create({ workspace_id: ws2.id, type: 'direct', members: ['coordinator'] }); s.chat.add({ conversation_id: c2.id, role: 'assistant', sender: 'coordinator', content: 'rehearsal chatter' });
   s.chat.add({ conversation_id: c.id, role: 'assistant', sender: 'coordinator', job_id: tj, content: 'real morning news' }); f.calls.length = 0; await s.bridge.cycle(0);
   const texts = f.calls.filter((x) => x.method === 'sendMessage').map((x) => String(x.body.text)); assert.ok(texts.some((x) => x.includes('real morning news'))); assert.ok(!texts.some((x) => x.includes('rehearsal chatter')));
@@ -328,7 +328,8 @@ test('emails permission on Telegram: an expired permission is named on the email
   assert.match(String(card!.body.text), /expired on \d{4}-\d{2}-\d{2}; reply "renew" to turn it back on/);
   f.calls.length = 0; f.push(msg(41, 777, 'renew')); await s.bridge.cycle(0);
   const back = P.emailPermission(s.db); assert.ok(back, 'renewed'); assert.ok(f.calls.some((x) => x.method === 'sendMessage' && /Renewed: "Send emails without asking" is on until/.test(String(x.body.text))));
+  s.db.prepare('UPDATE standing_permissions SET expires_at = ? WHERE id = ?').run(new Date(Date.now() + 30 * 86400_000).toISOString(), back!.id);
   f.calls.length = 0; f.push(msg(42, 777, 'renew')); await s.bridge.cycle(0);
-  assert.ok(!f.calls.some((x) => /Renewed/.test(String(x.body.text))), 'nothing expired: "renew" goes to the Chief of Staff as plain words');
+  assert.ok(!f.calls.some((x) => /Renewed/.test(String(x.body.text))), 'nothing expired or ending soon: "renew" goes to the Chief of Staff as plain words');
   f.close();
 });

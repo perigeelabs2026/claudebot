@@ -1,5 +1,5 @@
 import { Vault, type Rule } from '../memory/vault.ts';
-import { grantEmails, renewExpired, teamPermissionState, untilText, EMAILS } from '../approvals/permissions.ts';
+import { grantEmails, renewExpired, teamPermissionState, untilText, EMAILS, CODES } from '../approvals/permissions.ts';
 import { classifyBlocked } from '../cos/owner-needs.ts';
 import { requeueBankKnownBlockers, requeueKey } from '../cos/requeue.ts';
 import { allowlistEntry } from '../approvals/allowlist.ts';
@@ -143,7 +143,7 @@ export class TelegramBridge {
     if (text.startsWith('/')) return this.command(chatId, text);
     if (/^renew[.!]?$/i.test(text)) {   // "renew" turns an expired emails or job-applications permission back on
       const r = renewExpired(db, 'owner:telegram');
-      if (r.length) { ev(db, 'telegram.renewed', { ids: r.map((p) => p.id) }); await this.api('sendMessage', { chat_id: chatId, text: `Renewed: ${r.map((p) => `"${p.action_kind === EMAILS ? 'Send emails' : 'Submit job applications'} without asking" is on ${untilText(p)}`).join('; ')}.` }).catch(() => {}); return 'renewed'; }
+      if (r.length) { ev(db, 'telegram.renewed', { ids: r.map((p) => p.id) }); await this.api('sendMessage', { chat_id: chatId, text: `Renewed: ${r.map((p) => `"${p.action_kind === EMAILS ? 'Send emails without asking' : p.action_kind === CODES ? 'Type emailed verification codes' : 'Submit job applications without asking'}" is on ${untilText(p)}`).join('; ')}.` }).catch(() => {}); return 'renewed'; }
     }
     // Route: a reply to one of our notices goes to that conversation; otherwise the latest direct chat with the Chief of Staff.
     let conv: string | null = null;
@@ -210,8 +210,8 @@ export class TelegramBridge {
       const quietNow = String((rs(db, 'telegram.quiet_until') as { until?: string } | null)?.until ?? '') > now();
       const recs = db.prepare(`SELECT e.seq, e.detail, w.policies FROM job_events e JOIN jobs j ON j.id = e.job_id LEFT JOIN workspaces w ON w.id = j.workspace_id WHERE e.type = 'application.verified' AND e.at >= ? AND NOT EXISTS (SELECT 1 FROM telegram_outbox o WHERE o.message_id = 'receipt:' || e.seq) ORDER BY e.seq LIMIT 10`).all(since) as Array<{ seq: number; detail: string; policies: string | null }>;
       for (const r of recs) {
-        let d: { company?: string; role?: string } = {}; let pol: { telegram?: boolean; dry_run?: boolean } = {}; try { d = JSON.parse(r.detail); pol = JSON.parse(r.policies || '{}'); } catch { /* */ }
-        const skip = quietNow || pol.telegram === false || pol.dry_run;
+        let d: { company?: string; role?: string } = {}; let pol: { telegram?: boolean; test?: boolean; dry_run?: boolean } = {}; try { d = JSON.parse(r.detail); pol = JSON.parse(r.policies || '{}'); } catch { /* */ }
+        const skip = quietNow || pol.telegram === false || pol.test === true || pol.dry_run;
         const sent = skip ? null : await this.api<{ message_id: number }>('sendMessage', { chat_id: b.chat_id, text: `Applied: ${d.company ?? 'a company'}, ${d.role ?? 'a role'}. Confirmation page seen and receipt saved.` }).catch(() => null);
         db.prepare('INSERT OR IGNORE INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?,?,?,?,?)').run(`receipt:${r.seq}`, b.chat_id, sent?.message_id ?? null, skip ? (quietNow ? 'held-quiet' : 'skipped-test') : 'receipt', now()); if (sent) n++;
       }
@@ -222,13 +222,13 @@ export class TelegramBridge {
       requeueBankKnownBlockers(db, new JobStore(db));   // bank-known and essay blockers go back to the team first
       const blocked = db.prepare(`SELECT j.id, j.idempotency_key, j.agent_role, j.objective, j.failure_detail, j.state, j.waiting_on, w.policies FROM jobs j LEFT JOIN workspaces w ON w.id = j.workspace_id WHERE j.updated_at >= ? AND ((j.state = 'failed_terminal' AND j.blocker_code = 'BLOCKED') OR j.state = 'waiting_for_auth') AND NOT EXISTS (SELECT 1 FROM telegram_outbox o WHERE o.message_id = 'blocker:' || j.id) ORDER BY j.updated_at LIMIT 10`).all(since) as Array<{ id: string; idempotency_key: string; agent_role: string; objective: string; failure_detail: string | null; state: string; waiting_on: string | null; policies: string | null }>;
       for (const j of blocked) {
-        let pol: { telegram?: boolean; dry_run?: boolean } = {}; try { pol = JSON.parse(j.policies || '{}'); } catch { /* */ }
+        let pol: { telegram?: boolean; test?: boolean; dry_run?: boolean } = {}; try { pol = JSON.parse(j.policies || '{}'); } catch { /* */ }
         const detail = String(j.failure_detail ?? '').replace(/^blocked: /, ''); const secret = /\b(password|passcode|code|sign[- ]?in|log[- ]?in|purchase|payment|spend)\b/i.test(detail);   // only the owner can type or pay
         // Re-queued to the team (the bank answers it, or it is an essay): no Telegram. A re-queued task that blocks again goes to the owner.
         const requeued = !!db.prepare('SELECT 1 FROM jobs WHERE idempotency_key = ?').get(requeueKey(j.id)); const second = j.idempotency_key.startsWith('requeue:');
         const ownerOnly = j.state === 'waiting_for_auth' || /captcha/i.test(detail) || (!requeued && (secret || second || classifyBlocked({ kind: 'blocker', title: j.objective, detail }) === 'owner'));
         if (!ownerOnly) { db.prepare('INSERT OR IGNORE INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?,?,?,?,?)').run(`blocker:${j.id}`, b.chat_id, null, 'skipped-team', now()); continue; }
-        const skip = quietNow || pol.telegram === false || pol.dry_run; const who = (this.d.defs.getAgent(j.agent_role)?.name ?? j.agent_role).replace(/\s*\(.*\)$/, '');
+        const skip = quietNow || pol.telegram === false || pol.test === true || pol.dry_run; const who = (this.d.defs.getAgent(j.agent_role)?.name ?? j.agent_role).replace(/\s*\(.*\)$/, '');
         const what = j.state === 'waiting_for_auth' ? `needs you to sign in${j.waiting_on?.startsWith('browser:') ? ` to ${j.waiting_on.slice(8)}` : ''}` : `is stuck on something only you can do: ${detail.replace(/\s+/g, ' ').slice(0, 200)}`;
         const sent = skip ? null : await this.api<{ message_id: number }>('sendMessage', { chat_id: b.chat_id, text: `${who} ${what}. Open ClaudeBot to take over.` }).catch(() => null);
         db.prepare('INSERT OR IGNORE INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?,?,?,?,?)').run(`blocker:${j.id}`, b.chat_id, sent?.message_id ?? null, skip ? (quietNow ? 'held-quiet' : 'skipped-test') : 'blocker', now()); if (sent) n++;
@@ -245,10 +245,10 @@ export class TelegramBridge {
       }
     }
     const rows = db.prepare(`SELECT m.id, m.conversation_id, m.kind, m.role, m.sender, m.content, m.approval_id, c.title, c.type FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE ${onlyIds ? `m.id IN (${onlyIds.map(() => '?').join(',')}) AND ? <> ''` : 'm.created_at >= ?'} AND ((m.role = 'assistant' AND m.kind = 'text' AND m.sender = 'coordinator' AND COALESCE(json_extract(m.meta, '$.update'), 0) = 0 AND EXISTS (SELECT 1 FROM jobs jj JOIN telegram_outbox oi ON oi.message_id = json_extract(jj.inputs, '$.message_id') AND oi.kind = 'inbound' WHERE jj.id = m.job_id)) OR m.kind = 'decision') AND NOT EXISTS (SELECT 1 FROM telegram_outbox o WHERE o.message_id = m.id) ORDER BY m.created_at LIMIT ?`).all(...(onlyIds ?? []), since, limit) as Array<{ id: string; conversation_id: string; kind: string; role: string; sender: string; content: string; approval_id: string | null; title: string; type: string }>;
-    // Quiet hours (runtime_state telegram.quiet_until) and test projects (workspace policies.telegram === false): nothing is sent;
+    // Quiet hours (runtime_state telegram.quiet_until) and test projects or projects with Telegram off (policies test, dry_run or telegram: false): nothing is sent;
     // the notice is marked held so it never goes later either.
     const quiet = String((rs(db, 'telegram.quiet_until') as { until?: string } | null)?.until ?? ''); const isQuiet = !onlyIds && quiet > now();
-    const testConv = (convId: string) => { try { const w = db.prepare('SELECT w.policies FROM conversations c JOIN workspaces w ON w.id = c.workspace_id WHERE c.id = ?').get(convId) as { policies: string } | undefined; return !!w && (JSON.parse(w.policies || '{}') as { telegram?: boolean }).telegram === false; } catch { return false; } };
+    const testConv = (convId: string) => { try { const w = db.prepare('SELECT w.policies FROM conversations c JOIN workspaces w ON w.id = c.workspace_id WHERE c.id = ?').get(convId) as { policies: string } | undefined; if (!w) return false; const pol = JSON.parse(w.policies || '{}') as { telegram?: boolean; test?: boolean; dry_run?: boolean }; return pol.telegram === false || pol.test === true || !!pol.dry_run; } catch { return false; } };
     for (const r of rows) {
       { const isTest = testConv(r.conversation_id); if (isTest || isQuiet) { db.prepare('INSERT OR IGNORE INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?,?,?,?,?)').run(r.id, b.chat_id, null, isTest ? 'skipped-test' : 'held-quiet', now()); continue; } }
       const who = this.d.defs.getAgent(r.sender)?.name ?? (r.kind === 'result' ? 'Result' : 'ClaudeBot'); const where = r.title ? ` · ${r.title}` : '';

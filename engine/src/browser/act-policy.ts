@@ -49,6 +49,13 @@ export function pageKind(page: SnapshotElement[]): ApprovalKind | null {
   return page.some((p) => p.role === 'button' && CHECKOUT_BUTTON.test(p.name)) ? 'purchase' : null;
 }
 
+/** A one-time code field (email verification on a job site): a text field named for a code, never a password, PIN or card field,
+ *  and never on a page with payment fields. */
+const CODE_FIELD = /\b(verification|security|confirmation|one[- ]time|access|email|login|sign[- ]?in)?\s*(code|passcode|otp)\b/i;
+const NOT_CODE = /\b(password|passphrase|pin|card|cvv|cvc|csc|expir|zip|postal|promo|coupon|discount|referral|area|country)\b/i;
+export function isCodeField(el: SnapshotElement | undefined, page: SnapshotElement[] = []): boolean {
+  return !!el && ['textbox', 'spinbutton'].includes(el.role) && CODE_FIELD.test(el.name) && !NOT_CODE.test(el.name) && pageKind(page) !== 'purchase';
+}
 /** Decide whether an action may run now, needs the owner's approval, or is never allowed. */
 export function decide(req: ActRequest, el: SnapshotElement | undefined, focused?: SnapshotElement, page: SnapshotElement[] = []): ActDecision {
   const label = el ? `${el.role} "${el.name}"` : 'an element';

@@ -539,7 +539,7 @@ test('an assistant remembers its other conversations: a direct chat sees what we
   const g = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'scout'] });
   s.chat.add({ conversation_id: g.id, role: 'owner', sender: 'owner', content: 'Scout, the Northwind approval went blank and you started over. Reopen it next time.' });
   s.chat.add({ conversation_id: g.id, role: 'assistant', sender: 'scout', content: 'Understood: I will reopen a blank approval instead of starting over.' });
-  const test = new Workspaces(s.db, path.join(s.tmp, 'ws')).create({ name: 'Rehearsal (test)', policies: { telegram: false, dry_run: true } }, 'test');
+  const test = new Workspaces(s.db, path.join(s.tmp, 'ws')).create({ name: 'Rehearsal (test)', policies: { test: true, telegram: false, dry_run: true } }, 'test');
   const tg = s.chat.create({ workspace_id: test.id, type: 'group', members: ['coordinator', 'scout'] }); s.chat.add({ conversation_id: tg.id, role: 'owner', sender: 'owner', content: 'rehearsal chatter' });
   const d = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['scout'] });
   const { job } = s.chat.send(d.id, 'What went wrong last time?', s.defs);
@@ -613,7 +613,7 @@ test('all work shows in the team group: direct-chat requests, replies, progress 
   s.chat.add({ conversation_id: d.id, role: 'assistant', sender: 'scout', content: '2 of 9 done: Northwind submitted and confirmed.', meta: { update: true } });
   s.chat.add({ conversation_id: d.id, role: 'system', kind: 'wake', content: 'ClaudeBot note: carry on.' });
   s.chat.add({ conversation_id: d.id, role: 'system', kind: 'decision', content: 'decision' });
-  const test = new Workspaces(s.db, path.join(s.tmp, 'ws')).create({ name: 'Rehearsal (test)', policies: { telegram: false } }, 'test');
+  const test = new Workspaces(s.db, path.join(s.tmp, 'ws')).create({ name: 'Rehearsal (test)', policies: { test: true, telegram: false } }, 'test');
   const td = s.chat.create({ workspace_id: test.id, type: 'direct', members: ['scout'] }); s.chat.add({ conversation_id: td.id, role: 'assistant', sender: 'scout', content: 'rehearsal chatter' });
   const lines = s.chat.messages(team.id).map((m) => m.content);
   assert.ok(lines.some((l) => /^From direct chat.* · You: Submit all 9 now\./.test(l)), lines.join('\n'));

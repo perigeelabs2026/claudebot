@@ -70,7 +70,7 @@ export const DETERMINISTIC: Record<string, DetFn> = {
   async prepare_build_worktree(ctx) {
     const sh = buildShell(!!ctx.vmOn); if (!sh) return { ok: false, reason: 'build jobs run inside the assistants\' computer, which is not on', terminal: true, operatorAction: 'Turn on the assistants\' computer (Settings), then re-run the task.' };
     const repo = buildRepo(ctx.db);
-    const c = await ensureClone(sh, repo); if (!c.ok) return { ok: false, reason: `could not clone or fetch ${repo.url}: ${c.error}`, terminal: false };
+    const c = await ensureClone(sh, repo); if (!c.ok) return { ok: false, reason: c.terminal ? c.error : `could not clone or fetch ${repo.url}: ${c.error}`, terminal: !!c.terminal, ...(c.terminal ? { operatorAction: 'Replace the repository token with a read-only one.' } : {}) };
     const w = await prepareWorktree(sh, repo, ctx.job.id, ctx.job.agent_role || 'coordinator'); if (!w.ok) return { ok: false, reason: `could not create the worktree: ${w.error}`, terminal: true, operatorAction: 'See the task detail.' };
     const inputs = JSON.parse(ctx.job.inputs || '{}') as Record<string, unknown>;
     ctx.db.prepare('UPDATE jobs SET inputs = ?, updated_at = ? WHERE id = ?').run(JSON.stringify({ ...inputs, worktree: w.dir, branch: w.branch, repo_where: sh.where, app: repo.app }), now(), ctx.job.id);

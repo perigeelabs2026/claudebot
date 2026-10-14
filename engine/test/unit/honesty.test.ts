@@ -58,8 +58,8 @@ test('"sent" with no action.performed gets the check note; with the performed se
 
 test('test projects (telegram:false, dry_run) are not counted, unless the question is asked inside one', () => {
   const { db, store } = setup(); const wss = new Workspaces(db, fs.mkdtempSync(path.join(os.tmpdir(), 'hws-')));
-  const test1 = wss.create({ name: 'Rehearsal', policies: { telegram: false } } as never, 't'); const test2 = wss.create({ name: 'Dry', policies: { dry_run: true } } as never, 't');
-  db.prepare('UPDATE workspaces SET policies = ? WHERE id = ?').run(JSON.stringify({ telegram: false }), test1.id); db.prepare('UPDATE workspaces SET policies = ? WHERE id = ?').run(JSON.stringify({ dry_run: true }), test2.id);
+  const test1 = wss.create({ name: 'Rehearsal', policies: { test: true, telegram: false } } as never, 't'); const test2 = wss.create({ name: 'Dry', policies: { dry_run: true } } as never, 't');
+  db.prepare('UPDATE workspaces SET policies = ? WHERE id = ?').run(JSON.stringify({ test: true, telegram: false }), test1.id); db.prepare('UPDATE workspaces SET policies = ? WHERE id = ?').run(JSON.stringify({ dry_run: true }), test2.id);
   for (let i = 1; i <= 3; i++) { const j = job(store, `real${i}`, `Real ${i}`); store.patch(j.id, { state: 'running' } as never); }
   for (const [k, ws] of [['t1', test1.id], ['t2', test2.id], ['t3', test2.id]] as const) { const j = store.create({ idempotency_key: k, kind: 'research.report', objective: k, success_contract: {}, agent_role: 'researcher', workspace_id: ws, inputs: {} } as never, 'owner').job; store.patch(j.id, { state: 'running' } as never); }
   const asking = job(store, 'ask', 'status?', 'coordinator');

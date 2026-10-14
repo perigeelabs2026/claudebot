@@ -20,6 +20,8 @@ const SSH_HOST = `lima-${NAME}`;
 const EXCLUDE = ['--exclude', '.mcp.json', '--exclude', '.claudebot/', '--exclude', '.claude/', '--exclude', '/shared'];
 /** The team's shared folder inside the computer: every task folder gets it as ./shared (same files for every assistant). */
 export const VM_SHARED = `${VM_WORKSPACES}/_shared`;
+/** Build clones and worktrees: outside the task folders, so the builder uid can reach its own worktree and nothing else. */
+export const VM_REPOS = `${VM_DATA}/repos`;
 /** Seeded once as ./shared/profile/application-answers.md; never overwritten. */
 export const APPLICATION_ANSWERS_TEMPLATE = `# Application answers
 
@@ -114,7 +116,7 @@ export class ComputerRuntime implements ModelRuntime {
   async startTurn(req: TurnRequest): Promise<TurnResult> {
     const hostDir = req.cwd; let vmDir: string;
     try { vmDir = req.vmCwd ?? vmPath(this.o.hostWorkspaces, hostDir); } catch (e) { return { ok: false, category: 'access_denied', message: (e as Error).message, retryable: false } as TurnResult; }
-    if (req.vmCwd && !req.vmCwd.startsWith(`${VM_WORKSPACES}/repos/`)) return { ok: false, category: 'access_denied', message: 'a turn may run in the computer only in a build worktree under the repos folder', retryable: false } as TurnResult;
+    if (req.vmCwd && !req.vmCwd.startsWith(`${VM_REPOS}/`)) return { ok: false, category: 'access_denied', message: 'a turn may run in the computer only in a build worktree under the repos folder', retryable: false } as TurnResult;
     const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
     try {
       const answers = `${VM_SHARED}/profile/application-answers.md`;   // an empty template the owner fills in once; assistants answer forms from it
@@ -139,6 +141,8 @@ export class ComputerRuntime implements ModelRuntime {
     }
     finally {
       // Files the turn wrote in the computer come back to the task folder on the Mac (results, drafts, downloads).
+      // The broker capability lives only as long as the turn: another turn or a check that reads this folder later finds none.
+      try { await this.ssh(`rm -f ${q(vmDir)}/.claudebot/capability.json`); } catch { /* the computer may be gone; the capability expires anyway */ }
       if (!req.vmCwd) try { fs.mkdirSync(hostDir, { recursive: true }); await this.rsync(`${SSH_HOST}:${vmDir}/`, `${hostDir}/`); } catch (e) { this.o.log.warn('copying files back from the assistants\' computer failed', { err: (e as Error).message.slice(0, 200), hostDir }); }
     }
     return r;

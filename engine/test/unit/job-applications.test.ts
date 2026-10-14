@@ -211,7 +211,59 @@ test('emails permission (Fable gaps): no end date unless the owner set one; reci
 test('webmail Send in the team browser: Outlook and Yahoo are covered by the emails permission like Gmail', async () => {
   const { webmailName } = await import('../../src/approvals/permissions.ts');
   assert.equal(webmailName('https://mail.google.com/mail/u/0/#inbox?compose=new'), 'Gmail');
-  for (const url of ['https://outlook.live.com/mail/0/', 'https://outlook.office.com/mail/', 'https://outlook.office365.com/mail/']) assert.equal(webmailName(url), 'Outlook', url);
+  for (const url of ['https://outlook.live.com/mail/0/', 'https://outlook.office.com/mail/', 'https://outlook.office365.com/mail/', 'https://outlook.cloud.microsoft/mail/']) assert.equal(webmailName(url), 'Outlook', url);
   assert.equal(webmailName('https://mail.yahoo.com/d/compose/1'), 'Yahoo Mail');
   for (const url of ['https://mail.google.com.evil.example/', 'https://www.linkedin.com/messaging/', 'not a url']) assert.equal(webmailName(url), null, url);
+});
+
+test('webmail Send in the team browser follows the emails permission state: covered while live, the cap and expiry are named when it asks', async () => {
+  const s = setupBroker(); const P = await import('../../src/approvals/permissions.ts');
+  const c = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] }); const turn = s.chat.send(c.id, '@researcher send it', s.defs).job;
+  const { recordTaskTab } = await import('../../src/browser/tabs.ts'); recordTaskTab(s.db, turn.id, 'tab-1');
+  const clicks: string[][] = [];
+  (s.broker as unknown as { browserRunner: (a: string[]) => Promise<{ ok: boolean; stdout: string; stderr: string }> }).browserRunner = async (args) => { if (args[0] === 'click') clicks.push(args); return { ok: true, stdout: args[0] === 'snapshot' ? '- button "Send" [ref=e5]' : '', stderr: '' }; };
+  (s.broker as unknown as { tabUrl: () => Promise<string> }).tabUrl = async () => 'https://outlook.cloud.microsoft/mail/deeplink/compose';
+  P.grantEmails(s.db, 'owner:test', { max_per_day: 1, days: null });
+  const ok = await s.call(turn, 'browser_act', { action: 'click', ref: 'e5' }); assert.equal(ok.ok, true, ok.text); assert.equal(clicks.length, 1);
+  const lines = () => (s.db.prepare("SELECT content FROM messages WHERE kind = 'activity'").all() as Array<{ content: string }>).map((m) => m.content);
+  assert.ok(lines().some((l) => /Email sent from Outlook/.test(l)));
+  const capped = await s.call(turn, 'browser_act', { action: 'click', ref: 'e5' }); assert.equal(capped.ok, false); assert.match(capped.text, /daily email cap of 1 is reached/); assert.equal(clicks.length, 1);
+  assert.equal(lines().filter((l) => /Daily email cap of 1 reached/.test(l)).length, 1);
+  s.db.prepare("UPDATE standing_permissions SET expires_at = ? WHERE action_kind = 'email_send'").run(new Date(Date.now() - 1000).toISOString());
+  const ex = await s.call(turn, 'browser_act', { action: 'click', ref: 'e5' }); assert.equal(ex.ok, false); assert.match(ex.text, /expired on \d{4}-\d{2}-\d{2}.*renew/);
+});
+
+test('renew extends a permission that ends within a week, for the same length; untilText never shows the no-end date', async () => {
+  const s = setupBroker(); const P = await import('../../src/approvals/permissions.ts');
+  const p = P.grantJobApplications(s.db, 'owner:test', { days: 10 });
+  s.db.prepare('UPDATE standing_permissions SET expires_at = ?, activated_at = ? WHERE id = ?').run(new Date(Date.now() + 2 * 86400_000).toISOString(), new Date(Date.now() - 8 * 86400_000).toISOString(), p.id);
+  const r = P.renewExpired(s.db, 'owner:test'); assert.equal(r.length, 1); assert.equal(r[0].id, p.id, 'the same permission, extended');
+  assert.ok(Math.abs(Date.parse(r[0].expires_at) - Date.now() - 12 * 86400_000) < 60_000);
+  assert.equal(P.untilText({ expires_at: P.NO_EXPIRY }), 'with no end date');
+});
+
+test('verification codes (off by default): with the owner\'s permission an emailed code goes into a job site\'s code field and is recorded; never a password or payment field', async () => {
+  const s = setupBroker(); const P = await import('../../src/approvals/permissions.ts');
+  assert.equal(P.codesPermission(s.db), null, 'the public default is off');
+  const c = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] }); const turn = s.chat.send(c.id, '@researcher finish the Greenhouse application', s.defs).job;
+  const { recordTaskTab } = await import('../../src/browser/tabs.ts'); recordTaskTab(s.db, turn.id, 'tab-1');
+  const typed: string[][] = []; let page = '- textbox "Security code" [ref=e1]\n- textbox "Password" [ref=e2]\n- button "Submit application" [ref=e3]';
+  (s.broker as unknown as { browserRunner: (a: string[]) => Promise<{ ok: boolean; stdout: string; stderr: string }> }).browserRunner = async (args) => { if (args[0] === 'type') typed.push(args); return { ok: true, stdout: args[0] === 'snapshot' ? page : '', stderr: '' }; };
+  (s.broker as unknown as { tabUrl: () => Promise<string> }).tabUrl = async () => 'https://job-boards.greenhouse.io/x/jobs/1';
+  const off = await s.call(turn, 'browser_act', { action: 'type', ref: 'e1', text: '482913' }); assert.equal(off.ok, false, 'off: refused like any code field'); assert.equal(typed.length, 0);
+  const asked = s.chat.send(c.id, '@coordinator you can type the email verification codes yourself', s.defs).job;
+  const on = await s.call(asked, 'set_permission', { permission: 'verification_codes', on: true, owner_words: 'you can type the email verification codes yourself' }); assert.equal(on.ok, true, on.text); assert.match(on.text, /with no end date/);
+  const code = await s.call(turn, 'browser_act', { action: 'type', ref: 'e1', text: '482913' }); assert.equal(code.ok, true, code.text); assert.equal(typed.length, 1); assert.equal(typed[0][2], '482913');
+  const lines = (s.db.prepare("SELECT content FROM messages WHERE kind = 'activity'").all() as Array<{ content: string }>).map((m) => m.content);
+  assert.ok(lines.some((l) => /Verification code ••••13 typed into "Security code" on job-boards\.greenhouse\.io/.test(l)), JSON.stringify(lines));
+  assert.ok(!lines.some((l) => l.includes('482913')), 'the team chat never shows the whole code');
+  const pw = await s.call(turn, 'browser_act', { action: 'type', ref: 'e2', text: '482913' }); assert.equal(pw.ok, false, 'never a password field'); assert.match(pw.text, /credential or payment/);
+  page = '- textbox "Card number" [ref=e4]\n- textbox "Security code" [ref=e5]\n- button "Pay now" [ref=e6]';
+  const pay = await s.call(turn, 'browser_act', { action: 'type', ref: 'e5', text: '123' }); assert.equal(pay.ok, false);
+  const pay2 = await s.call(turn, 'browser_act', { action: 'type', ref: 'e5', text: '4829' }); assert.equal(pay2.ok, false, 'a card security code on a payment page is never a verification code');
+  assert.equal(typed.length, 1, 'nothing else was typed');
+  const { isCodeField } = await import('../../src/browser/act-policy.ts');
+  assert.equal(isCodeField({ ref: 'a', role: 'textbox', name: 'Enter the 6-digit verification code' }), true);
+  assert.equal(isCodeField({ ref: 'a', role: 'password', name: 'Verification code' }), false);
+  assert.equal(isCodeField({ ref: 'a', role: 'textbox', name: 'PIN code' }), false); assert.equal(isCodeField({ ref: 'a', role: 'textbox', name: 'Promo code' }), false);
 });

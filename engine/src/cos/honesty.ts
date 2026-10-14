@@ -82,9 +82,9 @@ export interface LedgerStatus { live: number; running: number; waiting: number; 
 
 /** What the team is doing, from the same queries as the morning report. `exclude` leaves out the turn asking. */
 export function ledgerStatus(db: DB, opts: { exclude?: string; workspace?: string | null } = {}): LedgerStatus {
-  // Test projects (telegram:false or dry_run) are not the owner's work: left out, unless the question is asked inside one (then only it counts).
+  // Test projects (test or dry_run) are not the owner's work: left out, unless the question is asked inside one (then only it counts).
   const own = opts.exclude ? (db.prepare('SELECT j.workspace_id AS ws, w.policies FROM jobs j LEFT JOIN workspaces w ON w.id = j.workspace_id WHERE j.id = ?').get(opts.exclude) as { ws: string | null; policies: string | null } | undefined) : undefined;
-  const ownIsTest = (() => { try { const p = JSON.parse(own?.policies || '{}') as { telegram?: boolean; dry_run?: boolean }; return p.telegram === false || !!p.dry_run; } catch { return false; } })();
+  const ownIsTest = (() => { try { const p = JSON.parse(own?.policies || '{}') as { telegram?: boolean; test?: boolean; dry_run?: boolean }; return p.test === true || !!p.dry_run; } catch { return false; } })();
   const live = liveTasks(db, { workspace: opts.workspace ?? (ownIsTest ? own!.ws : null), realOnly: !ownIsTest, limit: 500 }).filter((t) => t.id !== opts.exclude);
   const running = live.filter((t) => t.state === 'leased' || t.state === 'running').length; const waiting = live.length - running;
   const apps = submittedApplications(db, new Date(Date.now() - 24 * 3600_000).toISOString(), { realOnly: !ownIsTest });
