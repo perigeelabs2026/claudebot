@@ -29,12 +29,14 @@ export const DETERMINISTIC: Record<string, DetFn> = {
   collect_report: async (ctx) => { const r = collectReport(ctx.db, ctx.job.id, ctx.job.workspace_id ?? null); return { ok: true, payload: r }; },
   /** Morning report, last step: the Chief of Staff must have written the headline and lede (save_report); otherwise the report failed. */
   // jobs.follow_up_email: passes on proof only. Either the send (record_followup "sent": the Sent-folder search URL and the recipient,
-  // checked on the page) with at least one sourced evidence row that shows a published address at the recipient's domain, or
+  // checked on the page; a later "bounced" for that recipient cancels it) with at least one sourced evidence row that shows a published address at the recipient's domain, or
   // record_followup "no_address" with what was tried. Its own check: verify_evidence and the research contracts are not involved.
   verify_followup: async (ctx) => {
     const ev = (type: string) => (ctx.db.prepare('SELECT detail FROM job_events WHERE job_id = ? AND type = ? ORDER BY seq DESC LIMIT 1').get(ctx.job.id, type) as { detail: string } | undefined);
     const fail = (reason: string) => ({ ok: false as const, reason, terminal: true, operatorAction: 'The follow-up was not proven. Open the task: check the Sent folder before re-running it (re-queue with the follow-up requeue).' });
-    const sent = ev('followup.sent');
+    // The latest send that has not bounced since (a followup.bounced for that recipient after it supersedes it).
+    const sent = ctx.db.prepare(`SELECT s.detail FROM job_events s WHERE s.job_id = ? AND s.type = 'followup.sent' AND NOT EXISTS (SELECT 1 FROM job_events b WHERE b.type = 'followup.bounced'
+      AND json_extract(b.detail, '$.record') = json_extract(s.detail, '$.record') AND json_extract(b.detail, '$.recipient') = json_extract(s.detail, '$.recipient') AND b.seq > s.seq) ORDER BY s.seq DESC LIMIT 1`).get(ctx.job.id) as { detail: string } | undefined;
     if (sent) {
       const d = JSON.parse(sent.detail) as { recipient?: string; sent_search_url?: string; record?: string };
       const to = String(d.recipient ?? '').toLowerCase(); const domain = /^[^@\s]+@([a-z0-9.-]+\.[a-z]{2,})$/.exec(to)?.[1];
@@ -53,6 +55,7 @@ export const DETERMINISTIC: Record<string, DetFn> = {
       if (!tried.length) return fail('followup.no_address lists nothing that was tried');
       return { ok: true, payload: { followup: 'no_address', tried } };
     }
+    const bounced = ev('followup.bounced'); if (bounced) return fail(`the email to ${String((JSON.parse(bounced.detail) as { recipient?: string }).recipient ?? '')} bounced, and no other address was written to or recorded as missing`);
     return fail('no follow-up was recorded: record_followup was never called with "sent" or "no_address"');
   },
   verify_report: async (ctx) => { const r = ctx.db.prepare("SELECT id, status FROM reports WHERE job_id = ? ORDER BY created_at DESC LIMIT 1").get(ctx.job.id) as { id: string; status: string } | undefined; if (!r) return { ok: false, reason: 'no report was collected', terminal: true }; if (r.status !== 'written') { ctx.db.prepare("UPDATE reports SET status = 'failed' WHERE id = ?").run(r.id); return { ok: false, reason: 'the Chief of Staff did not write the report (save_report was not called)', terminal: true, operatorAction: 'Generate the report again.' }; } return { ok: true, payload: { report_id: r.id, written: true } }; },

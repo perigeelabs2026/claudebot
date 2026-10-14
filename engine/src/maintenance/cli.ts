@@ -37,5 +37,12 @@ else if (cmd === 'followup-requeue') {
   if (!records.length) { console.error('usage: claudebot maintenance followup-requeue <application record id>... | --all-failed'); process.exit(2); }
   const store = new JobStore(db); console.log(JSON.stringify(records.map((r) => { const x = requeueFollowUp(db, store, r, 'owner:cli'); return x.ok ? { record: r, job: x.job.id, replaced: x.replaced } : { record: r, refused: x.reason }; }), null, 2));
 }
-else { console.error('usage: claudebot maintenance counts | purge --confirm [--include-real-projects] | purge --all --yes-delete-every-task-and-result --confirm | compact | followup-requeue <record>... | followup-requeue --all-failed'); process.exit(2); }
+else if (cmd === 'followup-create') {
+  // Backfill: a follow-up task for every verified application with none (and nothing sent). Each one checks Sent first, so an email
+  // already sent is recorded, not sent again.
+  if (!rest.includes('--missing')) { console.error('usage: claudebot maintenance followup-create --missing'); process.exit(2); }
+  const { JobStore } = await import('../jobs/store.ts'); const { followUpFor, missingFollowUps } = await import('../jobs/followup.ts');
+  const store = new JobStore(db); console.log(JSON.stringify(missingFollowUps(db).map((r) => { const x = followUpFor(db, store, r, 'owner:cli'); return 'job' in x ? { record: r, job: x.job.id } : { record: r, skipped: x.skipped }; }), null, 2));
+}
+else { console.error('usage: claudebot maintenance counts | purge --confirm [--include-real-projects] | purge --all --yes-delete-every-task-and-result --confirm | compact | followup-requeue <record>... | followup-requeue --all-failed | followup-create --missing'); process.exit(2); }
 db.close();

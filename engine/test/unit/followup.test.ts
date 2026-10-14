@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { setupBroker } from './helpers-broker.ts';
 import { grantEmails } from '../../src/approvals/permissions.ts';
 import { DETERMINISTIC } from '../../src/worker/deterministic.ts';
-import { FOLLOWUP_KIND, followupKey, requeueFollowUp, failedFollowUps, isSentSearchUrl, createFollowUp } from '../../src/jobs/followup.ts';
+import { FOLLOWUP_KIND, followupKey, requeueFollowUp, failedFollowUps, isSentSearchUrl, createFollowUp, sentFollowUp, sentSearchShows, missingFollowUps, followUpFor } from '../../src/jobs/followup.ts';
 import { failureStreaks, unprovenWorkflows, STREAK } from '../../src/cos/watch.ts';
 import { recordTaskTab } from '../../src/browser/tabs.ts';
 import { ApprovalStore } from '../../src/approvals/store.ts';
@@ -129,4 +129,58 @@ test('streak pause: contract or check failures of a never-passed workflow do not
   s2.store.transition(ok.id, 'leased', 'w'); s2.store.transition(ok.id, 'running', 'w'); s2.store.transition(ok.id, 'completed', 'w');
   for (let i = 0; i < STREAK.failures; i++) { const j = s2.store.create({ idempotency_key: `d${i}`, kind: 'document.review', objective: 'r', success_contract: {}, agent_role: 'reviewer', workspace_id: s2.ws.id, inputs: {} }).job; s2.store.transition(j.id, 'leased', 'w'); s2.store.transition(j.id, 'running', 'w'); s2.store.failTerminal(j.id, 'w', 'contract', 'x', 'CONTRACT_UNMET'); }
   assert.deepEqual(failureStreaks(s2.db, s2.store), ['reviewer']); assert.deepEqual(unprovenWorkflows(s2.db, s2.store), []);
+});
+
+test('bounced (Fable): the mailer-daemon message for that recipient cancels the send, joins what was tried, and frees the guard and the requeue for the next candidate', async () => {
+  const s = setupBroker(); grantEmails(s.db, 'owner:test', { max_per_day: 50, days: null }); const rec = await apply(s);
+  const f = s.store.get((s.db.prepare('SELECT id FROM jobs WHERE idempotency_key = ?').get(followupKey(rec)) as { id: string }).id)!; recordTaskTab(s.db, f.id, 'tab-f');
+  const st = { url: 'https://mail.google.com/mail/u/0/#search/in%3Asent+to%3Ajane%40northwind.example', page: 'To: jane@northwind.example', clicks: [] as string[][] }; browser(s, st);
+  assert.equal((await s.call(f, 'record_followup', { result: 'sent', recipient: 'jane@northwind.example' })).ok, true);
+  s.db.prepare('INSERT INTO memory_evidence(id, job_id, title, body, source_url, grade, created_at) VALUES (?,?,?,?,?,?,?)').run('evb', f.id, 'Published', 'press@northwind.example', 'https://northwind.example/press', 'A', new Date().toISOString());
+  assert.equal((await verify(s, f)).ok, true);
+  st.url = 'https://mail.google.com/mail/u/0/#inbox/FMfcg1'; st.page = 'Re: Following up\nThanks for your note';
+  assert.match((await s.call(f, 'record_followup', { result: 'bounced', recipient: 'jane@northwind.example' })).text, /not a delivery-failure/);
+  st.page = "Mail Delivery Subsystem <mailer-daemon@googlemail.com>\nAddress not found\nYour message wasn't delivered to jane@northwind.example because the address couldn't be found";
+  const b = await s.call(f, 'record_followup', { result: 'bounced', recipient: 'jane@northwind.example' }); assert.equal(b.ok, true, b.text);
+  assert.equal(sentFollowUp(s.db, rec), null, 'the bounced send no longer counts');
+  const v = await verify(s, f); assert.equal(v.ok, false); assert.match((v as { reason: string }).reason, /jane@northwind\.example bounced/);
+  st.url = 'https://mail.google.com/mail/u/0/#search/in%3Asent+to%3Ajane%40northwind.example'; st.page = 'To: jane@northwind.example';
+  assert.match((await s.call(f, 'record_followup', { result: 'sent', recipient: 'jane@northwind.example' })).text, /bounced for this application/);
+  st.url = 'https://mail.google.com/mail/u/0/#inbox?compose=new'; assert.equal((await s.call(f, 'browser_act', { action: 'click', ref: 'e5' })).ok, true, 'the guard lets the next candidate be written to');
+  st.url = 'https://mail.google.com/mail/u/0/#search/in%3Asent+to%3Abob%40northwind.example'; st.page = 'To: bob@northwind.example';
+  assert.equal((await s.call(f, 'record_followup', { result: 'sent', recipient: 'bob@northwind.example' })).ok, true);
+  const ok = await verify(s, f); assert.equal(ok.ok, true); assert.equal((ok as unknown as { payload: { recipient: string } }).payload.recipient, 'bob@northwind.example');
+  // No candidate left: the bounced address is in what was tried.
+  const s2 = setupBroker(); grantEmails(s2.db, 'owner:test', { max_per_day: 50, days: null }); const rec2 = await apply(s2);
+  const g = s2.store.get((s2.db.prepare('SELECT id FROM jobs WHERE idempotency_key = ?').get(followupKey(rec2)) as { id: string }).id)!;
+  s2.store.event(g.id, 'w', 'followup.sent', { record: rec2, recipient: 'a@northwind.example', sent_search_url: 'https://mail.google.com/mail/u/0/#sent' }); s2.store.event(g.id, 'w', 'followup.bounced', { record: rec2, recipient: 'a@northwind.example' });
+  const n = await s2.call(g, 'record_followup', { result: 'no_address', tried: ['careers page'] }); assert.equal(n.ok, true);
+  assert.deepEqual(JSON.parse((s2.db.prepare("SELECT detail FROM job_events WHERE type = 'followup.no_address'").get() as { detail: string }).detail).tried, ['careers page', 'a@northwind.example (bounced)']);
+  assert.equal((await verify(s2, g)).ok, true);
+  // A finished follow-up whose email bounced can be re-queued; the new task is told never to write to that address.
+  s2.store.transition(g.id, 'leased', 'w'); s2.store.transition(g.id, 'running', 'w'); s2.store.transition(g.id, 'completed', 'w');
+  const r = requeueFollowUp(s2.db, s2.store, rec2); assert.equal(r.ok, true, JSON.stringify(r)); assert.match(JSON.parse((r as { job: Job }).job.inputs).bounced_note, /a@northwind\.example/);
+});
+
+test('Gmail Sent shows names, not addresses: a to:<address> search with result rows counts; an empty search does not', async () => {
+  assert.equal(sentSearchShows('https://mail.google.com/mail/u/0/#search/in%3Asent+to%3Ajane%40northwind.example', 'Sent\nme\nFollowing up on my application', 1, 'jane@northwind.example'), true);
+  assert.equal(sentSearchShows('https://mail.google.com/mail/u/0/#search/in%3Asent+to%3Ajane%40northwind.example', 'No messages matched your search', 0, 'jane@northwind.example'), false);
+  assert.equal(sentSearchShows('https://mail.google.com/mail/u/0/#search/in%3Asent+to%3Ajane%40northwind.example', 'Sent', 0, 'jane@northwind.example'), false, 'no rows');
+  assert.equal(sentSearchShows('https://mail.google.com/mail/u/0/#search/in%3Asent+to%3Abob%40northwind.example', 'Sent\nme', 1, 'jane@northwind.example'), false, 'another recipient');
+  const s = setupBroker(); grantEmails(s.db, 'owner:test', { max_per_day: 50, days: null }); const rec = await apply(s);
+  const f = s.store.get((s.db.prepare('SELECT id FROM jobs WHERE idempotency_key = ?').get(followupKey(rec)) as { id: string }).id)!; recordTaskTab(s.db, f.id, 'tab-f');
+  browser(s, { url: 'https://mail.google.com/mail/u/0/#search/in%3Asent+to%3Ajane%40northwind.example', page: 'Sent\nme\nFollowing up\nRESULT_ROWS=1' });
+  assert.equal((await s.call(f, 'record_followup', { result: 'sent', recipient: 'jane@northwind.example' })).ok, true);
+});
+
+test('backfill and skips: followup-create --missing finds verified applications with no follow-up task; a skipped creation is recorded with its reason', async () => {
+  const s = setupBroker(); const r1 = await apply(s, 'Globex'); const r2 = await apply(s, 'Initech');
+  const skipped = (s.db.prepare("SELECT detail FROM job_events WHERE type = 'followup.skipped'").all() as Array<{ detail: string }>).map((x) => JSON.parse(x.detail));
+  assert.deepEqual(skipped.map((x) => [x.record, x.reason]), [[r1, '"Send emails without asking" is off'], [r2, '"Send emails without asking" is off']]);
+  assert.deepEqual(missingFollowUps(s.db), [r1, r2]);
+  grantEmails(s.db, 'owner:test', { max_per_day: 50, days: null });
+  const made = followUpFor(s.db, s.store, r1); assert.ok('job' in made); assert.deepEqual(missingFollowUps(s.db), [r2]);
+  assert.match((followUpFor(s.db, s.store, r1) as { skipped: string }).skipped, /already exists/);
+  s.store.event(null, 'w', 'followup.sent', { record: r2, recipient: 'x@initech.example', sent_search_url: 'https://mail.google.com/mail/u/0/#sent' });
+  assert.deepEqual(missingFollowUps(s.db), [], 'already sent: nothing to create');
 });
