@@ -1,5 +1,5 @@
 import { safeExtract, sourceAllowed } from './archive.ts';
-import { matchPermission, jobApplicationPermission, isJobSite, isApplicationControl, contentRecipients, grantJobApplications, revokePermission, JOB_APPLICATIONS } from '../approvals/permissions.ts';
+import { matchPermission, jobApplicationPermission, isJobSite, isApplicationControl, isApplicationFormControl, contentRecipients, grantJobApplications, revokePermission, JOB_APPLICATIONS } from '../approvals/permissions.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { runProbe } from '../infra/probe.ts';
@@ -509,7 +509,7 @@ export class BrokerApi {
       // The owner's "Submit job applications without asking": a submit/next/apply control on a job site is allowed by it, recorded
       // exactly like an approval (page, control, values hash), and performed once below. Anything else still asks.
       const ctl = el?.name ?? focused?.name ?? '';
-      if (!approvalId && verdict.action_kind === 'send' && isJobSite(urlNow) && isApplicationControl(ctl)) {
+      if (!approvalId && verdict.action_kind === 'send' && isJobSite(urlNow) && (isApplicationControl(ctl) || isApplicationFormControl(ctl))) {
         const perm = jobApplicationPermission(db);
         if (perm) { const ap = this.approvals.request({ job_id: cap.job_id, action_kind: verdict.action_kind, target, content, evidence: [{ shown_to_owner: shown }] }); this.approvals.decide(ap.id, 'approved', `permission:${perm.id}`, 'covered by "Submit job applications without asking"'); this.store.event(cap.job_id, actor, 'permission.used', { permission: perm.id, approval: ap.id, kind: 'job_application', url: urlNow, control: ctl }); approvalId = ap.id; }
       }

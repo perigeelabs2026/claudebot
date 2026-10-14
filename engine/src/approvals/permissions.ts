@@ -40,6 +40,11 @@ export function isJobSite(url: string): boolean {
   if (ATS.test(host)) return true;
   return /(^|\/)(careers?|jobs?|job-openings|apply|application|positions|openings|join-us|work-with-us)(\/|$|-)/.test(p) || /^(careers|jobs|apply)\./.test(host);
 }
+/** Any field or control inside a job application form (a dropdown, a search box, pressing Enter to pick an option, Apply/Next/Submit),
+ *  never messaging, connecting, paying or deleting. The owner's job-application permission covers all of these on a job site. */
+export function isApplicationFormControl(name: string): boolean {
+  return !/\b(message|inmail|connect|follow|invite|email|share|post|pay|payment|buy|purchase|order|donate|delete|remove|withdraw|unsubscribe)\b/i.test(String(name));
+}
 /** A control that moves an application forward (apply, next, submit) and nothing else. */
 export function isApplicationControl(name: string): boolean {
   const n = String(name);

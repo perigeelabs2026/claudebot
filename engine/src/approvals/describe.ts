@@ -7,7 +7,7 @@ export function describeApproval(ap: { action_kind: string; target: string; cont
   if (b) {
     const el = String(b.element?.name ?? ''); let site = ''; try { site = new URL(String(b.url)).hostname.replace(/^www\./, ''); } catch { /* */ }
     const label = b.action === 'type' ? 'Type in a page' : /\bapply\b/i.test(el) ? 'Open apply link' : /submit|send|post|publish|pay|buy|order/i.test(el) ? `Click "${el.slice(0, 40)}"` : 'Click on a page';
-    return { label, title: el || label, text: `${b.action === 'click' ? `Click "${el || 'this control'}"` : `${b.action} "${el}"`} on ${site || 'this page'}.\n${b.url}`, email: false, browser: true, missingBody: false };
+    return { label, title: el || label, text: `${b.action === 'click' ? `click "${el || 'a button'}"` : b.action === 'press' ? `press Enter in "${el || 'a field'}"` : `${b.action} in "${el || 'a field'}"`} on ${site || 'a web page'}`, email: false, browser: true, missingBody: false };
   }
   const head = (k: string) => (raw.match(new RegExp(`^\\s*${k}:\\s*(.+)$`, 'im')) || [])[1]?.trim() ?? '';
   const body = raw.replace(/^\s*(To|From|Subject|Cc|Bcc):.*$/gim, '').trim(); const target = String(ap.target ?? '');

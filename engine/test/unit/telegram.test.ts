@@ -67,7 +67,7 @@ test('T3: owner text reaches the Chief of Staff once (no duplicates on re-delive
   const conv = owners[0].conversation_id; const turn = s.db.prepare("SELECT id FROM jobs WHERE conversation_id = ? AND kind = 'chat.turn'").get(conv) as { id: string };
   s.chat.add({ conversation_id: conv, role: 'assistant', kind: 'text', sender: 'coordinator', content: 'Two things need you.', job_id: turn.id });
   const sent = await s.bridge.flush(); assert.equal(sent, 1); assert.equal(await s.bridge.flush(), 0, 'each notice is sent once');
-  const notice = f.calls.filter((c) => c.method === 'sendMessage').pop()!; assert.match(String(notice.body.text), /Chief of Staff[\s\S]*Two things need you\./);
+  const notice = f.calls.filter((c) => c.method === 'sendMessage').pop()!; assert.equal(String(notice.body.text), 'Two things need you.', 'plain text from the lead: no name or chat-title header'); assert.deepEqual(notice.body.link_preview_options, { is_disabled: true });
   f.close();
 });
 
@@ -137,8 +137,8 @@ test('T6: Telegram is a command channel through the lead: plain decision cards t
   f.calls.length = 0; await s.bridge.cycle(0);
   const texts = f.calls.filter((x) => x.method === 'sendMessage').map((x) => String(x.body.text));
   assert.ok(texts.some((t) => t.includes('lead summary'))); assert.ok(!texts.some((t) => t.includes('specialist chatter')), 'only the lead talks on Telegram');
-  const card = f.calls.find((x) => x.method === 'sendMessage' && String(x.body.text).startsWith('Needs your decision'))!;
-  assert.match(String(card.body.text), /Send email \(asked by /); assert.match(String(card.body.text), /Subject: Channel role\n\nHi Sam,\nThe full body\./, 'the full email copy');
+  const card = f.calls.find((x) => x.method === 'sendMessage' && x.body.reply_markup)!;
+  assert.match(String(card.body.text), /wants to send this email\. Allow it\?/); assert.ok(!/fingerprint|Expires|https?:\/\/|conv-|job-|apr-/.test(String(card.body.text)), 'no ids, fingerprint, expiry or links'); assert.match(String(card.body.text), /Subject: Channel role\n\nHi Sam,\nThe full body\./, 'the full email copy');
   // decided in the app: the Telegram card loses its buttons and says so
   s.approvals.decide(ap.id, 'rejected', 'owner'); f.calls.length = 0; await s.bridge.cycle(0);
   assert.ok(f.calls.some((x) => x.method === 'editMessageReplyMarkup')); assert.ok(f.calls.some((x) => x.method === 'sendMessage' && /^Denied/.test(String(x.body.text))));
@@ -152,7 +152,7 @@ test('T6: Telegram is a command channel through the lead: plain decision cards t
   const ap2 = s.approvals.request({ job_id: turn.id, action_kind: 'send', target: 'email to a@example.test', content: 'To: a@example.test\nSubject: x\n\nbody' });
   s.chat.add({ conversation_id: c.id, role: 'system', kind: 'decision', content: 'decision', approval_id: ap2.id, job_id: turn.id }); await s.bridge.cycle(0);
   f.calls.length = 0; f.push(msg(5, 777, '/approvals')); await s.bridge.cycle(0);
-  assert.equal(f.calls.filter((x) => x.method === 'sendMessage' && String(x.body.text).startsWith('Needs your decision')).length, 1);
+  assert.equal(f.calls.filter((x) => x.method === 'sendMessage' && x.body.reply_markup).length, 1);
   f.close();
 });
 
@@ -191,7 +191,7 @@ test('T8: when quiet hours end, one good-morning summary goes out and decisions 
   const texts = f.calls.filter((x) => x.method === 'sendMessage').map((x) => String(x.body.text));
   assert.equal(texts.filter((t) => t.startsWith('Good morning. Quiet hours are over.')).length, 1);
   assert.match(texts.find((t) => t.startsWith('Good morning'))!, /held 3 updates.*1 decision waits on you/);
-  assert.equal(texts.filter((t) => t.startsWith('Needs your decision')).length, 1); assert.ok(texts.some((t) => t.includes('Subject: Follow-up')), 'the waiting card');
+  assert.equal(f.calls.filter((x) => x.method === 'sendMessage' && x.body.reply_markup).length, 1); assert.ok(texts.some((t) => t.includes('Subject: Follow-up')), 'the waiting card');
   assert.ok(!texts.some((t) => t.includes('night news') || t.includes('Subject: Old')), 'held chatter and settled decisions stay in the app');
   f.calls.length = 0; await s.bridge.cycle(0); assert.ok(!f.calls.some((x) => x.method === 'sendMessage' && String(x.body.text).startsWith('Good morning')), 'the summary goes once');
   s.store.create({ idempotency_key: 'k8', kind: 'research.report', objective: 'Apply to Dragos', success_contract: {}, agent_role: 'researcher', workspace_id: s.ws.id }, 'owner');
@@ -201,4 +201,10 @@ test('T8: when quiet hours end, one good-morning summary goes out and decisions 
   f.push(msg(2, 777, '/status')); f.calls.length = 0; await s.bridge.cycle(0);
   assert.ok(f.calls.some((x) => x.method === 'sendMessage' && /Apply to Dragos/.test(String(x.body.text))));
   f.close();
+});
+
+test('T9: a browser decision card is one plain sentence (no page address, fingerprint or expiry)', async () => {
+  const { describeApproval } = await import('../../src/approvals/describe.ts');
+  const v = describeApproval({ action_kind: 'send', target: 'x', content: JSON.stringify({ url: 'https://magnitudesoftware.wd1.myworkdayjobs.com/en-US/External/job/apply/applyManually', action: 'press', key: 'Enter', element: { role: 'textbox', name: 'How Did You Hear About Us?' } }) });
+  assert.equal(v.text, 'press Enter in "How Did You Hear About Us?" on magnitudesoftware.wd1.myworkdayjobs.com');
 });

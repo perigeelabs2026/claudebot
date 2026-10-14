@@ -41,6 +41,8 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Assistants can open zip and tar archives you give them: files are extracted into a new folder inside the task. Links, paths that escape the folder, and oversized archives are refused. Documents and PDFs also get text copies the assistants can read.
 
 ### Fixed
+- With "Submit job applications without asking" turned on, every field, dropdown and key press inside an application form on a job site is covered, so no more approval cards mid-application. The permission is still off until you turn it on.
+- Telegram decision cards are one plain sentence (the email itself for emails), without page address, fingerprint or expiry; the lead's messages arrive as plain text, and link previews are off.
 - Plain progress words everywhere ("Working on this step", "Using the browser"); ClaudeBot's instruction notes fold into one line; statuses read the same in every view; Members fits at 1024 px and the lead cannot be removed.
 - Verified applications also recognise a thank-you shown inside an embedded application frame.
 - A turn resumed after a restart carries on instead of stopping to ask you.

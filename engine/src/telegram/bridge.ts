@@ -66,6 +66,7 @@ export class TelegramBridge {
   private token(): string | null { try { return fs.readFileSync(tokenPath(this.d.secretsDir), 'utf8').trim() || null; } catch { return null; } }
   private async api<T = unknown>(method: string, body: Record<string, unknown>, timeoutMs = 35_000): Promise<T> {
     const tok = this.token(); if (!tok) throw new Error('no bot token');
+    if (method === 'sendMessage' || method === 'editMessageText') body = { link_preview_options: { is_disabled: true }, ...body };   // no giant link previews under a message
     const res = await (this.d.fetchImpl ?? fetch)(`${this.d.apiBase ?? 'https://api.telegram.org'}/bot${tok}/${method}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
     const j = await res.json() as { ok: boolean; result?: T; description?: string };
     if (!j.ok) throw new Error(`telegram ${method}: ${j.description ?? res.status}`); return j.result as T;
@@ -196,7 +197,9 @@ export class TelegramBridge {
       if (r.kind === 'decision' && r.approval_id) {
         const ap = this.d.approvals.get(r.approval_id); if (!ap || ap.status !== 'pending') { db.prepare('INSERT OR IGNORE INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?,?,?,?,?)').run(r.id, b.chat_id, null, 'skipped', now()); continue; }
         const v = describeApproval(ap); const asker = ap.job_id ? (db.prepare('SELECT agent_role FROM jobs WHERE id = ?').get(ap.job_id) as { agent_role: string } | undefined)?.agent_role : undefined;
-        const text = `Needs your decision${where}: ${v.label}${asker ? ` (asked by ${this.d.defs.getAgent(asker)?.name ?? asker})` : ''}\n\n${v.text.slice(0, 3400)}\n\nExpires ${new Date(ap.expires_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} · fingerprint ${ap.content_hash.slice(0, 12)}${v.email ? '\n"Always allow" is in the app (it needs your Mac confirmation).' : ''}`;
+        // One plain sentence about what will happen, and the email itself when it is an email; no ids, fingerprints, expiry or raw links.
+        const askerName = (asker ? this.d.defs.getAgent(asker)?.name : null)?.replace(/\s*\(.*\)$/, '') ?? 'An assistant';
+        const text = v.email ? `${askerName} wants to send this email. Allow it?\n\n${v.text.slice(0, 3400)}` : v.browser ? `${askerName} wants to ${v.text}. Allow it?` : `${askerName} wants to ${v.label.toLowerCase()}: ${String(ap.target).replace(/https?:\/\/\S+/g, '').trim().slice(0, 300)}. Allow it?`;
         const keys = v.missingBody ? [{ text: 'Deny', callback_data: `ap:${ap.id}:${ap.content_hash.slice(0, 12)}:deny` }] : [{ text: 'Allow once', callback_data: `ap:${ap.id}:${ap.content_hash.slice(0, 12)}:allow` }, { text: 'Deny', callback_data: `ap:${ap.id}:${ap.content_hash.slice(0, 12)}:deny` }];
         body = { chat_id: b.chat_id, text, reply_markup: { inline_keyboard: [keys] } };
       } else if (r.kind === 'result') {
@@ -205,7 +208,7 @@ export class TelegramBridge {
         if (a?.path && fs.existsSync(a.path) && fs.statSync(a.path).size <= 20 * 1024 * 1024) sent = await this.sendDocument(b.chat_id, a.path, a.title).catch(() => null);
         db.prepare('INSERT OR IGNORE INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?,?,?,?,?)').run(r.id, b.chat_id, sent?.message_id ?? null, sent ? 'result' : 'skipped', now()); if (sent) n++;
         continue;
-      } else body = { chat_id: b.chat_id, text: `${who}${where}\n${r.content.slice(0, 3500)}` };
+      } else body = { chat_id: b.chat_id, text: r.content.slice(0, 3500) };   // the bot is the lead: plain text, no name or chat-title header
       // Approvals from a group are private by nature here: the bound chat is the owner's own.
       const sentMsg = await this.api<{ message_id: number }>('sendMessage', body);
       db.prepare('INSERT OR IGNORE INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?,?,?,?,?)').run(r.id, b.chat_id, sentMsg.message_id, r.kind, now()); n++;

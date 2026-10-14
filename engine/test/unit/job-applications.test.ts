@@ -121,3 +121,10 @@ test('record_application reads a thank-you shown inside an embedded application 
   const ok = await s.call(turn, 'record_application', { company: 'Northwind Labs', role: 'Channel Account Manager' });
   assert.equal(ok.ok, true, ok.text); assert.match(ok.text, /Recorded and verified: Northwind Labs/);
 });
+
+test('every field and key press inside a job application is covered by the permission (Workday "How Did You Hear About Us?" + Enter asked the owner); messaging and paying are not', async () => {
+  const { isApplicationFormControl, isJobSite } = await import('../../src/approvals/permissions.ts');
+  assert.ok(isJobSite('https://magnitudesoftware.wd1.myworkdayjobs.com/en-US/External/job/USA---Remote/SMB---Mid-Market-Account-Manager_REQ000280/apply/applyManually'));
+  for (const name of ['How Did You Hear About Us?', 'Country', 'Phone Device Type', 'Are you legally authorized to work in the US?', 'Select One', 'Desired compensation']) assert.ok(isApplicationFormControl(name), name);
+  for (const name of ['Send message', 'Connect', 'Pay now', 'Delete account', 'Post', 'Share profile']) assert.equal(isApplicationFormControl(name), false, name);
+});
