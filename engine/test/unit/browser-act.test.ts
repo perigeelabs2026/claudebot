@@ -143,7 +143,9 @@ test('account passwords: set_account_password stores a generated password and fi
   assert.deepEqual(acts(s, 'click').at(-1), ['click', 'e50', '--target-id', 'TAB1'], 'the field is focused first');
   const events = (s.db.prepare('SELECT detail FROM job_events').all() as Array<{ detail: string }>).map((e) => e.detail).join('\n');
   const transcript = [...results, events, JSON.stringify(s.calls)].join('\n');
-  for (const t of [...results, events, transcript]) { assert.equal(looksSecret(t), null); assert.ok(!t.includes(stored), 'the value appears nowhere the model or a log can read'); }
+  // Temp-folder paths are not secrets; macOS's long /var/folders/… path alone would trip the long-string rule, so they are masked first.
+  const unpath = (t: string) => [s.tmp, fs.realpathSync(s.tmp), os.tmpdir(), fs.realpathSync(os.tmpdir())].reduce((acc, p) => acc.split(p).join('<tmp>'), t);
+  for (const t of [...results, events, transcript]) { assert.equal(looksSecret(unpath(t)), null, `looksSecret: ${looksSecret(unpath(t))}`); assert.ok(!t.includes(stored), 'the value appears nowhere the model or a log can read'); }
   assert.match(events, /"action":"fill_secret"/); assert.match(events, /account\.password_set|jobs\.example\.com/);
   const mode = fs.statSync(path.join(s.tmp, 'secrets', 'accounts.json')).mode & 0o777; assert.equal(mode, 0o600, 'off macOS the store is a 0600 file');
 });
