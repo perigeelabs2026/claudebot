@@ -5,6 +5,7 @@
 import type { DB } from '../db/open.ts';
 import { cronMatches } from '../supervisor/scheduler.ts';
 import { taskTitle } from './wording.ts';
+import { partitionOwnerNeeds } from '../cos/owner-needs.ts';
 
 const HIDDEN_KINDS = "('chat.turn','assistant.draft','report.morning','priority.rank','owner.upload','system.workspace_summary','browser.login_health','monitor.scheduled')";
 
@@ -15,6 +16,8 @@ export interface HomeSnapshot {
   today: Array<{ kind: 'approval' | 'blocker' | 'sign_in' | 'routine' | 'draft' | 'done' | 'question'; at: string | null; title: string; detail: string; href: string }>;
   team: Array<{ id: string; name: string; role: string; state: 'working' | 'needs_you' | 'queued' | 'idle'; line: string }>;
   finished: Array<{ id: string; title: string; agent: string; outcome: string | null; at: string }>;
+  /** Blocked items an assistant can unblock with a product capability (not the owner's to do): reported, never counted as needing the owner. */
+  being_fixed: Array<{ kind: string; at: string | null; title: string; detail: string; href: string }>;
 }
 
 export function homeSnapshot(db: DB, opts: { workspace?: string | null; hours?: number; now?: Date } = {}): HomeSnapshot {
@@ -56,6 +59,8 @@ export function homeSnapshot(db: DB, opts: { workspace?: string | null; hours?: 
     else if (s.cron) for (let m = Math.ceil(now.getTime() / 60_000) * 60_000; m <= horizon; m += 60_000) if (cronMatches(s.cron, new Date(m), s.tz ?? null)) { at = new Date(m); break; }
     if (at && (!next_routine || at.toISOString() < next_routine.at)) next_routine = { title: s.name || taskTitle(s.objective), at: at.toISOString() };
   }
+  // Only what truly needs the owner stays on his list (passwords, codes, CAPTCHAs, personal answers, spend, approvals); the rest the team fixes.
+  const split = partitionOwnerNeeds(today); const being_fixed = split.team; today.length = 0; today.push(...split.owner);
   const order = { approval: 0, sign_in: 1, blocker: 2, question: 3, draft: 3, routine: 4, done: 5 } as const;
   today.sort((x, y) => order[x.kind] - order[y.kind] || String(x.at).localeCompare(String(y.at)));
   { let up = 0; for (let i = today.length - 1; i >= 0; i--) if (today[i].kind === 'routine' && ++up > 2) today.splice(i, 1); }   // at most two upcoming rows, as designed
@@ -74,5 +79,5 @@ export function homeSnapshot(db: DB, opts: { workspace?: string | null; hours?: 
     const line = live ? `${doneTitles.length ? `Finished ${doneTitles[0]}. Now w` : 'W'}orking on ${taskTitle(live.objective)}.` : waiting ? `Waiting on you: ${taskTitle(waiting.objective)}.` : queued ? `Next up: ${taskTitle(queued.objective)}.` : done ? `Finished ${doneTitles[0].replace(/\.{3}$/, '…')}${done > 1 ? `, plus ${done - 1} more` : ''}.` : last ? `Last finished ${taskTitle(last.objective)} (${last.completed_at.slice(0, 10)}).` : 'Nothing assigned yet.';
     return { id: a.id, name: a.name, role: a.role, state, line };
   });
-  return { observed_at: now.toISOString(), window_hours: hours, workspace: ws, figures: { finished: finished.length, results, needs_you: approvals.length + blockers.length + drafts.length + questions.length, working }, today, team, finished, next_routine };
+  return { observed_at: now.toISOString(), window_hours: hours, workspace: ws, figures: { finished: finished.length, results, needs_you: today.filter((x) => x.kind !== 'routine' && x.kind !== 'done').reduce((n, x) => n + (x.kind === 'approval' ? Number((x as { count?: number }).count ?? 1) : 1), 0), working }, today, team, finished, next_routine, being_fixed };
 }

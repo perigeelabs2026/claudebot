@@ -11,6 +11,8 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Existing installs: run `claudebot update` to pick up these settings.
 
 ### Added
+- Assistants remember their other conversations: each turn sees recent messages from your other chats with them (a direct chat knows what went wrong in the group chat).
+- Your Mac stays awake while assistants have work, and can sleep again when they are idle.
 - In the private computer each assistant works in its own browser window on its own screen (3 screens, one shared sign-in). The Browser page shows All screens; a chat's browser pane shows that assistant's screen.
 - Dry-run projects: set the project policy `dry_run` and assistants fill in and attach everything but never press the final submit, whatever permission is on. Off by default.
 - The lead can make a task that has not started wait for other tasks (for example, applications wait for the tailored resumes). Background browser tasks can record verified applications too.
@@ -38,6 +40,12 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Assistants can open zip and tar archives you give them: files are extracted into a new folder inside the task. Links, paths that escape the folder, and oversized archives are refused. Documents and PDFs also get text copies the assistants can read.
 
 ### Fixed
+- The morning report is built from live tasks and verified applications, and "Needs you" only lists what truly needs you (passwords, codes, CAPTCHAs, personal answers, spending, approvals). Things the team can fix itself are listed separately.
+- A note sent to a turned-off assistant waits and is delivered when it is turned back on.
+- Office desk labels stay in their own column and say "Working"; Members shows the same live status as the Office; the header says "N waiting on a teammate".
+- The message box is one centred row.
+- Accepting or rejecting a result returns to Results, and a decided result no longer shows the buttons.
+- Right-clicking the sidebar offers New assistant and New group chat.
 - When Telegram quiet hours end, you get one good-morning summary plus the decision cards still waiting, with their buttons (held cards were never sent before). Notices from test projects are labelled as test instead of held.
 - Assistants' replies no longer start with their mid-turn notes.
 - Windows land on the right screen when two assistants open one at once, and the first browse after a computer restart opens the assistant's own window.

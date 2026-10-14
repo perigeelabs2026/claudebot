@@ -63,7 +63,7 @@ function figure(a, p, shirt, selected, handlers) {
   if (st !== 'idle' && st !== 'disabled') g.append(badge);
   // labels
   g.append(svg('text', { class: 'name', y: 66, 'text-anchor': 'middle' }, a.name));
-  g.append(svg('text', { class: `status ${st}`, y: 82, 'text-anchor': 'middle' }, statusText(a, task)));
+  g.append(svg('text', { class: `status ${st}`, y: 82, 'text-anchor': 'middle' }, clip(statusText(a, task), 24), svg('title', {}, statusText(a, task))));   // each desk label stays in its own column; the full text is the tooltip
   if (task) g.append(svg('text', { class: 'task', y: 97, 'text-anchor': 'middle' }, clip(task.title, 30)));
   if (selected) g.append(svg('rect', { class: 'select-ring', x: -78, y: -104, width: 156, height: 210, rx: 14 }));
   return g;
@@ -73,7 +73,7 @@ function clip(s, n) { s = String(s || ''); return s.length > n ? s.slice(0, n - 
 export function statusText(a, task) {
   if (a.status === 'disabled') return 'Switched off';
   if (!task) return a.status === 'idle' ? 'Available' : STATUS_LABEL[a.status];
-  if (task.status === 'working') return `${task.turn === 'claude' ? 'Claude turn' : 'Engine step'} · ${task.progress || task.stage || 'working'}`;
+  if (task.status === 'working') { const p = String(task.progress || '').trim(); return p && !/^Claude (is|has) /i.test(p) ? `Working · ${p}` : 'Working'; }
   if (task.status === 'checking') return 'Checking status (no fresh heartbeat)';
   if (task.status === 'blocked_on') return `Waiting on ${task.waiting_on_tasks.map((w) => w.assistant).join(', ')}`;
   if (task.status === 'queued') return 'Waiting to start';
@@ -100,10 +100,10 @@ export function mountOffice(host, opts) {
     // results & queue room: delivered results (clickable) and the queue board
     const rr = ROOMS.find((r) => r.id === 'results'); const finished = snapshot.tasks.filter((t) => t.status === 'finished' && !t.is_reply && t.outputs.length).slice(0, 4);
     root.append(svg('rect', { class: 'shelf', x: rr.x + 16, y: rr.y + 44, width: rr.w - 32, height: 6 }));
-    finished.forEach((t, i) => { const x = rr.x + 34 + i * 76; const g = svg('g', { class: `doc ${t.outcome === 'partial' ? 'partial' : t.outcome === null ? 'unknown' : ''}`, transform: `translate(${x} ${rr.y + 54})`, role: 'button', tabindex: '0', 'aria-label': `Open result: ${t.title}`, onclick: () => opts.onOpenResult(t), onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); opts.onOpenResult(t); } } }, svg('rect', { x: 0, y: 0, width: 44, height: 56, rx: 4 }), svg('path', { d: 'M 30 0 v 14 h 14' }), svg('line', { x1: 8, y1: 24, x2: 36, y2: 24 }), svg('line', { x1: 8, y1: 32, x2: 36, y2: 32 }), svg('line', { x1: 8, y1: 40, x2: 28, y2: 40 }), svg('text', { class: 'doc-label', x: 22, y: 72, 'text-anchor': 'middle' }, clip(t.outputs[0].title, 14)), svg('title', {}, `${t.assistant}: ${t.title} (${t.plain_state})`)); root.append(g); });
+    finished.forEach((t, i) => { const x = rr.x + 34 + i * 76; const g = svg('g', { class: `doc ${t.outcome === 'partial' ? 'partial' : t.outcome === null ? 'unknown' : ''}`, transform: `translate(${x} ${rr.y + 54})`, role: 'button', tabindex: '0', 'aria-label': `Open result: ${t.title}`, onclick: () => opts.onOpenResult(t), onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); opts.onOpenResult(t); } } }, svg('rect', { x: 0, y: 0, width: 44, height: 56, rx: 4 }), svg('path', { d: 'M 30 0 v 14 h 14' }), svg('line', { x1: 8, y1: 24, x2: 36, y2: 24 }), svg('line', { x1: 8, y1: 32, x2: 36, y2: 32 }), svg('line', { x1: 8, y1: 40, x2: 28, y2: 40 }), svg('text', { class: 'doc-label', x: 22, y: 72, 'text-anchor': 'middle' }, clip(t.outputs[0].title, 11), svg('title', {}, t.outputs[0].title)), svg('title', {}, `${t.assistant}: ${t.title} (${t.plain_state})`)); root.append(g); });
     if (!finished.length) root.append(svg('text', { class: 'hint', x: rr.x + 16, y: rr.y + 80 }, 'Delivered results appear here.'));
     const working = snapshot.counts.working; const checking = snapshot.counts.checking; const waitingToStart = snapshot.counts.waiting_to_start; const onAnother = snapshot.counts.blocked_on;   // the same counts as the header
-    const board = svg('g', { class: 'board', transform: `translate(${rr.x + 16} ${rr.y + 160})` }, svg('rect', { x: 0, y: 0, width: rr.w - 32, height: 110, rx: 10 }), svg('text', { class: 'board-title', x: 14, y: 24 }, 'Queue board'), svg('text', { class: 'board-line', x: 14, y: 48 }, `${working} working · ${checking} being checked${snapshot.counts.waiting_on_children ? ` · ${snapshot.counts.waiting_on_children} waiting on a child` : ''}`), svg('text', { class: 'board-line', x: 14, y: 68 }, `${waitingToStart} waiting to start${onAnother ? ` (${onAnother} on another assistant)` : ''}`), svg('text', { class: 'board-line', x: 14, y: 88 }, `${snapshot.counts.waiting} paused for you or a sign-in`));
+    const board = svg('g', { class: 'board', transform: `translate(${rr.x + 16} ${rr.y + 160})` }, svg('rect', { x: 0, y: 0, width: rr.w - 32, height: 110, rx: 10 }), svg('text', { class: 'board-title', x: 14, y: 24 }, 'Queue board'), svg('text', { class: 'board-line', x: 14, y: 48 }, `${working} working · ${checking} being checked${snapshot.counts.waiting_on_children ? ` · ${snapshot.counts.waiting_on_children} waiting on a child` : ''}`), svg('text', { class: 'board-line', x: 14, y: 68 }, [waitingToStart - onAnother > 0 ? `${waitingToStart - onAnother} waiting to start` : '', onAnother ? `${onAnother} waiting on a teammate` : ''].filter(Boolean).join(' · ') || '0 waiting to start'), svg('text', { class: 'board-line', x: 14, y: 88 }, `${snapshot.counts.waiting} paused for you or a sign-in`));
     root.append(board);
     root.append(svg('text', { class: 'footnote', x: 90, y: 700 }, 'Busy means a real task with a fresh heartbeat. Movement shows recorded hand-offs only. Click anyone to inspect.'));
     // real hand-offs of the last 40 s, each animated once

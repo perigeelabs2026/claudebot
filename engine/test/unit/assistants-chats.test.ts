@@ -527,3 +527,32 @@ test('the lead adds a missing wait to a task that has not started (applications 
   assert.deepEqual(JSON.parse(s.store.get(apply.id)!.depends_on), [resumes.id]);
   assert.match((await s.broker.call(cap(lead, ['add_dependency']), 'add_dependency', { task_id: resumes.id, depends_on: [apply.id] })).text, /wait for each other/);
 });
+
+test('an assistant remembers its other conversations: a direct chat sees what went wrong in the group chat (owner: "it doesn\'t remember")', async () => {
+  const s = setup([{ kind: 'ok', text: 'Yes: the Northwind approval went blank and I restarted instead of reopening it.' }]); addAssistant(s, 'scout', 'Scout', 'Job boards');
+  const g = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'scout'] });
+  s.chat.add({ conversation_id: g.id, role: 'owner', sender: 'owner', content: 'Scout, the Northwind approval went blank and you started over. Reopen it next time.' });
+  s.chat.add({ conversation_id: g.id, role: 'assistant', sender: 'scout', content: 'Understood: I will reopen a blank approval instead of starting over.' });
+  const test = new Workspaces(s.db, path.join(s.tmp, 'ws')).create({ name: 'Rehearsal (test)', policies: { telegram: false, dry_run: true } }, 'test');
+  const tg = s.chat.create({ workspace_id: test.id, type: 'group', members: ['coordinator', 'scout'] }); s.chat.add({ conversation_id: tg.id, role: 'owner', sender: 'owner', content: 'rehearsal chatter' });
+  const d = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['scout'] });
+  const { job } = s.chat.send(d.id, 'What went wrong last time?', s.defs);
+  assert.equal(await run(s, job.id), 'completed');
+  const prompt = s.runtime.history[0].prompt;
+  assert.match(prompt, /What happened recently in your other conversations/); assert.match(prompt, /Owner: Scout, the Northwind approval went blank/); assert.match(prompt, /You: Understood: I will reopen/);
+  assert.ok(!prompt.includes('rehearsal chatter'), 'test projects are not memory');
+  assert.equal(s.chat.elsewhere('scout', g.id).includes('you started over'), false, 'a conversation is not repeated as its own "elsewhere"');
+});
+
+test('a note sent to an assistant that is turned off waits and is delivered when it is turned back on (never "could not reply", never a raw id)', async () => {
+  const s = setup([{ kind: 'ok', text: 'On it: finishing the Priority A applications.' }]); addAssistant(s, 'scout', 'Scout', 'Job boards');
+  const d = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['scout'] });
+  s.defs.setAgentEnabled('scout', false, 'test');
+  const job = s.chat.engineTurn(d.id, 'scout', 'ClaudeBot fixed the resume upload. Finish the Priority A applications.', 'note-1', s.defs);
+  assert.equal(s.store.lease({ owner: 'worker:test', leaseSeconds: 30, fair: true }), undefined, 'nothing runs while the assistant is off');
+  assert.equal(s.store.get(job!.id)!.state, 'queued');
+  s.defs.setAgentEnabled('scout', true, 'test');
+  assert.equal(await run(s, job!.id), 'completed');
+  const texts = s.chat.messages(d.id).map((m) => m.content).join('\n');
+  assert.match(texts, /On it: finishing the Priority A applications/); assert.ok(!/could not reply|agent scout/.test(texts));
+});

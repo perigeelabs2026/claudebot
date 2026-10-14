@@ -305,6 +305,22 @@ export class ChatStore {
     return `${c.slice(0, limit)} [message continues: ${c.length - limit} more characters; read_message ${r.id} offset ${limit}]`;
   }
 
+  /** What happened recently in this assistant's other conversations (a direct chat cannot see the group chat or Telegram otherwise):
+   *  the owner's words, this assistant's own replies, the lead's replies and results, newest last; test projects are left out. */
+  elsewhere(agentId: string, exceptConversationId: string, opts: { hours?: number; limit?: number; each?: number } = {}): string {
+    const since = new Date(Date.now() - (opts.hours ?? 72) * 3600_000).toISOString();
+    const rows = this.db.prepare(`SELECT m.id, m.role, m.sender, m.kind, m.content, m.artifact_id, m.created_at, c.title, c.type FROM messages m JOIN conversations c ON c.id = m.conversation_id JOIN workspaces w ON w.id = c.workspace_id
+      WHERE m.conversation_id <> ? AND m.created_at >= ? AND EXISTS (SELECT 1 FROM conversation_members cm WHERE cm.conversation_id = c.id AND cm.agent_id = ?)
+        AND COALESCE(json_extract(w.policies, '$.telegram'), 1) <> 0 AND COALESCE(json_extract(w.policies, '$.dry_run'), 0) = 0
+        AND (m.role = 'owner' OR (m.role = 'assistant' AND (m.sender = ? OR m.sender = 'coordinator')) OR m.kind IN ('result','blocker'))
+      ORDER BY m.created_at DESC LIMIT ?`).all(exceptConversationId, since, agentId, agentId, opts.limit ?? 30) as Array<{ id: string; role: string; sender: string; kind: string; content: string; artifact_id: string | null; created_at: string; title: string | null; type: string }>;
+    if (!rows.length) return '';
+    const names = new Map((this.db.prepare('SELECT id, name FROM agent_definitions').all() as Array<{ id: string; name: string }>).map((a) => [a.id, a.name]));
+    const who = (r: { role: string; sender: string }) => (r.role === 'owner' ? 'Owner' : r.role === 'assistant' ? (r.sender === agentId ? 'You' : names.get(r.sender) ?? r.sender) : 'System');
+    const day = (s: string) => new Date(s).toLocaleString('en-US', { timeZone: 'America/Phoenix', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    return rows.reverse().map((r) => `[${day(r.created_at)} · ${r.title || (r.type === 'group' ? 'group chat' : 'chat')}] ${who(r)}: ${this.contextText(r, opts.each ?? 400)}`).join('\n');
+  }
+
   /** What other members said in a group since this assistant last spoke (each member's session sees only its own turns). */
   groupContext(conversationId: string, agentId: string, beforeSeq: number): string {
     const last = this.db.prepare("SELECT max(seq) AS s FROM messages WHERE conversation_id = ? AND role = 'assistant' AND sender = ? AND seq < ?").get(conversationId, agentId, beforeSeq) as { s: number | null };

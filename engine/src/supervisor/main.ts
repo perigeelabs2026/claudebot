@@ -32,6 +32,7 @@ import { Workspaces } from '../model/workspaces.ts';
 import type { ModelRuntime } from '../runtime/types.ts';
 import { ChatStore } from '../chat/store.ts';
 import { BrowserLive } from '../browser/live.ts';
+import { KeepAwake } from '../power/awake.ts';
 import { releaseTabsOfFinishedTasks, cdpCloser } from '../browser/tabs.ts';
 
 const cfg = loadConfig();
@@ -121,6 +122,10 @@ timers.push(setInterval(() => { releaseTabsOfFinishedTasks(db, cdpCloser(cfg.bro
 releaseTabsOfFinishedTasks(db, cdpCloser(cfg.browserCdpPort)).then((r) => { for (const x of r) store.event(x.job_id, 'supervisor', 'browser.tabs_released', { ...x, by: 'startup sweep' }); }).catch(() => {});
 timers.push(setInterval(() => { reapOrphanProbes(path.join(cfg.runDir, 'probes'), log); watchdog.check({ restartGateway: !simulated }).then((h) => api.broadcast('health', h)).catch((e) => log.warn('watchdog failed', { err: (e as Error).message })); }, 60_000));
 timers.push(setInterval(() => { snapshot(db, cfg.backupsDir, 20, 'auto').catch((e) => log.warn('backup failed', { err: (e as Error).message })); }, 6 * 3600_000));
+// Keep the Mac awake (caffeinate -i) only while a job is leased or running, so the engine never sleeps mid-task; released when idle.
+const keepAwake = new KeepAwake(db, log);
+try { keepAwake.tick(); } catch (e) { log.warn('keep-awake tick failed', { err: (e as Error).message }); }
+timers.push(setInterval(() => { try { keepAwake.tick(); } catch (e) { log.warn('keep-awake tick failed', { err: (e as Error).message }); } }, 30_000));
 timers.push(setInterval(() => api.broadcast('tick', { at: new Date().toISOString(), active: store.list({ state: ['leased', 'running'] }).length }), 10_000));
 
 let shuttingDown = false;
@@ -128,6 +133,7 @@ async function shutdown(signal: string) {
   if (shuttingDown) return; shuttingDown = true;
   log.info('shutdown requested', { signal });
   for (const t of timers) clearInterval(t);
+  keepAwake.stop();
   await dispatcher.stop(20_000);
   killAllProbes();
   store.reclaimExpired('supervisor');
