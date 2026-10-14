@@ -119,3 +119,12 @@ test('replay card 2: request_approval for a batch of job applications with no em
   const r = await s.call(t, 'request_approval', { kind: 'send', target: 'Job applications (8 roles) via each posting page', content: 'Submit these 8 applications with the tailored resumes' });
   assert.doesNotMatch(r.text, /the owner must approve/);
 });
+
+test('site-wide Donate or Upgrade links do not make an application page a checkout page', () => {
+  const nonprofit: SnapshotElement[] = [btn('Donate', 'link'), btn('Donate now', 'link'), btn('First name', 'textbox'), btn('Submit application'), btn('Next')];
+  const linkedin: SnapshotElement[] = [btn('Upgrade to Premium', 'link'), btn('Try Premium for $0', 'link'), btn('Phone', 'textbox'), btn('Submit'), btn('Next'), btn('Review')];
+  for (const [page, names] of [[nonprofit, ['Submit application', 'Next', 'Submit']], [linkedin, ['Submit', 'Next', 'Review', 'Continue']]] as Array<[SnapshotElement[], string[]]>) {
+    for (const n of names) assert.equal(decide({ action: 'click', ref: 'e1' }, btn(n), undefined, page).verdict, 'allow', n);
+    assert.equal(decide({ action: 'press', key: 'Enter' }, undefined, btn('Phone', 'textbox'), page).verdict, 'allow');
+  }
+});

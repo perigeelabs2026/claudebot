@@ -40,11 +40,13 @@ const ask = (kind: ApprovalKind, why: string): ActDecision => ({ verdict: 'needs
 const PAYMENT_FIELD = /\b(card ?number|credit card|debit card|name on card|cvv|cvc|csc|card expir(y|ation)|expir(y|ation) \(?mm ?\/ ?yy\)?|mm ?\/ ?yy)\b/i;
 /** Wording of a button that finishes whatever the page is about (on a checkout page that is the payment). */
 const CONFIRMISH = /\b(ok|yes|complete|proceed|go)\b/i;
-/** A checkout page: card fields, or a Buy / Pay / Place order button. Then the page's generic Confirm / Continue / Submit (or Enter)
- *  is the purchase. Delete buttons elsewhere on a page (Workday's "Delete" next to each work-history entry) do not count. */
+/** Buttons that only exist in a checkout form (not a site-wide "Donate" or "Upgrade to Premium" link in the nav or footer). */
+const CHECKOUT_BUTTON = /\b(place (your |my )?order|submit (your |my |the )?order|pay( now| \$?\d[\d,.]*)|complete (purchase|order|payment)|confirm (purchase|payment|order)|checkout|check out)\b/i;
+/** A checkout page: card fields, or a checkout button (Place order, Pay now, Complete purchase). Then the page's generic Confirm /
+ *  Continue / Submit (or Enter) is the purchase. Site-wide Donate / Upgrade links and Workday's per-entry "Delete" buttons do not count. */
 export function pageKind(page: SnapshotElement[]): ApprovalKind | null {
   if (page.some((p) => ['textbox', 'spinbutton', 'combobox', 'group'].includes(p.role) && PAYMENT_FIELD.test(p.name))) return 'purchase';
-  return page.some((p) => ['button', 'link'].includes(p.role) && classifyControl(p.name, p.role) === 'purchase') ? 'purchase' : null;
+  return page.some((p) => p.role === 'button' && CHECKOUT_BUTTON.test(p.name)) ? 'purchase' : null;
 }
 
 /** Decide whether an action may run now, needs the owner's approval, or is never allowed. */
