@@ -73,3 +73,49 @@ test('owner-needs and the card wording read the same table', () => {
   assert.equal(describeApproval({ action_kind: 'publish', target: 'LinkedIn post', content: 'Hello' }).label, 'Publish');
   assert.equal(describeApproval({ action_kind: 'send', target: 'Pat', content: 'Hello' }).label, 'Send a message');
 });
+
+test('a checkout page: a bare Confirm, Continue or Submit (or Enter) is the purchase; Workday "Delete" entry buttons do not make a page a delete', () => {
+  const card: SnapshotElement[] = [btn('Card number', 'textbox'), btn('Expiration (MM/YY)', 'textbox'), btn('CVV', 'textbox'), btn('Confirm'), btn('Continue'), btn('Submit')];
+  const payBtn: SnapshotElement[] = [btn('Shipping address', 'textbox'), btn('Place order'), btn('Submit')];
+  for (const page of [card, payBtn]) for (const name of ['Confirm', 'Continue', 'Submit', 'OK', 'Complete']) {
+    const d = decide({ action: 'click', ref: 'e1' }, btn(name), undefined, page); assert.equal(d.verdict, 'needs_approval', `${name} on a checkout page`); assert.equal((d as { action_kind: string }).action_kind, 'purchase');
+  }
+  assert.equal(decide({ action: 'press', key: 'Enter' }, undefined, btn('Name on card', 'textbox'), card).verdict, 'needs_approval');
+  const workday: SnapshotElement[] = [btn('Job Title', 'textbox'), btn('Delete'), btn('Certification expiration date', 'textbox'), btn('Save and Continue')];
+  assert.equal(decide({ action: 'click', ref: 'e1' }, btn('Save and Continue'), undefined, workday).verdict, 'allow');
+  assert.equal(decide({ action: 'press', key: 'Enter' }, undefined, btn('Job Title', 'textbox'), workday).verdict, 'allow');
+});
+
+// Replay of the 18 approval cards the owner actually got on 2026-10-14 (scrubbed: action, control, role, host). None may card again.
+const REPLAY: Array<[string, string, string, string]> = [
+  ['click', 'Apply to Channel Sales Manager (West Coast) on company website', 'link', 'www.linkedin.com'],
+  ['click', 'Apply on company website', 'link', 'www.linkedin.com'],
+  ...Array.from({ length: 7 }, (): [string, string, string, string] => ['click', 'Submit application', 'button', 'job-boards.greenhouse.io']),
+  ['click', 'Submit application', 'button', 'www.comeet.com'],
+  ['click', 'Apply', 'button', 'myjobs.adp.com'],
+  ['click', 'Apply now', 'button', 'ats.rippling.com'],
+  ['click', 'Apply', 'button', 'ats.rippling.com'],
+  ['click', 'Submit application', 'button', 'jobs.lever.co'],
+  ['click', 'Submit application', 'button', 'www.esri.com'],
+  ['click', 'Apply Manually', 'button', 'magnitudesoftware.wd1.myworkdayjobs.com'],
+  ['press', 'How Did You Hear About Us?', 'textbox', 'magnitudesoftware.wd1.myworkdayjobs.com'],
+];
+
+test('replay: 17 of the owner\'s 18 real cards from 2026-10-14 (browser clicks and Enter) no longer card', () => {
+  assert.equal(REPLAY.length, 17);
+  for (const [action, name, role, host] of REPLAY) {
+    const d = action === 'press' ? decide({ action: 'press', key: 'Enter' }, undefined, btn(name, role)) : decide({ action: 'click', ref: 'e1' }, btn(name, role));
+    assert.equal(d.verdict, 'allow', `${action} ${role} "${name}" on ${host}`);
+  }
+});
+
+// Card 2 of the replay. KNOWN FAILURE: the change that approves a no-recipient "send" (a batch of job applications) on the spot in
+// request_approval was refused by this build session's safety check as a security weakening, so this request still makes a card
+// unless the owner's "Submit job applications without asking" permission is on. Kept as a todo so the gap stays visible.
+test('replay card 2: request_approval for a batch of job applications with no email recipient does not card', { todo: 'request_approval allowlist change not applied (blocked by the build session\'s safety check); still cards when the job-application permission is off' }, async () => {
+  const { setupBroker } = await import('./helpers-broker.ts');
+  const s = setupBroker(); const c = s.chat.create({ workspace_id: s.ws.id });
+  const t = s.chat.send(c.id, '@coordinator apply to all 8 now', s.defs).job;
+  const r = await s.call(t, 'request_approval', { kind: 'send', target: 'Job applications (8 roles) via each posting page', content: 'Submit these 8 applications with the tailored resumes' });
+  assert.doesNotMatch(r.text, /the owner must approve/);
+});

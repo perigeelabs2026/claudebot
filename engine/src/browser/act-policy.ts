@@ -36,6 +36,17 @@ export type ActDecision =
 
 const ask = (kind: ApprovalKind, why: string): ActDecision => ({ verdict: 'needs_approval', reason: why, action_kind: kind });
 
+/** Payment fields: a page that has them is a checkout page, whatever its buttons say. */
+const PAYMENT_FIELD = /\b(card ?number|credit card|debit card|name on card|cvv|cvc|csc|card expir(y|ation)|expir(y|ation) \(?mm ?\/ ?yy\)?|mm ?\/ ?yy)\b/i;
+/** Wording of a button that finishes whatever the page is about (on a checkout page that is the payment). */
+const CONFIRMISH = /\b(ok|yes|complete|proceed|go)\b/i;
+/** A checkout page: card fields, or a Buy / Pay / Place order button. Then the page's generic Confirm / Continue / Submit (or Enter)
+ *  is the purchase. Delete buttons elsewhere on a page (Workday's "Delete" next to each work-history entry) do not count. */
+export function pageKind(page: SnapshotElement[]): ApprovalKind | null {
+  if (page.some((p) => ['textbox', 'spinbutton', 'combobox', 'group'].includes(p.role) && PAYMENT_FIELD.test(p.name))) return 'purchase';
+  return page.some((p) => ['button', 'link'].includes(p.role) && classifyControl(p.name, p.role) === 'purchase') ? 'purchase' : null;
+}
+
 /** Decide whether an action may run now, needs the owner's approval, or is never allowed. */
 export function decide(req: ActRequest, el: SnapshotElement | undefined, focused?: SnapshotElement, page: SnapshotElement[] = []): ActDecision {
   const label = el ? `${el.role} "${el.name}"` : 'an element';
@@ -67,9 +78,9 @@ export function decide(req: ActRequest, el: SnapshotElement | undefined, focused
     if (f && (f.role === 'searchbox' || (['combobox', 'textbox'].includes(f.role) && SEARCHY.test(f.name)))) return { verdict: 'allow', reason: 'Enter in a search box (a search, not a submission)' };
     const ck = f ? classifyComposer(f.name) : null;
     if (ck) return ask(ck, `Enter would ${ck === 'publish' ? 'post' : 'send'} what is in ${f!.role} "${f!.name}"`);
-    // Enter submits the form, so it is the same as the page's own submit button: a page whose button buys or deletes still asks.
-    const pk = page.map((p) => (p.role === 'button' ? classifyControl(p.name, p.role) : null)).find((x) => x === 'purchase' || x === 'delete');
-    if (pk) return ask(pk, `Enter would submit a form whose button ${pk === 'purchase' ? 'spends money' : 'deletes something'}`);
+    // Enter submits the form, so it is the same as the page's own submit button: on a checkout page it still asks.
+    const pk = pageKind(page);
+    if (pk) return ask(pk, 'Enter would submit a form on a checkout page');
     return { verdict: 'allow', reason: `Enter submits the form${f ? ` around ${f.role} "${f.name}"` : ''} (not on the approval allowlist)`, commit: true };
   }
   if (req.action === 'click') {
@@ -78,7 +89,12 @@ export function decide(req: ActRequest, el: SnapshotElement | undefined, focused
     const k = classifyControl(e.name, e.role);
     if (k) return ask(k, `${label} would ${({ send: 'send a message to a person', purchase: 'spend money', publish: 'post publicly', delete: 'delete something' } as const)[k]}`);
     if (e.role === 'link') return { verdict: 'allow', reason: 'following a link' };
-    if (COMMIT.test(e.name)) return { verdict: 'allow', reason: `${label} (not on the approval allowlist)`, commit: true };
+    if (COMMIT.test(e.name) || CONFIRMISH.test(e.name)) {
+      // A bare Confirm / Continue / Submit on a checkout page (card fields, or a Pay / Place order button) is the purchase itself.
+      const pk = pageKind(page);
+      if (pk) return ask(pk, `${label} on a checkout page`);
+      return { verdict: 'allow', reason: `${label} (not on the approval allowlist)`, commit: true };
+    }
     return { verdict: 'allow', reason: `clicking ${label}` };
   }
   return { verdict: 'refuse', reason: 'unknown action' };
