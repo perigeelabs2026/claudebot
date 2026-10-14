@@ -1054,12 +1054,12 @@ const views = {
     return h('div', { class: 'stack' }, h('div', { class: 'section-title' }, `Waiting for you (${pending.length})`), pending.length ? pending.map(card) : empty('Nothing needs your decision', 'When an assistant wants to send, publish, buy or delete something, it asks here first.'), h('div', { class: 'section-title' }, `Decided (${rest.length})`), rest.length ? rest.map(card) : empty('No decisions yet'));
   },
   async browser() {
-    const b = await api('/api/browser'); const l = b.live || {};
+    const b = await api('/api/browser'); const l = b.live || {}; const comp = await computerCard();
     const pages = (l.tabs || []).filter((t) => !/^(chrome|about|devtools):/.test(String(t.url || '')));
-    if (!pages.length && !b.active_jobs.length) return h('div', { class: 'card browser-empty-page' }, h('h3', {}, 'No page open'), h('p', { class: 'hint' }, 'When an assistant uses the browser, the page shows here live, and you can take over to sign in yourself.'));   /* one calm empty state */
+    if (!pages.length && !b.active_jobs.length) return h('div', { class: 'stack' }, comp, h('div', { class: 'card browser-empty-page' }, h('h3', {}, 'No page open'), h('p', { class: 'hint' }, 'When an assistant uses the browser, the page shows here live, and you can take over to sign in yourself.')));   /* one calm empty state */
     const pane = h('div', { id: 'browser-pane', class: 'browser-pane standalone' });
     setTimeout(() => { browserPaneOpen = true; connectBrowserStream(); refreshLiveStatus(); }, 0);
-    return h('div', { class: 'stack' }, h('div', { class: 'grid cols-2' }, h('div', { class: 'card' }, h('h3', {}, 'ClaudeBot browser'), h('div', { class: 'big', style: 'font-size:18px' }, l.running ? 'Open' : 'Not running'), h('div', { class: 'hint', style: 'margin-top:8px' }, 'A separate Chrome profile just for the assistants. Sign in yourself once per site in its real window; sign-ins, verification codes and CAPTCHAs are never automated.')), h('div', { class: 'card' }, h('h3', {}, 'Browser work in progress'), b.active_jobs.length ? jobsTable(b.active_jobs) : empty('No browser task is running'))),
+    return h('div', { class: 'stack' }, comp, h('div', { class: 'grid cols-2' }, h('div', { class: 'card' }, h('h3', {}, 'ClaudeBot browser'), h('div', { class: 'big', style: 'font-size:18px' }, l.running ? 'Open' : 'Not running'), h('div', { class: 'hint', style: 'margin-top:8px' }, 'A separate Chrome profile just for the assistants. Sign in yourself once per site in its real window; sign-ins, verification codes and CAPTCHAs are never automated.')), h('div', { class: 'card' }, h('h3', {}, 'Browser work in progress'), b.active_jobs.length ? jobsTable(b.active_jobs) : empty('No browser task is running'))),
       pane,
       h('div', { class: 'card' }, h('h3', {}, 'Sign-in status by site'), b.sites.length ? h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Site'), h('th', {}, 'Signed in'), h('th', {}, 'Checked'), h('th', {}, 'How we know'))), h('tbody', {}, b.sites.map((s) => h('tr', {}, h('td', {}, s.site), h('td', {}, s.signed_in == null ? h('span', { class: 'tag' }, 'unknown') : s.signed_in ? h('span', { class: 'tag ok' }, 'yes') : h('span', { class: 'tag warn' }, 'no')), h('td', {}, ago(s.last_checked_at)), h('td', { class: 'muted' }, s.evidence ?? ''))))) : empty('No site has been checked yet', 'A sign-in check runs when an assistant needs a site.')));
   },
@@ -1146,6 +1146,27 @@ async function workspaceDetail(id) {
       h('div', { class: 'card' }, h('h3', {}, `Goals (${w.objectives.length})`), w.objectives.length ? h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Goal'), h('th', {}, 'Priority'), h('th', {}, 'Status'), h('th', {}, ''))), h('tbody', {}, w.objectives.map((o) => h('tr', {}, h('td', {}, h('strong', {}, o.title), h('div', { class: 'muted' }, o.description), o.success_criteria ? h('div', { class: 'muted' }, `Done when: ${o.success_criteria}`) : null), h('td', {}, String(o.priority)), h('td', {}, h('span', { class: `tag ${o.status === 'active' ? 'ok' : ''}` }, o.status)), h('td', {}, o.status === 'active' ? h('button', { class: 'btn small', onclick: async () => { try { await api(`/api/objectives/${o.id}`, { method: 'DELETE' }); route(); } catch (e) { notify(e.message, true); } } }, 'Close') : null))))) : empty('No goals', 'Goals are outcomes you want; work is the effort toward them.'))),
     addObj,
     h('div', { class: 'card' }, h('h3', {}, `Schedules (${w.schedules.length})`), w.schedules.length ? h('ul', { class: 'list' }, w.schedules.map((s) => h('div', { class: 'item' }, h('div', {}, h('div', { class: 't' }, s.name), h('div', { class: 's' }, `${s.kind} · ${s.cron ?? 'every ' + s.every_seconds + 's'}`)), h('span', { class: `tag ${s.enabled ? 'ok' : ''}` }, s.enabled ? 'on' : 'paused')))) : empty('No schedules in this project')));
+}
+// The assistants' computer (a private Linux VM on this Mac): real status from computerd, Update and Reset to snapshot; Recover only on error.
+async function computerCard() {
+  const c = await api('/api/computer').catch((e) => ({ state: 'error', detail: e.message, snapshots: [] }));
+  if (c.state === 'not_installed' || c.state === 'not_created') return h('div', { class: 'card' }, h('h3', {}, 'Computer'), h('p', { class: 'hint' }, c.state === 'not_installed' ? 'The assistants\' private computer needs Lima (brew install lima).' : 'The assistants\' private computer has not been set up yet.'));
+  const word = { running: ['ok', 'Running'], starting: ['warn', 'Starting'], stopped: ['', 'Stopped'], error: ['bad', 'Needs attention'] }[c.state] || ['', c.state];
+  const act = (what, confirmText) => async () => { if (confirmText && !confirmBox(confirmText)) return; const r = await api(`/api/computer/${what}`, { method: 'POST', body: {} }).catch((e) => ({ error: e.message })); if (r.error) notify(r.error, true); else { notify(what === 'update' ? 'Updating the computer: a snapshot is taken first.' : what === 'reset' ? 'Restoring the last snapshot…' : 'Starting the computer…'); setTimeout(route, 1500); } };
+  const last = c.snapshots && c.snapshots[0];
+  return h('div', { class: 'card', id: 'computer' }, h('div', { class: 'row spread' }, h('h3', {}, 'Computer'), h('span', { class: `tag ${word[0]}` }, c.busy ? `Busy: ${c.busy}` : word[1])),
+    h('p', { class: 'hint' }, 'A private Linux computer on this Mac where the assistants work. Nothing on your Mac is shared into it.'),
+    h('dl', { class: 'kv' },
+      c.vm ? [h('dt', {}, 'Size'), h('dd', {}, `${c.vm.cpus} cores · ${c.vm.memory_gb} GB memory`)] : null,
+      c.memory ? [h('dt', {}, 'Memory in use'), h('dd', {}, `${c.memory.used_pct ?? '?'}% (${Math.round((c.memory.total_mb - c.memory.available_mb) / 1024 * 10) / 10} of ${Math.round(c.memory.total_mb / 1024 * 10) / 10} GB)`)] : null,
+      c.disk && c.disk.data ? [h('dt', {}, 'Files and logins'), h('dd', {}, `${Math.round(c.disk.data.used_mb / 1024 * 10) / 10} of ${Math.round(c.disk.data.total_mb / 1024)} GB`)] : null,
+      c.screens ? [h('dt', {}, 'Screens'), h('dd', {}, `${c.screens.filter((s) => s.streaming).length} of ${c.screens.length} live`)] : null,
+      [h('dt', {}, 'Last snapshot'), h('dd', {}, last ? ago(last.at) : 'none yet')],
+      c.state !== 'running' ? [h('dt', {}, 'Status'), h('dd', {}, c.detail)] : null),
+    h('div', { class: 'row', style: 'gap:8px;margin-top:10px' },
+      c.state === 'error' || c.state === 'stopped' ? h('button', { class: 'btn2 primary', disabled: !!c.busy, onclick: act('recover') }, c.state === 'stopped' ? 'Start' : 'Recover') : null,
+      h('button', { class: 'btn2', disabled: !!c.busy || c.state !== 'running', onclick: act('update') }, 'Update'),
+      h('button', { class: 'btn2 danger', disabled: !!c.busy || !last, title: last ? `Restore ${ago(last.at)}` : 'No snapshot yet', onclick: act('reset', `Reset the computer to the snapshot from ${last ? ago(last.at) : ''}? Files and sign-ins changed since then are lost.`) }, 'Reset to snapshot')));
 }
 // Memory: the assistant's own note in the owner's memory vault (Obsidian-compatible Markdown). Read at the start of every turn.
 function memoryCard(a) {

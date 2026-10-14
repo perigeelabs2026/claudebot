@@ -6,6 +6,7 @@
 #   claudebot logs           follow the engine log
 #   claudebot update         pull the latest version and reinstall
 #   claudebot maintenance <counts|purge [--markers] --confirm>
+#   claudebot computer <up|down|status|snapshot|reset|update>   optional private computer for the assistants (needs Lima)
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; L="$HOME/.local/bin"; H="$HOME/.claudebot"
 NODE="${CLAUDEBOT_NODE:-$L/node}"; OC="${CLAUDEBOT_OPENCLAW_BIN:-$L/openclaw}"; CLAUDE="${CLAUDEBOT_CLAUDE_EXECUTABLE:-$L/claude}"
@@ -34,5 +35,6 @@ case "${1:-}" in
   logs) exec tail -f "$H/logs/engine.log";;
   update) cd "$ROOT" && git pull --ff-only && exec "$ROOT/install.sh";;
   maintenance) shift; exec "$NODE" "$ROOT/engine/src/maintenance/cli.ts" "$@";;
-  *) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2;;
+  computer) shift; exec "$NODE" "$ROOT/engine/src/computer/cli.ts" "$@";;
+  *) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 2;;
 esac

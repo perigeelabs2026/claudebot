@@ -5,6 +5,7 @@ import { searchScoped } from '../search/index.ts';
 import http from 'node:http';
 import fs from 'node:fs';
 import { Vault } from '../memory/vault.ts';
+import { LimaHost } from '../computer/host.ts';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -61,6 +62,9 @@ type Req = http.IncomingMessage; type Res = http.ServerResponse;
 export const AGENT_MODELS = ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5'];
 
 export class ApiServer {
+  computerBusy: string | null = null;
+  private computerHost: LimaHost | null = null;
+  computer(): LimaHost { return this.computerHost ??= new LimaHost({ home: this.d.cfg.home, secretsDir: this.d.cfg.secretsDir }); }
   private d: ApiDeps; server: http.Server; private sse = new Set<Res>(); private uiToken: string; private uiDir: string;
   constructor(d: ApiDeps) {
     this.d = d; this.uiToken = fs.readFileSync(d.cfg.uiTokenFile, 'utf8').trim(); this.uiDir = path.join(d.cfg.sourceRoot, 'engine', 'ui');
@@ -323,6 +327,17 @@ export class ApiServer {
     if (p === '/api/browser/follow' && m === 'POST') { const b = await this.body(req); const r = await this.d.live.follow(String(b.id ?? '')); return this.json(res, r.ok ? 200 : 404, r); }
     if (p === '/api/browser/front' && m === 'POST') { try { return this.json(res, 200, await this.d.live.bringToFront()); } catch (e) { return this.json(res, 409, { ok: false, detail: (e as Error).message }); } }
 
+    // ---- the assistants' computer (Lima VM): status, and the owner's Update / Reset to snapshot / Recover ----
+    if (p === '/api/computer' && m === 'GET') return this.json(res, 200, { ...(await this.computer().status()), busy: this.computerBusy });
+    const cmp = p.match(/^\/api\/computer\/(update|reset|recover|snapshot)$/);
+    if (cmp && m === 'POST') {
+      if (req.headers['x-claudebot-token'] || req.headers['x-claudebot-token']) return this.json(res, 403, { error: 'the computer is changed from the app only' });
+      if (this.computerBusy) return this.json(res, 409, { error: `the computer is busy (${this.computerBusy})` });
+      const b = await this.body(req); this.computerBusy = cmp[1]; store.event(null, 'owner', `computer.${cmp[1]}`, { snapshot: b.snapshot ?? null });
+      const h = this.computer(); const job = cmp[1] === 'update' ? h.update() : cmp[1] === 'reset' ? h.reset(b.snapshot ? String(b.snapshot) : undefined) : cmp[1] === 'snapshot' ? h.snapshot('manual') : h.up();
+      job.then(() => store.event(null, 'engine', `computer.${cmp[1]}_done`, {}), (e: Error) => store.event(null, 'engine', `computer.${cmp[1]}_failed`, { error: e.message.slice(0, 300) })).finally(() => { this.computerBusy = null; this.broadcast('computer', {}); });
+      return this.json(res, 202, { started: cmp[1] });
+    }
     // ---- artifacts / memory / browser / connections / activity / reliability / settings ----
     if (p === '/api/search' && m === 'GET') { const q = url.searchParams.get('q') ?? ''; return this.json(res, 200, searchScoped(db, null, q, { owner: { workspace_id: wsFilter ?? null }, limit: Number(url.searchParams.get('limit') ?? 20), kinds: url.searchParams.get('kinds')?.split(',').filter(Boolean) })); }
     if (p === '/api/artifacts' && m === 'GET') return this.json(res, 200, db.prepare(`SELECT a.*, j.kind AS task_kind, j.workspace_id AS ws FROM artifacts a LEFT JOIN jobs j ON j.id = a.job_id ${wsFilter ? 'WHERE j.workspace_id = ?' : ''} ORDER BY a.created_at DESC LIMIT 500`).all(...(wsFilter ? [wsFilter] : [])));

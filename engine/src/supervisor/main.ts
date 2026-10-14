@@ -90,6 +90,14 @@ timers.push(setInterval(() => { const r = scheduler.tick(); if (r.some((x) => x.
 try { governorTick(db, store); } catch { /* first tick at boot: an override that expired while the engine was down stops applying now */ }
 try { seedMorningRoutine(db, scheduler); } catch (e) { log.warn('morning routine not seeded', { err: (e as Error).message }); }
 // Standing permissions: an approval the owner's permission covered runs once through the same executor (idempotent per approval).
+// The assistants' computer: one data-disk snapshot a night while the Mac is awake (2–5 am local, when nothing is running there).
+timers.push(setInterval(async () => { try {
+  const hr = new Date().getHours(); if (hr < 2 || hr >= 5 || api.computerBusy) return;
+  const host = api.computer(); const st = await host.status(); if (st.state !== 'running') return;
+  if (st.snapshots[0] && Date.now() - Date.parse(st.snapshots[0].at) < 20 * 3600_000) return;
+  if ((db.prepare("SELECT count(*) AS n FROM jobs WHERE state IN ('leased','running')").get() as { n: number }).n) return;
+  api.computerBusy = 'snapshot'; try { await host.snapshot('nightly'); store.event(null, 'engine', 'computer.snapshot_done', { nightly: true }); } finally { api.computerBusy = null; }
+} catch (e) { log.warn('nightly computer snapshot failed', { err: (e as Error).message }); } }, 15 * 60_000));
 let permRunning = false;
 timers.push(setInterval(async () => { if (permRunning) return; permRunning = true; try {
   for (const a of db.prepare("SELECT id, job_id, action_kind, target, content, decided_by FROM approvals WHERE status = 'approved' AND decided_by LIKE 'permission:%'").all() as Array<{ id: string; job_id: string | null; action_kind: string; target: string; content: string; decided_by: string }>) {

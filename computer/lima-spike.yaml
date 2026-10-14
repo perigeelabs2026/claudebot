@@ -1,0 +1,38 @@
+# Bot Computer phase 0 spike: one private Ubuntu VM for the assistants. No host folders are shared (mounts: []).
+vmType: vz
+os: Linux
+arch: aarch64
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: aarch64
+cpus: 4
+memory: "6GiB"
+disk: "20GiB"
+mounts: []
+additionalDisks:
+  - name: "claudebot-data"
+    format: true
+    fsType: "ext4"
+containerd:
+  system: false
+  user: false
+# Only what ClaudeBot asks for is reachable, and only on 127.0.0.1.
+portForwards:
+  - guestPort: 5900
+    guestPortRange: [5900, 5910]
+    hostIP: "127.0.0.1"
+  - guestPortRange: [1, 65535]
+    ignore: true
+  - guestPortRange: [1, 65535]
+    proto: udp
+    ignore: true
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      # zram: 2 GiB compressed swap so a memory spike pages instead of killing the browser
+      apt-get update
+      apt-get install -y --no-install-recommends linux-modules-extra-$(uname -r) zram-tools sway wayvnc foot xwayland fonts-dejavu-core ca-certificates curl gnupg jq
+      sed -i 's/^#\?SIZE=.*/SIZE=2048/; s/^#\?ALGO=.*/ALGO=zstd/' /etc/default/zramswap && systemctl restart zramswap || true

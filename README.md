@@ -58,6 +58,7 @@ Prefer to clone it yourself? `git clone https://github.com/perigeelabs2026/claud
 | `claudebot update` | Gets the latest version and reinstalls |
 | `claudebot start` / `stop` | Starts or stops the background engine |
 | `claudebot logs` | Follows the engine log |
+| `claudebot computer up` / `status` / `snapshot` / `reset` / `update` | Manages the optional private computer (see below) |
 
 Uninstall: `~/ClaudeBot/install/uninstall.sh` (add `--purge` to also delete your data).
 
@@ -86,6 +87,17 @@ Still stuck? [Open an issue](https://github.com/perigeelabs2026/claudebot/issues
 
 The token is stored locally in `~/.claudebot/secrets` and never leaves your Mac except to talk to Telegram.
 
+## Private computer (optional)
+
+ClaudeBot can give the assistants their own private Linux computer on your Mac: a small virtual machine with a browser and its own screens, separate from your files. It is optional and needs [Lima](https://lima-vm.io) on an Apple silicon Mac (macOS 13+):
+
+```bash
+brew install lima
+claudebot computer up
+```
+
+It shares no folders with your Mac and is reachable only from your Mac (127.0.0.1), guarded by a token kept in your Keychain. Manage it in **More › Browser › Computer** or with `claudebot computer status | snapshot | reset | update | down`. A snapshot is taken every night when idle and before every update (the last 3 are kept). It uses about 6 GB of memory while running; `claudebot computer down` stops it.
+
 ## Privacy and safety
 
 - Everything runs locally. The engine and gateway listen on loopback only (`127.0.0.1:48311` and `:48310`) and require a local token.
@@ -103,6 +115,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/THREAT-MODEL.md](docs/TH
 | `engine/src` | The engine: durable jobs, chat, coordination, broker, browser, approvals, routines, Telegram |
 | `engine/ui` | The app's interface (plain JS/CSS served by the engine) |
 | `engine/test` | Unit, integration, release and recovery tests |
+| `computer/` | The optional private computer: pinned versions, provisioning and its local screen service |
 | `install/` | Install, uninstall, OpenClaw profile and LaunchAgent template |
 | `design/` | Design system: tokens, components, office art |
 | `skills/` | Reviewed skills the assistants can use |
