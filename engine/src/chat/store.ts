@@ -391,7 +391,7 @@ export class ChatStore {
     const k = `engine:${key}`; const prior = this.db.prepare('SELECT id FROM jobs WHERE idempotency_key = ?').get(k) as { id: string } | undefined; if (prior) return this.store.get(prior.id) ?? null;
     const wf = defs.getWorkflow(CHAT_WORKFLOW); if (!wf) return null;
     const msg = this.add({ conversation_id: conversationId, role: 'system', kind: 'wake', content, meta: { automatic: true, engine: true, reporter: agentId } });
-    const r = this.createTurn({ idempotency_key: k, kind: CHAT_WORKFLOW, objective: content.slice(0, 2000), success_contract: wf.contract, agent_role: agentId, workspace_id: conv.workspace_id, priority: 2, inputs: { conversation_id: conversationId, message_id: msg.id, chain_root: msg.id, automatic: true } }, 'engine', conversationId, msg.id);
+    const r = this.createTurn({ idempotency_key: k, kind: CHAT_WORKFLOW, objective: content.slice(0, 2000), success_contract: wf.contract, agent_role: agentId, workspace_id: conv.workspace_id, priority: 2, inputs: { conversation_id: conversationId, message_id: msg.id, chain_root: msg.id, engine: true } }, 'engine', conversationId, msg.id);   // an ClaudeBot note carries the owner's standing instructions: the assistant may start the work it describes (only automatic reports and event triggers may not)
     this.db.prepare('UPDATE messages SET job_id = ? WHERE id = ?').run(r.job.id, msg.id); return r.job;
   }
 

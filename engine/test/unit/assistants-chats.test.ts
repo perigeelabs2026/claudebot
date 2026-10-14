@@ -570,3 +570,12 @@ test('read_conversation: an assistant reads the whole record of a chat it belong
   const dBen = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['ben'] }); const benJob = s.chat.send(dBen.id, 'read it', s.defs).job;
   const no = await s.broker.call(cap(benJob, ['read_conversation']), 'read_conversation', { conversation: g.id }); assert.equal(no.ok, false);
 });
+
+test('a ClaudeBot note can start the work it describes (the lead refused a queued handoff as "automatic" and asked the owner again); automatic reports still cannot', async () => {
+  const s = setup(); const d = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] });
+  const note = s.chat.engineTurn(d.id, 'coordinator', 'ClaudeBot note: start the handoff index now.', 'k-note', s.defs)!;
+  const ok = await s.broker.call(cap(note, ['create_job']), 'create_job', { kind: 'document.create', objective: 'Build handoff-index.md from the two zips', agent_role: 'builder' });
+  assert.equal(ok.ok, true, ok.text);
+  const { notOwnerInitiated } = await import('../../src/broker/api.ts');
+  assert.equal(notOwnerInitiated(JSON.stringify({ automatic: true })), 'an automatic report'); assert.equal(notOwnerInitiated(JSON.stringify({ engine: true })), null);
+});
