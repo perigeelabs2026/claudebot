@@ -20,11 +20,13 @@ export function parseSnapshot(text: string): SnapshotElement[] {
   return out;
 }
 
-const CONSEQUENTIAL = /\b(submit|send|buy|purchase|pay|payment|order|checkout|check out|place order|publish|post|tweet|share|delete|remove|erase|confirm|sign ?up|register|subscribe|book|reserve|transfer|apply|donate|unsubscribe|accept|agree|authori[sz]e|approve|upload)\b/i;
+const CONSEQUENTIAL = /\b(submit|send|buy|purchase|pay|payment|order|checkout|check out|place order|publish|post|tweet|share|delete|remove|erase|confirm|sign ?up|register|subscribe|book|reserve|transfer|apply|donate|unsubscribe|accept|agree|authori[sz]e|approve)\b/i;
+/** Words that make a link more than navigation. "Apply…" links only open the application page, so they are navigation. */
+const CONSEQUENTIAL_LINK = new RegExp(CONSEQUENTIAL.source.replace('|apply', ''), 'i');
 const SENSITIVE = /\b(pass(word|code|phrase)?|pin|otp|one[- ]time|2fa|mfa|verification code|security code|cvv|cvc|card( number)?|credit|debit|iban|routing|account number|ssn|social security|tax id|api[ _-]?key|secret|token)\b/i;
 const SEARCHY = /\bsearch\b|\bfind\b|\bquery\b|\bfilter\b/i;
 
-export type ActKind = 'click' | 'type' | 'press' | 'select' | 'scroll' | 'download' | 'fill' | 'snapshot' | 'wait';
+export type ActKind = 'click' | 'type' | 'press' | 'select' | 'scroll' | 'download' | 'fill' | 'snapshot' | 'wait' | 'upload';
 export interface ActRequest { action: ActKind; ref?: string; text?: string; key?: string; values?: string[]; submit?: boolean; fields?: Array<{ ref: string; value: string }> }
 export type ActDecision =
   | { verdict: 'allow'; reason: string }
@@ -33,7 +35,7 @@ export type ActDecision =
 
 function approvalKind(name: string): 'send' | 'purchase' | 'publish' | 'delete' {
   if (/\b(buy|purchase|pay|payment|order|checkout|check out|donate|transfer|book|reserve)\b/i.test(name)) return 'purchase';
-  if (/\b(publish|post|tweet|share|upload)\b/i.test(name)) return 'publish';
+  if (/\b(publish|post|tweet|share)\b/i.test(name)) return 'publish';
   if (/\b(delete|remove|erase|unsubscribe)\b/i.test(name)) return 'delete';
   return 'send';
 }
@@ -54,6 +56,8 @@ export function decide(req: ActRequest, el: SnapshotElement | undefined, focused
     return bad ? { verdict: 'refuse', reason: 'a field looks like a credential or payment field' } : { verdict: 'allow', reason: 'preparation (filling does not submit)' };
   }
   if (req.action === 'scroll') return { verdict: 'allow', reason: 'scrolling' };
+  // Attaching a saved result (resume, cover letter) to a file field is preparation: nothing is submitted until a separate submit.
+  if (req.action === 'upload') return sensitive(el) ? { verdict: 'refuse', reason: `${label} is not a file field` } : { verdict: 'allow', reason: 'preparation (attaching a file does not submit)' };
   if (req.action === 'download') {
     if (el && CONSEQUENTIAL.test(el.name) && !/\bdownload\b/i.test(el.name)) return { verdict: 'needs_approval', reason: `${label} looks like it does more than download`, action_kind: approvalKind(el.name) };
     return { verdict: 'allow', reason: 'download into the task folder' };
@@ -67,7 +71,7 @@ export function decide(req: ActRequest, el: SnapshotElement | undefined, focused
     return { verdict: 'needs_approval', reason: `Enter would submit the form${f ? ` around ${f.role} "${f.name}"` : ''}`, action_kind: approvalKind(f?.name ?? '') };
   }
   if (req.action === 'click') {
-    if (el!.role === 'link' && !CONSEQUENTIAL.test(el!.name)) return { verdict: 'allow', reason: 'following a link' };
+    if (el!.role === 'link' && !CONSEQUENTIAL_LINK.test(el!.name)) return { verdict: 'allow', reason: 'following a link' };
     if (['tab', 'menuitem', 'option', 'checkbox', 'radio', 'combobox', 'textbox', 'searchbox', 'switch', 'treeitem', 'heading', 'img', 'cell', 'row'].includes(el!.role) && !CONSEQUENTIAL.test(el!.name)) return { verdict: 'allow', reason: `choosing ${label}` };
     if (CONSEQUENTIAL.test(el!.name)) return { verdict: 'needs_approval', reason: `${label} would submit or commit something`, action_kind: approvalKind(el!.name) };
     if (el!.role === 'button' && SEARCHY.test(el!.name)) return { verdict: 'allow', reason: 'a search button' };

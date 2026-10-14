@@ -1,8 +1,14 @@
 /**
  * Standing permissions ("Always allow … like this"). The owner creates one from a real approval; it covers one assistant, one
  * action kind and one exact target, at most N uses per day, until it expires or is revoked. A covered request is still recorded
- * with its exact content and hash, then approved by the permission, and runs once through the same executor. Assistants have no
- * way to create, change or widen a permission: there is no broker tool for it and activation needs the owner's Mac confirmation.
+ * with its exact content and hash, then approved by the permission, and runs once through the same executor. Assistants cannot
+ * create or widen a permission on their own: the owner confirms in the app, or tells the Chief of Staff in their own words (the
+ * quoted words are checked against the owner's message; see broker set_permission). Owner direction 2026-10-13.
+ *
+ * One named permission is broader by the owner's direction ("submit my job applications without asking"): it covers submitting
+ * applications on job sites and applicant-tracking forms. Every use is still recorded (page, control, values hash, time).
+ * Credentials, MFA, CAPTCHA and payment stay with the owner; emails to people, LinkedIn messages, purchases, publishing and
+ * deletions are never covered by it.
  */
 import type { DB } from '../db/open.ts';
 import { newId, now, sha256 } from '../jobs/store.ts';
@@ -23,6 +29,41 @@ export function contentRecipients(content: string): string[] | null {
   if (addrs.some((a) => !ADDR.test(a))) return null;
   return addrs;
 }
+export const JOB_APPLICATIONS = 'job_application';
+export const JOB_APPLICATIONS_SCOPE = 'Submit job applications without asking: assistants may submit applications on job sites and application forms (Greenhouse, Lever, Ashby, Workday, iCIMS, LinkedIn Jobs and company career pages), using your resume, cover letter and form answers. Every submission is recorded with the page, the button and the time. Passwords, verification codes, CAPTCHAs and payments still need you; emails, LinkedIn messages, purchases, posts and deletions still ask you.';
+const ATS = /(^|\.)(greenhouse\.io|lever\.co|ashbyhq\.com|myworkdayjobs\.com|myworkdaysite\.com|workday\.com|icims\.com|smartrecruiters\.com|jobvite\.com|bamboohr\.com|workable\.com|recruitee\.com|breezy\.hr|applytojob\.com|jazzhr\.com|taleo\.net|successfactors\.com|ultipro\.com|ukg\.com|paylocity\.com|adp\.com|rippling\.com|teamtailor\.com|pinpointhq\.com|dover\.com|gem\.com|wellfound\.com|indeed\.com|ziprecruiter\.com|personio\.de|personio\.com)$/i;
+/** Is this page part of a job application? An applicant-tracking site, LinkedIn Jobs (not messaging or profiles), or a careers/jobs/apply path. */
+export function isJobSite(url: string): boolean {
+  let u: URL; try { u = new URL(url); } catch { return false; }
+  const host = u.hostname.toLowerCase().replace(/^www\./, ''); const p = u.pathname.toLowerCase();
+  if (/(^|\.)linkedin\.com$/.test(host)) return /^\/jobs\//.test(p);
+  if (ATS.test(host)) return true;
+  return /(^|\/)(careers?|jobs?|job-openings|apply|application|positions|openings|join-us|work-with-us)(\/|$|-)/.test(p) || /^(careers|jobs|apply)\./.test(host);
+}
+/** A control that moves an application forward (apply, next, submit) and nothing else. */
+export function isApplicationControl(name: string): boolean {
+  const n = String(name);
+  if (/\b(message|inmail|connect|follow|invite|email|share|post|pay|payment|buy|purchase|order|donate|delete|remove|withdraw|unsubscribe)\b/i.test(n)) return false;
+  return /\b(apply|application|submit|next|continue|review|send application|easy apply|i'?m interested)\b/i.test(n);
+}
+/** The live "Submit job applications without asking" permission, if on and not expired or over today's limit. */
+export function jobApplicationPermission(db: DB, at = now()): StandingPermission | null {
+  const p = db.prepare("SELECT * FROM standing_permissions WHERE status = 'active' AND action_kind = ? ORDER BY created_at DESC LIMIT 1").get(JOB_APPLICATIONS) as unknown as StandingPermission | undefined;
+  if (!p) return null;
+  if (p.expires_at <= at) { db.prepare("UPDATE standing_permissions SET status = 'expired' WHERE id = ?").run(p.id); ev(db, 'system', 'permission.expired', { id: p.id }); return null; }
+  return usesToday(db, p.id, at) < p.max_per_day ? p : null;
+}
+/** Switch "Submit job applications without asking" on (the owner in the app, or the owner's words via the Chief of Staff). */
+export function grantJobApplications(db: DB, by: string, opts: { max_per_day?: number; days?: number; reason?: string } = {}): StandingPermission {
+  const live = jobApplicationPermission(db); if (live) return live;
+  const t = now(); const max = Math.max(1, Math.min(400, Math.round(Number(opts.max_per_day ?? 200)))); const days = Math.max(1, Math.min(365, Math.round(Number(opts.days ?? 90))));
+  const id = newId('perm'); const expires = new Date(Date.parse(t) + days * 86400_000).toISOString();
+  db.prepare("INSERT INTO standing_permissions(id, agent_id, action_kind, target, max_per_day, expires_at, reason, scope_text, scope_hash, status, from_approval, created_by, created_at, activated_at) VALUES (?,?,?,?,?,?,?,?,?,'active',NULL,?,?,?)")
+    .run(id, '*', JOB_APPLICATIONS, 'job sites and application forms', max, expires, String(opts.reason ?? '').slice(0, 300), JOB_APPLICATIONS_SCOPE, sha256(JOB_APPLICATIONS_SCOPE), by, t, t);
+  ev(db, by, 'permission.created', { id, agent: '*', kind: JOB_APPLICATIONS, max_per_day: max, expires_at: expires, reason: opts.reason ?? null });
+  return getPermission(db, id)!;
+}
+
 export interface StandingPermission { id: string; agent_id: string; action_kind: string; target: string; max_per_day: number; expires_at: string; reason: string; scope_text: string; scope_hash: string; status: 'proposed' | 'active' | 'revoked' | 'expired'; from_approval: string | null; created_by: string; created_at: string; activated_at: string | null; revoked_at: string | null; revoked_by: string | null }
 
 const ev = (db: DB, actor: string, type: string, detail: unknown, jobId: string | null = null) => db.prepare('INSERT INTO job_events(job_id, at, actor, type, detail) VALUES (?,?,?,?,?)').run(jobId, now(), actor, type, JSON.stringify(detail));

@@ -1,5 +1,5 @@
 import { safeExtract, sourceAllowed } from './archive.ts';
-import { matchPermission } from '../approvals/permissions.ts';
+import { matchPermission, jobApplicationPermission, isJobSite, isApplicationControl, contentRecipients, grantJobApplications, revokePermission, JOB_APPLICATIONS } from '../approvals/permissions.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { runProbe } from '../infra/probe.ts';
@@ -225,6 +225,16 @@ export class BrokerApi {
         return { ok: true, text: `shared "${f.title}"` };
       }
       // ---- the lead's team tools: each acts only on the owner's own words in the message being answered ----
+      case 'set_permission': {   // the lead switches a standing permission on or off because the owner said so in the message being answered
+        const asked = ownerAsked(db, cap.job_id, a.owner_words); if (!asked.ok) return { ok: false, text: `Not changed: ${asked.reason}.` };
+        const which = String(a.permission ?? ''); const on = a.on !== false;
+        if (which === 'job_applications') {
+          if (on) { const p2 = grantJobApplications(db, 'owner:chat', { reason: `owner asked in chat (${asked.source})` }); return { ok: true, text: `"Submit job applications without asking" is on (until ${p2.expires_at.slice(0, 10)}). Applications on job sites go ahead without a card; each is recorded.` }; }
+          const live = db.prepare("SELECT id FROM standing_permissions WHERE status = 'active' AND action_kind = ?").all(JOB_APPLICATIONS) as Array<{ id: string }>; for (const x of live) revokePermission(db, x.id, 'owner:chat'); return { ok: true, text: live.length ? 'Switched off: every application asks the owner again.' : 'It was already off.' };
+        }
+        if (!on && a.id) { return revokePermission(db, String(a.id), 'owner:chat') ? { ok: true, text: 'permission revoked' } : { ok: false, text: 'no active permission with that id' }; }
+        return { ok: false, text: 'permission must be "job_applications" (or give id with on=false to revoke another one); email permissions are created from the email\'s own card in the app' };
+      }
       case 'create_group': case 'edit_group': {   // the lead, on the owner's own words
         const asked = ownerAsked(db, cap.job_id, a.owner_words); if (!asked.ok) return { ok: false, text: `Not done: ${asked.reason}.` };
         const defs = new Definitions(db); const chat = new ChatStore(db, this.store); const me = this.store.get(cap.job_id)!;
@@ -257,6 +267,8 @@ export class BrokerApi {
         const me = this.store.get(cap.job_id); let mi: Record<string, unknown> = {}; try { mi = JSON.parse(me?.inputs || '{}'); } catch { /* */ }
         const ownerReply = !!me && me.kind === 'chat.turn' && !me.parent_id && me.agent_role === cap.role && !mi.automatic && !mi.handoff_from && !mi.trigger_id && !me.schedule_id;
         const perm = ownerReply ? matchPermission(this.db, { agent_id: cap.role, action_kind: kind, target: String(a.target), content: String(a.content) }) : null;
+        // A request to submit job applications (no email recipients in it) is covered by "Submit job applications without asking".
+        if (!perm && kind === 'send' && /\bapplication/i.test(`${a.target} ${String(a.content).slice(0, 400)}`) && !/@/.test(String(a.target)) && (contentRecipients(String(a.content)) ?? ['x']).length === 0) { const jp = jobApplicationPermission(this.db); if (jp) { this.approvals.decide(ap.id, 'approved', `permission:${jp.id}`, 'covered by "Submit job applications without asking"'); this.store.event(cap.job_id, actor, 'permission.used', { permission: jp.id, approval: ap.id, kind: 'job_application' }); return { ok: true, text: `Allowed by the owner's standing permission "Submit job applications without asking" (${ap.id}). Go ahead and submit the applications in your browser tab; each submit is recorded. Post a receipt for each.`, data: { id: ap.id } }; } }
         if (perm) { this.approvals.decide(ap.id, 'approved', `permission:${perm.id}`, 'covered by the owner\'s standing permission'); this.store.event(cap.job_id, actor, 'permission.used', { permission: perm.id, approval: ap.id }); return { ok: true, text: `Allowed by the owner's standing permission (${perm.scope_text}). It will be ${kind === 'send' ? 'sent' : 'done'} once; tell the owner it was covered by their standing permission.`, data: { id: ap.id, permission: perm.id } }; }
         return { ok: true, text: `approval ${ap.id} requested; the owner must approve before anything is ${kind === 'send' ? 'sent' : 'done'}. Content hash ${ap.content_hash.slice(0, 12)}…`, data: { id: ap.id } }; }
       case 'report_outcome': {
@@ -382,7 +394,14 @@ export class BrokerApi {
       const target = `${urlNow} — ${el ? `${el.role} "${el.name}"` : `key ${req.key}`}`;
       const content = approvalContent({ url: urlNow, element: el ?? focused, action: req.action === 'type' ? 'press' : req.action, key: req.key ?? (req.submit ? 'Enter' : undefined), typed });
       const shown = JSON.stringify({ page: urlNow, control: el ? `${el.role} "${el.name}"` : `Enter${focused ? ` in ${focused.role} "${focused.name}"` : ''}`, values_entered_in_this_tab: typed }, null, 1);
-      const approvalId = a.approval_id ? String(a.approval_id) : null;
+      let approvalId = a.approval_id ? String(a.approval_id) : null;
+      // The owner's "Submit job applications without asking": a submit/next/apply control on a job site is allowed by it, recorded
+      // exactly like an approval (page, control, values hash), and performed once below. Anything else still asks.
+      const ctl = el?.name ?? focused?.name ?? '';
+      if (!approvalId && verdict.action_kind === 'send' && isJobSite(urlNow) && isApplicationControl(ctl)) {
+        const perm = jobApplicationPermission(db);
+        if (perm) { const ap = this.approvals.request({ job_id: cap.job_id, action_kind: verdict.action_kind, target, content, evidence: [{ shown_to_owner: shown }] }); this.approvals.decide(ap.id, 'approved', `permission:${perm.id}`, 'covered by "Submit job applications without asking"'); this.store.event(cap.job_id, actor, 'permission.used', { permission: perm.id, approval: ap.id, kind: 'job_application', url: urlNow, control: ctl }); approvalId = ap.id; }
+      }
       const v = approvalId ? this.approvals.verify(approvalId, { kind: verdict.action_kind, target, content }) : null;
       if (!v || !v.ok) {
         // An identical pending request is reused instead of piling up duplicates.
@@ -414,6 +433,16 @@ export class BrokerApi {
       case 'scroll': r = await this.browserRunner(['scrollintoview', req.ref!, ...tgt], 'browser.scroll'); break;
       case 'fill': r = await this.browserRunner(['fill', '--fields', JSON.stringify((req.fields ?? []).map((f) => ({ ref: f.ref, value: f.value }))), ...tgt], 'browser.fill'); extra = { values: (req.fields ?? []).map((f) => f.value) }; break;
       case 'wait': r = { ok: true, stdout: '', stderr: '' }; await new Promise((res) => setTimeout(res, Math.min(Number(a.ms ?? 1500), 10_000))); break;
+      case 'upload': {
+        // Only a saved result this task may read (same scope and hash checks as read_artifact) is attached. It is staged in OpenClaw's
+        // uploads folder (the only place its browser accepts files from), per task, then attached to the file field or chooser at ref.
+        const f = artifactFile(db, cap.job_id, String(a.artifact_id ?? ''));
+        if (!f.ok) return { ok: false, text: `Not attached: ${f.reason}.` };
+        const stage = path.join('/tmp/openclaw/uploads', cap.job_id.replace(/[^a-z0-9-]/gi, '')); fs.mkdirSync(stage, { recursive: true, mode: 0o700 });
+        const staged = path.join(stage, path.basename(f.path)); fs.writeFileSync(staged, f.buf, { mode: 0o600 });
+        r = await this.browserRunner(['upload', staged, ...(a.file_input ? ['--input-ref', req.ref!] : ['--ref', req.ref!]), '--timeout-ms', '30000', ...tgt], 'browser.upload', 60_000);
+        extra = { artifact_id: String(a.artifact_id), file: path.basename(f.path), sha256: f.sha256 }; break;
+      }
       case 'download': {
         const name = (String(a.filename ?? 'download.bin').replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '') || 'download.bin').slice(0, 120);
         const dir = path.join(path.resolve(cap.workspace), 'downloads'); fs.mkdirSync(dir, { recursive: true, mode: 0o700 });

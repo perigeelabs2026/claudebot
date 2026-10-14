@@ -34,7 +34,8 @@ test('A1/A5: a permission starts proposed from a real approval; only the owner c
   const sub = confirmSubject(s.db, 'permit', p.id)!; assert.equal(sub.binding, p.scope_hash); assert.equal(sub.content, p.scope_text);
   activatePermission(s.db, p.id, 'owner'); assert.equal(confirmSubject(s.db, 'permit', p.id), null, 'an active permission cannot be confirmed again');
   assert.throws(() => activatePermission(s.db, p.id, 'owner'), /active/);
-  assert.ok(!Object.keys(TOOL_SCHEMAS).some((t) => /permission|permit/.test(t)), 'no broker tool creates or changes permissions');
+  // Owner direction 2026-10-13: the lead may switch permissions on the owner's own quoted words (set_permission); no other tool touches them.
+  assert.deepEqual(Object.keys(TOOL_SCHEMAS).filter((t) => /permission|permit/.test(t)), ['set_permission'], 'only the lead\'s owner-worded set_permission changes permissions');
   assert.throws(() => proposePermission(s.db, { approval_id: apId, max_per_day: 50 }, 'owner'), /1 to 20/);
 });
 
