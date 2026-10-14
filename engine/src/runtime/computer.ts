@@ -129,8 +129,6 @@ export class ComputerRuntime implements ModelRuntime {
         await this.ssh(`umask 077; cat > ${q(vmDir)}/.claudebot/capability.json`, JSON.stringify({ token: cap.token, job_id: cap.job_id, key: cap.key ?? key }));
         await this.ssh(`cat > ${q(vmDir)}/.mcp.json`, JSON.stringify({ mcpServers: { claudebot: { command: '/opt/node/bin/node', args: ['/opt/claudebot/broker-bridge.mjs'], env: { CLAUDEBOT_ENGINE: `http://host.lima.internal:${this.o.enginePort}`, CLAUDEBOT_CAP_FILE: `${vmDir}/.claudebot/capability.json` } } } }, null, 2));
       }
-      // Builder turns: the worktree (with its capability) belongs to the builder uid for the length of the turn.
-      if (req.asBuilder && req.vmCwd) await this.ssh(`sudo -n ${HANDOVER} ${q(vmDir)} claudebot-builder turn`);
     } catch (e) { return { ok: false, category: 'crashed', message: `could not prepare the task folder in the assistants' computer: ${(e as Error).message.slice(0, 200)}`, retryable: true } as TurnResult; }
     let r: TurnResult;
     try {
@@ -146,7 +144,6 @@ export class ComputerRuntime implements ModelRuntime {
     finally {
       // Files the turn wrote in the computer come back to the task folder on the Mac (results, drafts, downloads).
       // The broker capability lives only as long as the turn: another turn or a check that reads this folder later finds none.
-      if (req.asBuilder && req.vmCwd) try { await this.ssh(`sudo -n ${HANDOVER} ${q(vmDir)} "$(stat -c %U ${q(VM_REPOS)})" turn`); } catch (e) { this.o.log.warn('handing the worktree back from the builder failed', { err: (e as Error).message.slice(0, 200) }); }
       try { await this.ssh(`rm -f ${q(vmDir)}/.claudebot/capability.json`); } catch { /* the computer may be gone; the capability expires anyway */ }
       if (!req.vmCwd) try { fs.mkdirSync(hostDir, { recursive: true }); await this.rsync(`${SSH_HOST}:${vmDir}/`, `${hostDir}/`); } catch (e) { this.o.log.warn('copying files back from the assistants\' computer failed', { err: (e as Error).message.slice(0, 200), hostDir }); }
     }

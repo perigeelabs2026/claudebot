@@ -1,6 +1,5 @@
 // Build tasks after Fable's step-1 spec review: results leave the VM (bundle + patch), the private repo arrives as a bundle (main and
-// tags only), no default repository, npm ci without install scripts, the hand-over helper, the builder egress proxy, and builder turns
-// (off by default) wired through their own ACP agent with the token never in argv.
+// tags only), no default repository, npm ci without install scripts, the hand-over helper and the builder egress proxy.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -10,7 +9,7 @@ import http from 'node:http';
 import net from 'node:net';
 import { execFileSync } from 'node:child_process';
 import { openDatabase } from '../../src/db/open.ts';
-import { localShell, ensureClone, prepareWorktree, commitBuild, exportBuild, stageBundle, buildRepo, builderTurnsOn, runBuildCheck } from '../../src/build/repo.ts';
+import { localShell, ensureClone, prepareWorktree, commitBuild, exportBuild, stageBundle, buildRepo, runBuildCheck } from '../../src/build/repo.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..', '..', '..');
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.test', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.test' } }).trim();
@@ -77,7 +76,6 @@ test('hand-over helper: only a worktree directly under repos/<app>-worktrees, on
   assert.throws(() => run(wt, 'root', 'everything'), /refused: mode/);
   execFileSync('chown', ['-R', String(nobody), wt]);   // as if the builder had it: hand it back to the engine user (owner of repos)
   run(wt, 'root', 'check'); assert.equal(fs.statSync(path.join(wt, 'src', 'a.js')).uid, 0); assert.equal(fs.statSync(path.join(wt, '.claudebot', 'capability.json')).uid, nobody, 'check mode leaves .claudebot alone'); assert.equal(fs.lstatSync(path.join(wt, '.git')).uid, nobody);
-  run(wt, 'root', 'turn'); assert.equal(fs.statSync(path.join(wt, '.claudebot', 'capability.json')).uid, 0, 'turn mode includes .claudebot');
 });
 
 test('egress proxy: HTTPS tunnels only to Anthropic, GitHub and npm; any other host and plain HTTP are refused and logged', async () => {
@@ -93,34 +91,4 @@ test('egress proxy: HTTPS tunnels only to Anthropic, GitHub and npm; any other h
   const plain = await new Promise<number>((resolve) => http.get({ host: '127.0.0.1', port, path: 'http://example.com/', headers: { host: 'example.com' } }, (res) => { res.resume(); resolve(res.statusCode ?? 0); }));
   assert.equal(plain, 403); assert.ok(logs.some((l) => /refused example\.com:443/.test(l)));
   proxy.close(); up.close();
-});
-
-test('builder turns are off by default; on, the turn uses the "builder" ACP agent, its worktree is handed to the builder and back, and the token never reaches argv', async () => {
-  const db = openDatabase(':memory:'); assert.equal(builderTurnsOn(db, {} as NodeJS.ProcessEnv), false, 'off by default');
-  db.prepare("INSERT INTO settings(key, value, updated_at, updated_by) VALUES ('builder_turns', 'true', 't', 't')").run(); assert.equal(builderTurnsOn(db, {} as NodeJS.ProcessEnv), true);
-  const acp = fs.readFileSync(path.join(ROOT, 'engine', 'src', 'runtime', 'claude-acp.ts'), 'utf8'); assert.match(acp, /\/acp spawn \$\{req\.asBuilder \? 'builder' : 'claude'\}/);
-  const oc = JSON.parse(fs.readFileSync(path.join(ROOT, 'computer', 'runtime', 'openclaw.json'), 'utf8'));
-  assert.equal(oc.plugins.entries.acpx.config.agents.builder.command, '/opt/claudebot/bin/claude-acp-builder'); assert.ok(oc.acp.allowedAgents.includes('builder')); assert.equal(oc.agents.entries.builder.runtime.acp.agent, 'builder');
-  const wrap = fs.readFileSync(path.join(ROOT, 'computer', 'runtime', 'claude-acp-as-builder'), 'utf8');
-  assert.match(wrap, /IFS= read -r CLAUDE_CODE_OAUTH_TOKEN < "\$TOK"/, 'read from its file'); assert.doesNotMatch(wrap.split('\n').filter((l) => /^exec /.test(l)).join('\n'), /TOK|TOKEN/, 'not in the exec line (argv)');
-  assert.match(wrap, /HTTPS_PROXY=\$P/); assert.match(fs.readFileSync(path.join(ROOT, 'computer', 'runtime', 'claude-acp-builder'), 'utf8'), /exec sudo -n -u claudebot-builder -H /);
-  // The computer runtime hands the worktree over before the turn and back after it, then removes the capability.
-  const { ComputerRuntime, VM_REPOS } = await import('../../src/runtime/computer.ts'); const { issueCapability } = await import('../../src/broker/capabilities.ts');
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bt-')); const ws = path.join(tmp, 'workspaces'); const runDir = path.join(tmp, 'run'); const dir = path.join(ws, 'general', 'tasks', 'job-b2'); fs.mkdirSync(dir, { recursive: true });
-  issueCapability(runDir, { id: 'job-b2', agent_role: 'coordinator' } as never, dir, ['run_project_check']);
-  const calls: string[] = []; let at = -1; const wt = `${VM_REPOS}/demo-worktrees/job-b2`;
-  const inner = { id: 'claude-acp', describe: () => ({ label: 'x', route: 'r', account: '' }), health: async () => ({}) as never, cancel: async () => {}, startTurn: async () => { at = calls.length; return { ok: true, text: 'done' } as never; } };
-  const rt = new ComputerRuntime(inner as never, { hostWorkspaces: ws, runDir, enginePort: 1, log: { info: () => {}, warn: () => {} }, exec: async (cmd: string, args: string[]) => { if (cmd === 'ssh') calls.push(args.at(-1)!); return ''; } });
-  await rt.startTurn({ jobId: 'job-b2', sessionRef: 'job-b2', role: 'coordinator', cwd: dir, vmCwd: wt, asBuilder: true, prompt: 'p', resume: false, timeoutMs: 1000 } as never);
-  const to = calls.findIndex((c) => c === `sudo -n /opt/claudebot/bin/claudebot-handover '${wt}' claudebot-builder turn`); const back = calls.findIndex((c) => c.startsWith(`sudo -n /opt/claudebot/bin/claudebot-handover '${wt}' "$(stat -c %U`));
-  const rm = calls.findIndex((c) => c.startsWith('rm -f') && c.includes('capability.json'));
-  assert.ok(to >= 0 && to < at, 'handed to the builder before the turn'); assert.ok(back >= at && back < rm, 'handed back after the turn, before the capability is removed');
-  calls.length = 0; await rt.startTurn({ jobId: 'job-b2', sessionRef: 'job-b2', role: 'coordinator', cwd: dir, vmCwd: wt, prompt: 'p', resume: false, timeoutMs: 1000 } as never);
-  assert.ok(!calls.some((c) => c.includes('claudebot-handover')), 'not a builder turn: no hand-over');
-  // The token is installed over stdin only.
-  const { LimaHost } = await import('../../src/computer/host.ts'); const seen: Array<{ args: string[]; input?: string }> = [];
-  const host = new LimaHost({ home: tmp, secretsDir: path.join(tmp, 's'), exec: async (args: string[], input?: string) => { seen.push({ args, input }); return ''; } } as never);
-  const tok = 'sk-ant-oat01-' + 'Z'.repeat(40); await host.setBuilderToken(tok);
-  assert.ok(!seen[0].args.join(' ').includes(tok), 'not in argv'); assert.equal(seen[0].input, `${tok}\n`); assert.match(seen[0].args.join(' '), /umask 377/);
-  await assert.rejects(() => host.setBuilderToken('not a token; rm -rf /'), /does not look like a token/);
 });

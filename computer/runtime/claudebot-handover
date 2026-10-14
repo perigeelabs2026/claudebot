@@ -1,12 +1,11 @@
 #!/bin/bash
 # Root helper: the one command the engine's user may run as root (sudoers.d/claudebot). Hands one build worktree to the builder uid or
-# back to the engine's user. Usage: claudebot-handover <worktree> <claudebot-builder|engine user> <check|turn>
-#   check: the worktree minus its .git pointer and .claudebot/ (the broker capability stays the engine's).
-#   turn:  the worktree including .claudebot/, for a turn that itself runs as the builder (builder turns, off by default).
+# back to the engine's user, for the length of a check. Usage: claudebot-handover <worktree> <claudebot-builder|engine user> check
+#   The worktree minus its .git pointer and .claudebot/ (the broker capability stays the engine's).
 set -euo pipefail
 D=/mnt/lima-claudebot-computer-data
 [ -z "${SUDO_USER:-}" ] && [ -n "${CLAUDEBOT_HANDOVER_DATA:-}" ] && D=$CLAUDEBOT_HANDOVER_DATA   # tests only (never under sudo)
-[ $# -eq 3 ] || { echo "usage: claudebot-handover <worktree> <user> <check|turn>" >&2; exit 2; }
+[ $# -eq 3 ] || { echo "usage: claudebot-handover <worktree> <user> check" >&2; exit 2; }
 dir=$(realpath -e -- "$1"); who=$2; mode=$3
 parent=$(dirname -- "$dir")
 case "$parent" in "$D"/repos/*-worktrees) ;; *) echo "refused: $dir is not a build worktree" >&2; exit 2;; esac
@@ -15,7 +14,6 @@ engine=$(stat -c %U "$D/repos")
 case "$who" in claudebot-builder|"$engine") ;; *) echo "refused: user $who" >&2; exit 2;; esac
 case "$mode" in
   check) find "$dir" -mindepth 1 \( -path "$dir/.git" -o -path "$dir/.claudebot" \) -prune -o -exec chown -h "$who" {} + ;;
-  turn)  find "$dir" -mindepth 1 -path "$dir/.git" -prune -o -exec chown -h "$who" {} + ;;
   *) echo "refused: mode $mode" >&2; exit 2;;
 esac
 chown "$who" "$dir"

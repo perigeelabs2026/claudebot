@@ -5,7 +5,7 @@ import http from 'node:http';
 import net from 'node:net';
 import fs from 'node:fs';
 
-export const ALLOWED = ['api.anthropic.com', 'claude.ai', 'console.anthropic.com', 'statsig.anthropic.com', 'github.com', 'api.github.com', 'codeload.github.com', 'objects.githubusercontent.com', 'registry.npmjs.org'];
+export const ALLOWED = ['api.anthropic.com', 'github.com', 'api.github.com', 'codeload.github.com', 'objects.githubusercontent.com', 'registry.npmjs.org'];
 export function allowed(host) { const h = String(host).toLowerCase().replace(/\.$/, ''); return ALLOWED.includes(h); }
 
 export function createProxy({ log = () => {}, connect = (port, host) => net.connect(port, host) } = {}) {

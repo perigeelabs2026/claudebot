@@ -10,7 +10,7 @@ export interface TurnRequest {
   role: string;
   cwd: string;
   /** A working folder inside the assistants' computer (a build worktree): the turn runs there directly, nothing is copied. cwd stays the task folder on the Mac. */
-  vmCwd?: string; /** Builder turns (setting builder_turns, off by default): the turn runs as the builder uid through the "builder" ACP agent. */ asBuilder?: boolean;
+  vmCwd?: string;
   prompt: string;
   resume: boolean;           // true when continuing an existing session after interruption
   timeoutMs: number;

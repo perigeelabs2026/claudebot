@@ -82,12 +82,6 @@ export function buildRepo(db: DB, env: NodeJS.ProcessEnv = process.env): BuildRe
   const app = String(s.app ?? path.basename(url).replace(/\.git$/, '')).toLowerCase().replace(/[^a-z0-9._-]/g, '-') || 'app';
   return { app, url, ...(from ? { bundle_from: from } : {}), ...(s.install_scripts === true ? { install_scripts: true } : {}) };
 }
-/** Builder turns: a build task's implement turn runs as the builder uid (its own Claude sign-in, egress allowlist). Off by default;
- *  on with settings key builder_turns = true (or CLAUDEBOT_BUILDER_TURNS=1) once the owner has given the builder its sign-in token. */
-export function builderTurnsOn(db: DB, env: NodeJS.ProcessEnv = process.env): boolean {
-  if (env.CLAUDEBOT_BUILDER_TURNS === '1') return true;
-  try { return JSON.parse(String((db.prepare("SELECT value FROM settings WHERE key = 'builder_turns'").get() as { value: string } | undefined)?.value ?? 'false')) === true; } catch { return false; }
-}
 export const NO_BUILD_REPO = 'No repository is set for build tasks. Set it once: settings key build_repo = {"app": "<name>", "bundle_from": "<path to the repository on this Mac>"} for a private repository (recommended), or {"app": "<name>", "url": "<git URL>"} for a public one.';
 
 /** The bundle a private repository reaches the VM as: main and tags only (never other local branches), verified, 0600, replaced

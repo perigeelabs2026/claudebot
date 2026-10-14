@@ -1,4 +1,4 @@
-# ClaudeBot: the builder uid (checks and builder turns) may reach only the egress proxy, DNS and the engine on the host.
+# ClaudeBot: the builder uid (build checks) may reach only the egress proxy, DNS and the engine on the host.
 # __HOST_IP__ is host.lima.internal, filled in at provisioning.
 table inet claudebot_builder {
   chain out {
