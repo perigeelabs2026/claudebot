@@ -207,7 +207,7 @@ export class TelegramBridge {
       for (const j of blocked) {
         let pol: { telegram?: boolean; dry_run?: boolean } = {}; try { pol = JSON.parse(j.policies || '{}'); } catch { /* */ }
         const detail = String(j.failure_detail ?? '').replace(/^blocked: /, ''); const secret = /\b(password|passcode|code|sign[- ]?in|log[- ]?in|purchase|payment|spend)\b/i.test(detail);   // only the owner can type or pay
-        const ownerOnly = j.state === 'waiting_for_auth' || /captcha/i.test(detail) || (classifyBlocked({ kind: 'blocker', title: j.objective, detail }) === 'owner' && (secret || !bankKnows(detail)));   // an answer the bank already holds is not his to give
+        const ownerOnly = j.state === 'waiting_for_auth' || /captcha/i.test(detail) || (classifyBlocked({ kind: 'blocker', title: j.objective, detail }) === 'owner' && (secret || !bankKnows(detail)));   // an answer the bank already holds is not theirs to give
         if (!ownerOnly) { db.prepare('INSERT OR IGNORE INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?,?,?,?,?)').run(`blocker:${j.id}`, b.chat_id, null, 'skipped-team', now()); continue; }
         const skip = quietNow || pol.telegram === false || pol.dry_run; const who = (this.d.defs.getAgent(j.agent_role)?.name ?? j.agent_role).replace(/\s*\(.*\)$/, '');
         const what = j.state === 'waiting_for_auth' ? `needs you to sign in${j.waiting_on?.startsWith('browser:') ? ` to ${j.waiting_on.slice(8)}` : ''}` : `is stuck on something only you can do: ${detail.replace(/\s+/g, ' ').slice(0, 200)}`;

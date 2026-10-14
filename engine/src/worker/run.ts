@@ -21,6 +21,8 @@ import { ChatStore, CHAT_WORKFLOW } from '../chat/store.ts';
 import { progressWording } from '../model/wording.ts';
 import { releaseTaskTabs } from '../browser/tabs.ts';
 import { readingDue, recordReading, refreshGovernor } from '../usage/governor.ts';
+import { ESSAY } from '../cos/owner-needs.ts';
+import { bankKnows } from '../memory/answer-bank.ts';
 
 export interface RunDeps {
   db: DB; store: JobStore; approvals: ApprovalStore; actions: ActionStore; runtime: ModelRuntime; log: Logger;
@@ -338,7 +340,8 @@ Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-�
         const stuckReport = stuckSentences.length > 0 && !triedSomething;
         const askBack = !String(msg.content ?? '').startsWith('ClaudeBot: do not ask the owner') && (ownerTodo || stuckReport || /\b(should i|shall i|want me to|do you want me to|would you like me to|can i go ahead|ok(ay)? to|or leave (it|them) for later)\b[^?]{0,240}\?\s*$/i.test(lastSentence)
           && !/\b(send|email|e-mail|message|post|publish|pay|buy|purchase|spend|delete|remove)\b/i.test(lastSentence.replace(/\bverify\b[^?]*/i, ''))   // asking to send, spend, post or delete is the owner's call
-          && !/\b(password|passcode|verification code|captcha|salary|compensation|pay range|quota|stack rank|essay)\b/i.test(reply.trim().slice(-400)));   // a personal answer may be named in the sentence before the question
+          && !/\b(password|passcode|verification code|captcha)\b/i.test(reply.trim().slice(-400))   // only the owner types these
+          && !(/\b(salary|compensation|pay range|quota|stack rank|work authori[sz]ation|sponsorship)\b/i.test(reply.trim().slice(-400)) && !ESSAY.test(reply.trim().slice(-400)) && !bankKnows(reply.trim().slice(-400))));   // a personal fact the answer bank does not hold may be asked; essays and bank-known facts are the team's
         chat.add({ conversation_id: conv.id, role: 'assistant', sender: agentId, content: reply, job_id: job.id, reply_to: msg.kind === 'handoff' ? msg.id : null, meta: { duration_ms: r.durationMs, session_resumed: resume, ...(router ? { router: true } : {}), ...(askBack ? { update: 1, ask_back: true } : {}) } });
         if (askBack) chat.engineTurn(conv.id, agentId, stuckReport && !ownerTodo
           ? 'ClaudeBot: do not ask the owner and do not stop at the first blocked path; the owner asked not to be asked. Try other people (their manager, the team, the hiring committee, a recruiter), other sources (company site, LinkedIn, press, the signed-in Gmail) and other routes now, start a follow-up task if needed, and report what you tried and what worked.'

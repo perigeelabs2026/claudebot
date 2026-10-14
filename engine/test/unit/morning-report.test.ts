@@ -19,14 +19,13 @@ function application(db: ReturnType<typeof setup>['db'], store: JobStore, jobId:
   void store;
 }
 
-test('classifier: only passwords, codes, CAPTCHAs, personal answers, spend and approvals need the owner', () => {
+test('classifier: only passwords, codes, CAPTCHAs, personal facts the bank lacks, spend and approvals need the owner; essays are team work', () => {
   const owner = [
     { kind: 'blocker', title: 'Blocked: Apply to Acme', detail: 'The site asks for the account password' },
-    { kind: 'blocker', title: 'Blocked: Apply to Beta', detail: 'Enter the verification code sent to his phone' },
+    { kind: 'blocker', title: 'Blocked: Apply to Beta', detail: 'Enter the verification code sent to their phone' },
     { kind: 'blocker', title: 'Blocked: Apply to Gamma', detail: 'A CAPTCHA appeared on the submit page' },
     { kind: 'question', title: "Answer Jude's question", detail: 'What salary expectation should I put on the Delta form?' },
     { kind: 'blocker', title: 'Blocked: Apply to Epsilon', detail: 'The form asks for last year quota attainment numbers' },
-    { kind: 'blocker', title: 'Blocked: Apply to Zeta', detail: 'Write a short essay about yourself and why you want this role' },
     { kind: 'blocker', title: 'Blocked: Upgrade', detail: 'This needs a purchase of the premium plan' },
     { kind: 'approval', title: "Approve Sailor's email", detail: 'to jane@example.com' },
     { kind: 'sign_in', title: 'Sign in so work can continue: LinkedIn', detail: '' },
@@ -34,6 +33,7 @@ test('classifier: only passwords, codes, CAPTCHAs, personal answers, spend and a
   ];
   for (const x of owner) assert.equal(classifyBlocked(x), 'owner', `${x.detail || x.title} needs the owner`);
   const team = [
+    { kind: 'blocker', title: 'Blocked: Apply to Zeta', detail: 'Write a short essay about yourself and why you want this role' },   // drafted from the resume and memory
     { kind: 'blocker', title: 'Blocked: Read the resumes', detail: 'Allow unzip so the archives can be opened' },
     { kind: 'blocker', title: 'Blocked: Read the resumes', detail: 'Extract the zips manually and put them in the shared folder' },
     { kind: 'question', title: "Answer Ivan's question", detail: 'Can you export the chat log so I can read the earlier plan?' },

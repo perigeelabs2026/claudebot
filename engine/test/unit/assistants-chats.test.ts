@@ -677,3 +677,32 @@ test('generic labels (Company, Role, Title, Dates, Name, Email, Phone, Location)
   assert.equal(bankKnows('What is your desired title and location preference?', dir), false);
   assert.equal(bankKnows('quota attainment for the last 4 years', dir), true);
 });
+
+test('owner-needs: essays are team work; a quota or salary question is the owner\'s only when the answer bank lacks it; passwords and codes stay the owner\'s', async () => {
+  const { classifyBlocked } = await import('../../src/cos/owner-needs.ts');
+  const bank = fs.mkdtempSync(path.join(os.tmpdir(), 'bank4-')); fs.mkdirSync(path.join(bank, 'Owner')); fs.writeFileSync(path.join(bank, 'Owner', 'Application answers.md'), '- Quota attainment: 70% across all quarters\n');
+  const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'bank5-'));
+  const b = (detail: string, dir = bank) => classifyBlocked({ kind: 'blocker', title: 'Apply', detail }, { bankDir: dir });
+  assert.equal(b('the form needs an essay: why do you want to join Acme?'), 'team', 'drafted from the resume and memory');
+  assert.equal(b('the form asks to tell us about yourself in 300 words'), 'team');
+  assert.equal(b('the form needs quota attainment for the last 4 years'), 'team', 'the bank holds it');
+  assert.equal(b('the form needs quota attainment for the last 4 years', empty), 'owner', 'the bank does not hold it');
+  assert.equal(b('the form asks for desired salary', empty), 'owner');
+  assert.equal(b('the site wants the password for the candidate account'), 'owner');
+  assert.equal(b('a verification code was sent to the owner\'s phone'), 'owner');
+});
+
+test('ask-back: an essay question or a fact the answer bank holds is bounced back to the team; a fact the bank lacks may still be asked', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bank6-')); fs.mkdirSync(path.join(dir, 'Owner')); fs.writeFileSync(path.join(dir, 'Owner', 'Application answers.md'), '- Quota attainment: 70% across all quarters\n');
+  process.env.CLAUDEBOT_MEMORY_DIR = dir;
+  try {
+    const s = setup([{ kind: 'ok', text: 'The form has a "Why do you want to join?" essay. Should I draft the essay from your resume?' }, { kind: 'ok', text: 'ok' },
+      { kind: 'ok', text: 'The form asks for quota attainment. Should I enter it from your saved answers?' }, { kind: 'ok', text: 'ok' },
+      { kind: 'ok', text: 'The form asks your desired salary. Should I enter $120K?' }]);
+    const d = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] });
+    const bounced = async (text: string) => { const { job } = s.chat.send(d.id, text, s.defs); assert.equal(await run(s, job.id), 'completed'); const b = s.db.prepare('SELECT id FROM jobs WHERE idempotency_key = ?').get(`engine:askback:${job.id}`) as { id: string } | undefined; if (b) assert.equal(await run(s, b.id), 'completed'); return !!b; };
+    assert.equal(await bounced('Fill the first form'), true, 'an essay is drafted by the team');
+    assert.equal(await bounced('Fill the second form'), true, 'the bank holds the quota answer');
+    assert.equal(await bounced('Fill the third form'), false, 'salary is not in the bank: the owner may be asked');
+  } finally { delete process.env.CLAUDEBOT_MEMORY_DIR; }
+});
