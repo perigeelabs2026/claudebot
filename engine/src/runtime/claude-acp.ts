@@ -70,6 +70,7 @@ function nextOccurrence(h: number, m: number, tz: string | undefined, now: Date)
 export const ACP_MODEL_ALIAS: Record<string, string> = { 'claude-opus-5-5': 'opus', 'claude-sonnet-5-5': 'sonnet', 'claude-haiku-5-5': 'haiku', 'claude-fable-5-1': 'fable' };
 /** How long a harvested model list is trusted before it is probed again. */
 export const MODEL_LIST_TTL_MS = 3600_000;
+const ACP_SESSION = /^agent:[a-z_]+:acp:[0-9a-f-]+$/i;
 export const acpModel = (id: string) => ACP_MODEL_ALIAS[id] ?? id;
 
 export class ClaudeAcpRuntime implements ModelRuntime {
@@ -183,13 +184,25 @@ export class ClaudeAcpRuntime implements ModelRuntime {
   }
   /** The cached list while it is under an hour old; otherwise (or with fresh: true) probe again. A probe that lists nothing keeps the
    *  older list rather than forgetting it. */
-  async advertisedModels(opts: { probe?: boolean; fresh?: boolean } = {}): Promise<{ models: string[]; reply: string; at: string } | null> {
+  async advertisedModels(opts: { probe?: boolean; fresh?: boolean; sessionKey?: string | null } = {}): Promise<{ models: string[]; reply: string; at: string } | null> {
     const young = this.verified && Date.now() - Date.parse(this.verified.at) < MODEL_LIST_TTL_MS;
     if (this.verified && young && !opts.fresh) return this.verified;
     if (opts.probe === false) return this.verified;
-    const reply = await this.command(`/acp model claudebot-model-probe ${this.controlKey}`, 20_000).catch(() => '');
-    this.harvestModels(reply);   // a usage-only or empty reply leaves the list as it was (unverified when there was none)
+    // The control session is not an ACP session, so `/acp model` there answers with usage or a session error and never lists models
+    // (seen live 2026-10-14). The probe runs on the most recent real ACP session (agent:<role>:acp:<uuid>): the one passed in (from
+    // the jobs table), else one this process set a model on. With none, nothing is probed: the first assistant turn harvests the list.
+    // A probe that lists nothing (usage, session error, timeout) is unverified, never a refusal.
+    const key = [opts.sessionKey, ...[...this.models.keys()].reverse()].find((k): k is string => !!k && ACP_SESSION.test(k));
+    if (!key) return this.verified;
+    await this.probeOn(key);
     return this.verified;
+  }
+  /** Set the never-accepted probe model on an ACP session and harvest the list from its refusal. A refusal changes nothing on the session. */
+  private async probeOn(sessionKey: string): Promise<boolean> {
+    const reply = await this.command(`/acp model claudebot-model-probe ${sessionKey}`, 20_000).catch((e: Error) => e.message);
+    const listed = this.harvestModels(reply);
+    if (!listed) this.o.log.warn('model list probe listed nothing; the list stays unverified', { sessionKey, reply: redact(reply).slice(0, 160) });
+    return listed;
   }
   private async ensureModel(sessionKey: string, model: string | undefined, fallback?: string, role = ''): Promise<ModelFallback | null> {
     if (!model || this.models.get(sessionKey) === model) return null;
@@ -238,6 +251,7 @@ export class ClaudeAcpRuntime implements ModelRuntime {
       await gw.connect();
       sessionKey = await this.ensureSession(req);
       if (!req.probeOnly) await this.ensureTimeout(sessionKey, req.timeoutMs);
+      if (!req.probeOnly && !this.verified && ACP_SESSION.test(sessionKey)) await this.probeOn(sessionKey);   // the first turn on a real ACP session lists the models when nothing has yet
       if (!req.probeOnly) modelFallback = await this.ensureModel(sessionKey, req.model, req.fallbackModel, req.role);
       req.onSession?.(sessionKey);
       req.onHeartbeat?.(`acp session ${sessionKey}`);
@@ -296,7 +310,7 @@ export class ClaudeAcpRuntime implements ModelRuntime {
   /** Queue an instruction on a session: OpenClaw runs it after the in-flight turn ends (it never interrupts the running turn). */
   async steerSession(sessionKey: string, instruction: string): Promise<string> { return this.command(`/acp steer --session ${sessionKey} ${instruction.replace(/\s+/g, ' ').slice(0, 2000)}`, 30_000); }
 
-  async closeSession(sessionKey: string): Promise<void> { try { await this.command(`/acp close ${sessionKey}`, 20_000); } catch (e) { this.o.log.warn('close failed', { sessionKey, err: (e as Error).message }); } }
+  async closeSession(sessionKey: string): Promise<void> { this.models.delete(sessionKey); try { await this.command(`/acp close ${sessionKey}`, 20_000); } catch (e) { this.o.log.warn('close failed', { sessionKey, err: (e as Error).message }); } }
 }
 
 function extractText(content: unknown): string {

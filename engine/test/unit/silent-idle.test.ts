@@ -12,7 +12,7 @@ import { Definitions } from '../../src/model/definitions.ts';
 import { Workspaces } from '../../src/model/workspaces.ts';
 import { ChatStore } from '../../src/chat/store.ts';
 import { ClaudeAcpRuntime, classifyFailure } from '../../src/runtime/claude-acp.ts';
-import { validateModel, advertised } from '../../src/runtime/model-check.ts';
+import { validateModel, advertised, startupModelCheck } from '../../src/runtime/model-check.ts';
 import { failureStreaks, routineLines, governorLine, starvation, resetLapsed, approvalReminders, STREAK } from '../../src/cos/watch.ts';
 
 function setup() {
@@ -39,14 +39,15 @@ test('1: the model list is harvested from a refusal ("Available models: …"); a
   const rt = new ClaudeAcpRuntime({ gateway: {} as never, log, claudeExecutable: '/bin/false', claudeConfigDir: '/tmp/none' }) as unknown as { command: (m: string) => Promise<string>; ensureModel: (k: string, m?: string, f?: string, role?: string) => Promise<unknown>; advertisedModels: (o?: { probe?: boolean }) => Promise<{ models: string[]; reply: string; at: string } | null> };
   const sent: string[] = [];
   rt.command = async (m) => { sent.push(m); return '⚠️ Usage: /acp model <model-id> [session-key|session-id|session-label]'; };
-  assert.equal(await rt.advertisedModels(), null, 'a usage-only reply is unverified'); assert.match(sent[0], /^\/acp model claudebot-model-probe /, 'the probe sets a known-bad model');
+  assert.equal(await rt.advertisedModels(), null, 'no ACP session yet: unverified'); assert.equal(sent.length, 0, 'nothing is probed on the control session');
+  assert.equal(await rt.advertisedModels({ sessionKey: 'agent:researcher:acp:0a1b' } as never), null, 'a usage-only reply is unverified'); assert.equal(sent[0], '/acp model claudebot-model-probe agent:researcher:acp:0a1b', 'the probe sets a known-bad model on a real ACP session');
   rt.command = async (m) => { sent.push(m); return /claude-mystery-9/.test(m) ? 'ACP error: model "claude-mystery-9" is not available. Available models: default, opus, fable, sonnet, haiku, …' : 'ok'; };
   await rt.ensureModel('s1', 'claude-mystery-9', 'claude-opus-5-5', 'researcher');
   const n = sent.length; const v = await rt.advertisedModels();
   assert.deepEqual(v?.models, ['default', 'opus', 'fable', 'sonnet', 'haiku'], 'harvested from the refusal'); assert.match(v!.at, /^\d{4}-/, 'with a timestamp'); assert.equal(sent.length, n, 'no probe once a list is known');
   const rt2 = new ClaudeAcpRuntime({ gateway: {} as never, log, claudeExecutable: '/bin/false', claudeConfigDir: '/tmp/none' }) as unknown as typeof rt;
   rt2.command = async () => 'ACP error: unknown model claudebot-model-probe. Available models: default, opus, fable, sonnet, haiku';
-  assert.deepEqual((await rt2.advertisedModels())?.models, ['default', 'opus', 'fable', 'sonnet', 'haiku'], 'the startup probe harvests the list');
+  assert.deepEqual((await rt2.advertisedModels({ sessionKey: 'agent:coordinator:acp:9f' } as never))?.models, ['default', 'opus', 'fable', 'sonnet', 'haiku'], 'the startup probe harvests the list');
 });
 
 test('1: on save, a model the harvested list lacks is blocked in the connection\'s words; an unverified one passes with a note', async () => {
@@ -183,14 +184,48 @@ test('1: the harvested list expires after an hour, and a save naming a model the
   const rt = new ClaudeAcpRuntime({ gateway: {} as never, log, claudeExecutable: '/bin/false', claudeConfigDir: '/tmp/none' }) as unknown as { command: (m: string) => Promise<string>; advertisedModels: (o?: { probe?: boolean; fresh?: boolean }) => Promise<{ models: string[]; at: string } | null>; verified: { models: string[]; reply: string; at: string } | null };
   let list = 'default, opus, sonnet, haiku'; let probes = 0;
   rt.command = async () => { probes++; return `ACP error: unknown model. Available models: ${list}`; };
-  assert.deepEqual((await rt.advertisedModels())?.models, ['default', 'opus', 'sonnet', 'haiku']); await rt.advertisedModels(); assert.equal(probes, 1, 'cached while young');
+  const k = { sessionKey: 'agent:researcher:acp:1234' } as never;
+  assert.deepEqual((await rt.advertisedModels(k))?.models, ['default', 'opus', 'sonnet', 'haiku']); await rt.advertisedModels(k); assert.equal(probes, 1, 'cached while young');
   rt.verified!.at = new Date(Date.now() - MODEL_LIST_TTL_MS - 1000).toISOString(); list = 'default, opus, fable, sonnet, haiku';
-  assert.deepEqual((await rt.advertisedModels())?.models, ['default', 'opus', 'fable', 'sonnet', 'haiku'], 'an hour-old list is probed again'); assert.equal(probes, 2);
+  assert.deepEqual((await rt.advertisedModels(k))?.models, ['default', 'opus', 'fable', 'sonnet', 'haiku'], 'an hour-old list is probed again'); assert.equal(probes, 2);
   rt.command = async () => { probes++; return 'Usage: /acp model <model-id>'; }; rt.verified!.at = new Date(0).toISOString();
-  assert.ok((await rt.advertisedModels())?.models.includes('fable'), 'a probe that lists nothing keeps the older list');
+  assert.ok((await rt.advertisedModels(k))?.models.includes('fable'), 'a probe that lists nothing keeps the older list');
   // Save: the cached list lacks fable; a fresh probe lists it, so the save passes; when the fresh probe still lacks it, it is refused.
   const calls: Array<boolean> = []; let fresh = ['default', 'opus', 'fable', 'sonnet', 'haiku'];
   const gw = { advertisedModels: async (o?: { fresh?: boolean }) => { calls.push(!!o?.fresh); return o?.fresh ? { models: fresh, reply: `Available models: ${fresh.join(', ')}` } : { models: ['default', 'opus', 'sonnet', 'haiku'], reply: 'Available models: default, opus, sonnet, haiku' }; } };
   assert.deepEqual(await validateModel(gw, 'claude-fable-5-1'), { ok: true }); assert.deepEqual(calls, [false, true]);
   fresh = ['default', 'opus', 'sonnet', 'haiku']; const v = await validateModel(gw, 'claude-fable-5-1'); assert.equal(v.ok, false, 'refused only when the fresh probe still lacks it');
+});
+
+test('1: the model probe runs on the most recent real ACP session from the jobs table, never the control session; a session error is unverified', async () => {
+  const { setupBroker } = await import('./helpers-broker.ts');
+  const { latestAcpSession } = await import('../../src/runtime/model-check.ts');
+  const s = setupBroker(); const c = s.chat.create({ workspace_id: s.ws.id }); const t = s.chat.send(c.id, 'hi', s.defs).job;
+  assert.equal(latestAcpSession(s.db), null, 'no ACP session yet');
+  s.db.prepare("UPDATE jobs SET session_ref = 'agent:control:main', updated_at = '2026-10-14T10:00:00Z' WHERE id = ?").run(t.id);
+  assert.equal(latestAcpSession(s.db), null, 'the control session is not an ACP session');
+  s.db.prepare("UPDATE jobs SET session_ref = 'agent:researcher:acp:00aa11bb', updated_at = '2026-10-14T11:00:00Z' WHERE id = ?").run(t.id);
+  assert.equal(latestAcpSession(s.db), 'agent:researcher:acp:00aa11bb');
+  const rt = new ClaudeAcpRuntime({ gateway: {} as never, log, claudeExecutable: '/bin/false', claudeConfigDir: '/tmp/none' }) as unknown as { command: (m: string) => Promise<string>; advertisedModels: (o?: unknown) => Promise<{ models: string[]; reply: string } | null> };
+  const sent: string[] = []; rt.command = async (m) => { sent.push(m); throw new Error('ACP session not found: agent:researcher:acp:00aa11bb'); };
+  const v = await advertised(rt, { db: s.db }); assert.equal(v.verified, false, 'a session error is unverified, not a refusal'); assert.deepEqual(sent, ['/acp model claudebot-model-probe agent:researcher:acp:00aa11bb']);
+  rt.command = async (m) => { sent.push(m); return 'ACP error: unknown model claudebot-model-probe. Available models: default, opus, fable, sonnet, haiku'; };
+  const v2 = await advertised(rt, { db: s.db }); assert.equal(v2.verified, true); assert.ok(v2.models.includes('fable'));
+  assert.ok(sent.every((m) => !/agent:control:main/.test(m)), 'never probed on the control session');
+  const r = await startupModelCheck(s.db, s.store, rt as never, (id) => s.defs.previousModel(id)); assert.equal(r.verified, true);
+});
+
+test('1: with no ACP session at startup nothing is probed, and the first assistant turn harvests the list', async () => {
+  const rt = new ClaudeAcpRuntime({ gateway: {} as never, log, claudeExecutable: '/bin/false', claudeConfigDir: '/tmp/none' }) as unknown as { command: (m: string) => Promise<string>; advertisedModels: (o?: unknown) => Promise<{ models: string[] } | null>; probeOn: (k: string) => Promise<boolean>; ensureSession: () => Promise<string>; ensureTimeout: () => Promise<void>; verified: unknown };
+  const sent: string[] = []; rt.command = async (m) => { sent.push(m); return /claudebot-model-probe/.test(m) ? 'ACP error: unknown model. Available models: default, opus, fable, sonnet, haiku' : 'ok'; };
+  assert.equal(await rt.advertisedModels(), null); assert.equal(sent.length, 0, 'no session: no probe');
+  // The first turn: the runtime probes on the session it just spawned, before setting the assistant's model.
+  rt.ensureSession = async () => 'agent:researcher:acp:abcd'; rt.ensureTimeout = async () => {};
+  const gw = { connect: async () => {}, onEvent: () => () => {}, call: async () => { throw new Error('stop here'); } };
+  (rt as unknown as { o: { gateway: unknown } }).o.gateway = gw;
+  await (rt as unknown as { startTurn: (r: unknown) => Promise<unknown> }).startTurn({ jobId: 'j1', sessionRef: '', prompt: 'hi', cwd: '/tmp', timeoutMs: 60_000, model: 'claude-opus-5-5', role: 'researcher' }).catch(() => {});
+  assert.equal(sent[0], '/acp model claudebot-model-probe agent:researcher:acp:abcd', 'the first turn probes on its own ACP session');
+  assert.ok((await rt.advertisedModels())?.models.includes('fable'), 'the list is known after the first turn'); const n = sent.length;
+  await (rt as unknown as { startTurn: (r: unknown) => Promise<unknown> }).startTurn({ jobId: 'j2', sessionRef: '', prompt: 'hi', cwd: '/tmp', timeoutMs: 60_000, model: 'claude-opus-5-5', role: 'researcher' }).catch(() => {});
+  assert.equal(sent.slice(n).filter((m) => /claudebot-model-probe/.test(m)).length, 0, 'later turns do not probe again');
 });

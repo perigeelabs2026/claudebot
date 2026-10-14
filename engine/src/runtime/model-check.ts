@@ -15,19 +15,26 @@ import { teamLine } from '../cos/alerts.ts';
 export const ADVERTISED_MODELS = ['default', 'opus', 'sonnet', 'haiku'] as const;
 export const resolves = (model: string, advertised: readonly string[] = ADVERTISED_MODELS): boolean => advertised.map((a) => a.toLowerCase()).includes(acpModel(model).toLowerCase());
 
+/** The most recent real ACP session key (agent:<role>:acp:<uuid>) from the jobs table: the only kind of session `/acp model` lists models on. */
+export function latestAcpSession(db: DB | null | undefined): string | null {
+  if (!db) return null;
+  const r = db.prepare("SELECT COALESCE(CASE WHEN session_ref LIKE 'agent:%:acp:%' THEN session_ref END, CASE WHEN runtime_session_id LIKE 'agent:%:acp:%' THEN runtime_session_id END) AS k FROM jobs WHERE session_ref LIKE 'agent:%:acp:%' OR runtime_session_id LIKE 'agent:%:acp:%' ORDER BY updated_at DESC LIMIT 1").get() as { k: string | null } | undefined;
+  return r?.k ?? null;
+}
+
 /** The connection's own list, or the fallback list when it names none. */
-export async function advertised(runtime: Pick<ModelRuntime, 'advertisedModels'> | null | undefined, opts: { fresh?: boolean } = {}): Promise<{ models: readonly string[]; reply: string | null; verified: boolean }> {
-  try { const r = await runtime?.advertisedModels?.(opts.fresh ? { fresh: true } : undefined); if (r && r.models.length) return { models: r.models, reply: r.reply, verified: true }; } catch { /* the fallback list */ }
+export async function advertised(runtime: Pick<ModelRuntime, 'advertisedModels'> | null | undefined, opts: { fresh?: boolean; db?: DB | null } = {}): Promise<{ models: readonly string[]; reply: string | null; verified: boolean }> {
+  try { const sessionKey = latestAcpSession(opts.db); const r = await runtime?.advertisedModels?.(opts.fresh || sessionKey ? { ...(opts.fresh ? { fresh: true } : {}), ...(sessionKey ? { sessionKey } : {}) } : undefined); if (r && r.models.length) return { models: r.models, reply: r.reply, verified: true }; } catch { /* the fallback list */ }
   return { models: ADVERTISED_MODELS, reply: null, verified: false };
 }
 
 /** Whether a model may be saved on an assistant. Blocked only when the connection's own list (harvested from a refusal) lacks it;
  *  when the list is not known yet, it passes with a note ("could not verify"), never an alarm. */
-export async function validateModel(runtime: Pick<ModelRuntime, 'advertisedModels'> | null | undefined, model: string): Promise<{ ok: true; note?: string } | { ok: false; reason: string }> {
-  let a = await advertised(runtime);
+export async function validateModel(runtime: Pick<ModelRuntime, 'advertisedModels'> | null | undefined, model: string, db?: DB | null): Promise<{ ok: true; note?: string } | { ok: false; reason: string }> {
+  let a = await advertised(runtime, { db });
   if (resolves(model, a.models)) return { ok: true };
   // The cached list lacks it: ask the connection again before refusing (its list may have changed since it was cached).
-  if (a.verified) { a = await advertised(runtime, { fresh: true }); if (resolves(model, a.models)) return { ok: true }; }
+  if (a.verified) { a = await advertised(runtime, { fresh: true, db }); if (resolves(model, a.models)) return { ok: true }; }
   if (!a.verified) return { ok: true, note: `Could not verify "${model}" yet: the Claude connection has not listed its models. If it refuses it, this assistant falls back to its previous model and you are told.` };
   return { ok: false, reason: `The Claude connection does not offer "${model}" (it is sent as "${acpModel(model)}"). ${a.reply ? `It says: ${a.reply}` : `It offers: ${a.models.join(', ')}.`}` };
 }
@@ -54,7 +61,7 @@ export function reportModelProblem(db: DB, store: JobStore, p: { agent: string; 
 /** The startup check, after the gateway is healthy: with the connection's own list, each assistant whose model it lacks is reported
  *  (group and owner); without one, it is recorded only (an event and a log line), never an alarm. */
 export async function startupModelCheck(db: DB, store: JobStore, runtime: Pick<ModelRuntime, 'advertisedModels'> | null | undefined, previousModel: (agentId: string) => string): Promise<{ verified: boolean; problems: ModelProblem[] }> {
-  const a = await advertised(runtime);
+  const a = await advertised(runtime, { db });
   const problems = checkModelAliases(db, previousModel, a.models);
   if (a.verified) for (const p of problems) reportModelProblem(db, store, { ...p, reason: a.reply ? `it says: ${a.reply}` : 'not one of the models it offers' });
   else if (problems.length) store.event(null, 'supervisor', 'model.unverified', { models: problems.map((p) => ({ agent: p.agent, model: p.model })), note: 'the connection has not listed its models; checked again on the next refusal' });
