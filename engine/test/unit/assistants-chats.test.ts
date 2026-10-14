@@ -590,3 +590,11 @@ test('ask-back guard: a reply that ends by asking whether to do team work is bou
   const t2 = s.chat.send(d.id, 'Fill the application', s.defs).job; assert.equal(await run(s, t2.id), 'completed');
   assert.ok(!s.db.prepare("SELECT 1 FROM jobs WHERE idempotency_key = ?").get(`engine:askback:${t2.id}`), 'a salary question is the owner\'s to answer');
 });
+
+test('a status report that hands the owner answers the team can find is bounced back (alternatives first, memory first); the rule is in every prompt', async () => {
+  const s = setup([{ kind: 'ok', text: 'The first role is applied. The second needs you to solve the CAPTCHA, and the other eight roles need answers only you can give.' }, { kind: 'ok', text: 'Answered from the resume and saved answers; 6 submitted.' }]);
+  const d = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] });
+  const { job } = s.chat.send(d.id, 'How are the applications going?', s.defs); assert.equal(await run(s, job.id), 'completed');
+  assert.match(s.runtime.history[0].prompt, /try the alternatives yourself before reporting/); assert.match(s.runtime.history[0].prompt, /Report "stuck" only after that, and list what you tried/);
+  const bounce = s.db.prepare("SELECT id, objective FROM jobs WHERE idempotency_key = ?").get(`engine:askback:${job.id}`) as { id: string; objective: string }; assert.ok(bounce); assert.match(bounce.objective, /application-answers\.md/);
+});

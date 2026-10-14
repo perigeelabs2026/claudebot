@@ -20,6 +20,20 @@ const SSH_HOST = `lima-${NAME}`;
 const EXCLUDE = ['--exclude', '.mcp.json', '--exclude', '.claudebot/', '--exclude', '.claude/', '--exclude', '/shared'];
 /** The team's shared folder inside the computer: every task folder gets it as ./shared (same files for every assistant). */
 export const VM_SHARED = `${VM_WORKSPACES}/_shared`;
+/** Seeded once as ./shared/profile/application-answers.md; never overwritten. */
+export const APPLICATION_ANSWERS_TEMPLATE = `# Application answers
+
+Assistants answer job-application questions from your resume, memory and this file. Fill in what you want them to use; leave a line blank to be asked.
+
+- Desired salary / pay range:
+- Work authorization / sponsorship needed:
+- Willing to relocate:
+- Earliest start date:
+- Quota attainment:
+- Stack rank:
+- Pronouns (optional):
+- Other standard answers:
+`;
 
 /** The VM path of a host task folder; only folders under the engine's workspaces root are ever mapped. */
 export function vmPath(hostWorkspaces: string, hostDir: string): string {
@@ -102,7 +116,8 @@ export class ComputerRuntime implements ModelRuntime {
     try { vmDir = vmPath(this.o.hostWorkspaces, hostDir); } catch (e) { return { ok: false, category: 'access_denied', message: (e as Error).message, retryable: false } as TurnResult; }
     const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
     try {
-      await this.ssh(`mkdir -p ${q(vmDir)}/.claudebot ${q(VM_SHARED)} && chmod 700 ${q(vmDir)}/.claudebot && ln -sfn ${q(VM_SHARED)} ${q(vmDir)}/shared`);
+      const answers = `${VM_SHARED}/profile/application-answers.md`;   // an empty template the owner fills in once; assistants answer forms from it
+      await this.ssh(`mkdir -p ${q(vmDir)}/.claudebot ${q(VM_SHARED)}/profile && chmod 700 ${q(vmDir)}/.claudebot && ln -sfn ${q(VM_SHARED)} ${q(vmDir)}/shared && { [ -e ${q(answers)} ] || cat > ${q(answers)}; }`, APPLICATION_ANSWERS_TEMPLATE);
       if (fs.existsSync(hostDir)) await this.rsync(`${hostDir}/`, `${SSH_HOST}:${vmDir}/`);
       const key = capabilityKey(hostDir); const cap = key ? readCapability(this.o.runDir, key) : null;
       if (cap) {

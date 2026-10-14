@@ -25,6 +25,7 @@ test('a turn: copy in, capability + bridge config written in the VM, run there w
   const rs = calls.filter((c) => c.cmd === 'rsync'); assert.equal(rs.length, 2); assert.ok(rs[0].args.at(-1)!.endsWith(`${VM_WORKSPACES}/general/tasks/job-abc/`)); assert.ok(rs[1].args.at(-1) === `${dir}/`, 'copied back to the Mac');
   for (const x of ['.mcp.json', '.claudebot/', '.claude/', '/shared']) assert.ok(rs[0].args.includes(x), `never copies ${x}`);
   assert.ok(calls.some((c) => c.cmd === 'ssh' && /ln -sfn '[^']*_shared' '[^']*job-abc'\/shared/.test(c.args.at(-1)!)), 'the team folder is linked in as ./shared');
+  const seed = calls.find((c) => c.cmd === 'ssh' && /profile\/application-answers\.md' \] \|\| cat >/.test(c.args.at(-1)!))!; assert.ok(seed, 'an empty application-answers template is seeded, never overwritten'); assert.match(seed.input!, /^# Application answers/); assert.ok(!/\d+%/.test(seed.input!), 'the template carries no personal answers');
   const capWrite = calls.find((c) => c.cmd === 'ssh' && /capability\.json/.test(c.args.at(-1)!))!; assert.deepEqual(JSON.parse(capWrite.input!), { token: cap.token, job_id: 'job-abc', key: 'job-abc' });
   const mcp = JSON.parse(calls.find((c) => c.cmd === 'ssh' && /\.mcp\.json/.test(c.args.at(-1)!))!.input!); assert.equal(mcp.mcpServers.claudebot.env.CLAUDEBOT_ENGINE, 'http://host.lima.internal:48311');
   assert.match(rt.describe().route, /in the assistants' computer/);
