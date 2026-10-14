@@ -1,7 +1,7 @@
 /** The single model-runtime seam. Only `claude-acp` is enabled in this build. */
 export type RuntimeId = 'claude-acp' | 'claude-work' | 'anthropic-api' | 'bedrock' | 'vertex' | 'simulated';
 
-export type FailureCategory = 'quota_exhausted' | 'rate_limited' | 'auth_required' | 'access_denied' | 'transient' | 'cancelled' | 'hung' | 'crashed' | 'internal';
+export type FailureCategory = 'quota_exhausted' | 'rate_limited' | 'auth_required' | 'access_denied' | 'transient' | 'cancelled' | 'hung' | 'crashed' | 'internal' | 'model_refused';
 
 export interface TurnRequest {
   jobId: string;
@@ -39,6 +39,8 @@ export interface ModelRuntime {
   cancel(sessionRef: string): Promise<void>;
   /** Close a persistent session and free its processes (adapter + model CLI). Optional for runtimes without sessions. */
   closeSession?(sessionRef: string): Promise<void>;
+  /** The models the Claude connection advertises, in its own words (null when it does not list them). */
+  advertisedModels?(): Promise<{ models: string[]; reply: string } | null>;
   /** Read-only inspection of a known owned session; no model turn or setting changes. */
   inspectSession?(sessionRef: string): Promise<{ text: string; observed_at: string }>;
 }

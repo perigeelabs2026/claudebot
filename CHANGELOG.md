@@ -46,6 +46,15 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Assistants can open zip and tar archives you give them: files are extracted into a new folder inside the task. Links, paths that escape the folder, and oversized archives are refused. Documents and PDFs also get text copies the assistants can read.
 
 ### Fixed
+- No more silent idling. These problems now post one line in the team group; the ones that concern the owner also go to Telegram, held during quiet hours.
+  - A refused model is its own failure class and is never retried. The turn falls back to the assistant's last accepted model, and that model is not requested again for an hour. Models are checked against the Claude connection's own list at startup and whenever an assistant is saved, and a model the connection doesn't offer is refused with the connection's own words.
+  - Three failures by one assistant within 30 minutes pause that assistant's queue until a turn works, its model is changed, or 30 minutes pass.
+  - Routine results and failures are posted to the team group.
+  - A task that keeps crashing its worker stops after the third loss and goes through the retry budget.
+  - The team group is told when a usage or memory pause starts and when it ends.
+  - A task left waiting 20 minutes behind busy workers is named, along with the work it waits behind.
+  - A plan limit with no reset time is raised with the owner after two hours.
+  - A decision left unanswered for two hours is asked once more.
 - Fable turns run. `claude-fable-5-1` now maps to the `fable` alias the Claude connection advertises; before this, every Fable turn was refused. A model the connection refuses now falls back to the assistant's previous model for that turn and is posted to the team group, where it used to fail silently. At startup, ClaudeBot checks that every configured model resolves.
 - A Next, Continue or Save click no longer counts as confirming anything. Only a committed Submit, Confirm, Verify, Apply or Send on a page about the same subject does.
 - Opening or reading a page no longer counts as verifying it. A "verified" or "confirmed" claim needs a verification record, an application record, or a committed action on a page about the same subject.

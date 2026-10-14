@@ -85,6 +85,8 @@ export class JobStore {
       const depClause = `AND NOT EXISTS (SELECT 1 FROM json_each(j.depends_on) d LEFT JOIN jobs p ON p.id = d.value WHERE p.id IS NULL OR p.state != 'completed')`
         // An assistant that is turned off keeps its work queued (a note sent while it was paused is delivered when it is turned back on).
         + ` AND NOT EXISTS (SELECT 1 FROM agent_definitions ad WHERE ad.id = j.agent_role AND ad.enabled = 0)`
+        // An assistant paused after a failure streak (cos/watch.ts) keeps its work queued until the pause ends or a turn succeeds.
+        + ` AND NOT EXISTS (SELECT 1 FROM runtime_state ps WHERE ps.key = 'agent.paused.' || j.agent_role AND json_extract(ps.value, '$.until') > '${t}')`
         // One persistent session per assistant per conversation: its turns run strictly one after another, oldest first.
         + ` AND NOT (j.kind = 'chat.turn' AND j.conversation_id IS NOT NULL AND EXISTS (SELECT 1 FROM jobs x WHERE x.kind = 'chat.turn' AND x.conversation_id = j.conversation_id AND x.agent_role = j.agent_role AND x.id != j.id AND (x.state IN ('leased','running') OR (x.state IN ('queued','retry_scheduled') AND (x.created_at < j.created_at OR (x.created_at = j.created_at AND x.rowid < j.rowid))))))`;   /* an older turn waiting to retry (e.g. interrupted by an engine restart) keeps its place: a later message never jumps ahead of it */
       const sql = opts.fair
@@ -119,6 +121,7 @@ export class JobStore {
 
   /** Return expired leases to the queue. Stage attempt is preserved; the next worker resumes from the last verified checkpoint. */
   reclaimExpired(actor = 'supervisor'): Job[] {
+    const RECLAIM_LIMIT = 3;
     const t = this.clock();
     const rows = this.db.prepare(`SELECT id, lease_owner, lease_expires_at FROM jobs WHERE state IN ('leased','running') AND lease_expires_at IS NOT NULL AND lease_expires_at < ?`).all(t) as Array<{ id: string; lease_owner: string; lease_expires_at: string }>;
     const out: Job[] = [];
@@ -126,7 +129,17 @@ export class JobStore {
       this.db.exec('BEGIN IMMEDIATE');
       try {
         const u = this.db.prepare(`UPDATE jobs SET state = 'queued', lease_owner = NULL, lease_expires_at = NULL, lease_heartbeat_at = NULL, next_action = 'resume from last verified checkpoint', updated_at = ? WHERE id = ? AND lease_expires_at = ? AND state IN ('leased','running')`).run(t, r.id, r.lease_expires_at);
-        if (u.changes === 1) { this.event(r.id, actor, 'lease.reclaimed', { previous_owner: r.lease_owner, expired_at: r.lease_expires_at }); out.push(this.get(r.id)!); }
+        if (u.changes === 1) {
+          this.event(r.id, actor, 'lease.reclaimed', { previous_owner: r.lease_owner, expired_at: r.lease_expires_at });
+          // A task that keeps losing its worker (a crash loop) is not re-leased forever: the third loss goes through the retry budget,
+          // which records the failure (and, when spent, fails it where the team and the owner see it).
+          const lost = (this.db.prepare("SELECT COUNT(*) AS n FROM job_events WHERE job_id = ? AND type = 'lease.reclaimed'").get(r.id) as { n: number }).n;
+          if (lost >= RECLAIM_LIMIT) {
+            this.db.prepare("UPDATE jobs SET state = 'running' WHERE id = ? AND state = 'queued'").run(r.id);   // through running, so the retry transition is legal
+            this.failRetryable(r.id, actor, `the worker running this task stopped ${lost} times (crash loop)`);
+          }
+          out.push(this.get(r.id)!);
+        }
         this.db.exec('COMMIT');
       } catch (e) { this.db.exec('ROLLBACK'); throw e; }
     }

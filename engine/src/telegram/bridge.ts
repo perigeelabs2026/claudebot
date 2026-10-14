@@ -218,6 +218,16 @@ export class TelegramBridge {
         db.prepare('INSERT OR IGNORE INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?,?,?,?,?)').run(`blocker:${j.id}`, b.chat_id, sent?.message_id ?? null, skip ? (quietNow ? 'held-quiet' : 'skipped-test') : 'blocker', now()); if (sent) n++;
       }
     }
+    // Owner alerts the engine posted to the team group (a refused model, a failure streak, a limit with no reset): one plain line each,
+    // held during quiet hours (cos/alerts.ts teamLine owner: true).
+    if (!onlyIds) {
+      const quietNow = String((rs(db, 'telegram.quiet_until') as { until?: string } | null)?.until ?? '') > now();
+      const alerts = db.prepare("SELECT m.id, m.content FROM messages m WHERE json_extract(m.meta, '$.owner_alert') = 1 AND m.created_at >= ? AND NOT EXISTS (SELECT 1 FROM telegram_outbox o WHERE o.message_id = 'alert:' || m.id) ORDER BY m.created_at LIMIT 10").all(since) as Array<{ id: string; content: string }>;
+      for (const al of alerts) {
+        const sent = quietNow ? null : await this.api<{ message_id: number }>('sendMessage', { chat_id: b.chat_id, text: al.content.slice(0, 3500) }).catch(() => null);
+        db.prepare('INSERT OR IGNORE INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?,?,?,?,?)').run(`alert:${al.id}`, b.chat_id, sent?.message_id ?? null, quietNow ? 'held-quiet' : 'alert', now()); if (sent) n++;
+      }
+    }
     const rows = db.prepare(`SELECT m.id, m.conversation_id, m.kind, m.role, m.sender, m.content, m.approval_id, c.title, c.type FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE ${onlyIds ? `m.id IN (${onlyIds.map(() => '?').join(',')}) AND ? <> ''` : 'm.created_at >= ?'} AND ((m.role = 'assistant' AND m.kind = 'text' AND m.sender = 'coordinator' AND COALESCE(json_extract(m.meta, '$.update'), 0) = 0 AND EXISTS (SELECT 1 FROM jobs jj JOIN telegram_outbox oi ON oi.message_id = json_extract(jj.inputs, '$.message_id') AND oi.kind = 'inbound' WHERE jj.id = m.job_id)) OR m.kind = 'decision') AND NOT EXISTS (SELECT 1 FROM telegram_outbox o WHERE o.message_id = m.id) ORDER BY m.created_at LIMIT ?`).all(...(onlyIds ?? []), since, limit) as Array<{ id: string; conversation_id: string; kind: string; role: string; sender: string; content: string; approval_id: string | null; title: string; type: string }>;
     // Quiet hours (runtime_state telegram.quiet_until) and test projects (workspace policies.telegram === false): nothing is sent;
     // the notice is marked held so it never goes later either.

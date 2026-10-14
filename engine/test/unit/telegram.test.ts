@@ -254,3 +254,20 @@ test('T12: a blocker the answer bank can answer (quota attainment) never pings t
   assert.equal(f.calls.filter((x) => x.method === 'sendMessage').length, 0);
   f.close();
 });
+
+test('owner alerts (a refused model, a failure streak, a lapsed limit, a waiting decision) reach Telegram once, held during quiet hours', async () => {
+  const { teamLine } = await import('../../src/cos/alerts.ts');
+  const f = await fakeTelegram(); const s = setup(f.base); saveToken(s.secrets, TOKEN);
+  const { code } = newPairingCode(s.db); f.push(msg(1, 777, `/start ${code}`)); await s.bridge.cycle(0);
+  s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] });
+  assert.equal(teamLine(s.db, s.store, { key: 'model:x', owner: true, text: 'Researcher\'s model "claude-x" is not accepted by the Claude connection.' }), true);
+  assert.equal(teamLine(s.db, s.store, { key: 'routine:y', text: 'Researcher finished the routine "digest".' }), true);
+  const before = f.calls.filter((c) => c.method === 'sendMessage').length; await s.bridge.flush(); await s.bridge.flush();
+  const sent = f.calls.filter((c) => c.method === 'sendMessage').slice(before).map((c) => String(c.body.text));
+  assert.deepEqual(sent, ['Researcher\'s model "claude-x" is not accepted by the Claude connection.'], 'owner lines once; team-only lines never');
+  s.db.prepare("INSERT INTO runtime_state(key, value, evidence, observed_at) VALUES ('telegram.quiet_until', ?, '{}', ?)").run(JSON.stringify({ until: new Date(Date.now() + 3600_000).toISOString() }), new Date().toISOString());
+  teamLine(s.db, s.store, { key: 'streak:z', owner: true, text: 'Researcher failed 3 times.' });
+  const n = f.calls.length; await s.bridge.flush(); assert.equal(f.calls.filter((c, i) => i >= n && c.method === 'sendMessage' && /failed 3 times/.test(String(c.body.text))).length, 0, 'nothing wakes the owner');
+  assert.equal((s.db.prepare("SELECT kind FROM telegram_outbox WHERE message_id LIKE 'alert:%' ORDER BY rowid DESC LIMIT 1").get() as { kind: string }).kind, 'held-quiet');
+  f.close();
+});

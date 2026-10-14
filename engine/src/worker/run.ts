@@ -321,7 +321,7 @@ Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-�
         // Opt-in: Settings key replan_model (or CLAUDEBOT_REPLAN_MODEL), e.g. "claude-fable-5-1" when your plan includes it; unset = no swap.
         const replanModel = String((deps.db.prepare("SELECT value FROM settings WHERE key = 'replan_model'").get() as { value: string } | undefined)?.value ?? process.env.CLAUDEBOT_REPLAN_MODEL ?? '').replace(/^"|"$/g, '').trim();
         const turnModel = replan && replanModel ? replanModel : agent?.model;
-        r = await deps.runtime.startTurn({ jobId: job.id, label: sessKey, sessionRef: sessRef ?? sessKey, role: agentId, cwd: ctx.workspace, prompt, resume, model: turnModel, fallbackModel: turnModel !== agent?.model && agent?.model ? agent.model : ctx.defs.previousModel(agentId), timeoutMs: Number(process.env.CLAUDEBOT_STAGE_TIMEOUT_MS ?? (stage.timeoutMs ?? 10 * 60_000)), onHeartbeat: ctx.beat, onSession: (key) => { if (chat.member(conv.id, agentId) && key !== chat.memberSession(conv.id, agentId)) bind(key); else if (!chat.member(conv.id, agentId)) store.patch(job.id, { session_ref: key, runtime_session_id: key }); }, signal: ctx.signal });
+        r = await withModelFallback(deps, job.id, agent, turnModel, turnModel !== agent?.model && agent?.model ? agent.model : ctx.defs.previousModel(agentId), (model, fallbackModel) => deps.runtime.startTurn({ jobId: job.id, label: sessKey, sessionRef: sessRef ?? sessKey, role: agentId, cwd: ctx.workspace, prompt, resume, model, fallbackModel, timeoutMs: Number(process.env.CLAUDEBOT_STAGE_TIMEOUT_MS ?? (stage.timeoutMs ?? 10 * 60_000)), onHeartbeat: ctx.beat, onSession: (key) => { if (chat.member(conv.id, agentId) && key !== chat.memberSession(conv.id, agentId)) bind(key); else if (!chat.member(conv.id, agentId)) store.patch(job.id, { session_ref: key, runtime_session_id: key }); }, signal: ctx.signal }));
       } finally {
         issueCapability(deps.runDir, job, ctx.workspace, [], 6 * 3600, sessKey);   // between turns the session can call nothing
         // A router that is not a member has no membership to keep its session on: close it now (also when the turn threw).
@@ -378,6 +378,7 @@ Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-�
         case 'rate_limited': return { kind: 'retry', reason: `rate limited: ${r.message}` };
         case 'auth_required': return { kind: 'wait_auth', identity: 'claude', operatorAction: 'Sign in to continue: run `CLAUDE_CONFIG_DIR=$HOME/.claudebot/claude claude auth login --claudeai` in Terminal. The reply resumes automatically.' };
         case 'access_denied': return { kind: 'fail', reason: r.message, operatorAction: 'Claude reported an access problem that signing in does not fix. Check the Claude account, then send the message again.', code: 'CLAUDE_ACCESS_DENIED' };
+        case 'model_refused': return { kind: 'fail', reason: r.message, operatorAction: `The Claude connection refused this assistant's model and its fallback. Pick another model in Edit assistant > Advanced, then send the message again.`, code: 'MODEL_REFUSED' };
         default: return { kind: 'retry', reason: `${r.category}: ${r.message}` };
       }
     }
@@ -411,7 +412,7 @@ Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-�
       if (turnCwd === ctx.workspace) { const sk = installSkills(turnCwd, agentId); if (sk.installed.length || sk.refused.length) store.event(job.id, 'engine', 'skills.prepared', sk); }   // reviewed skills only; never into a selected repository
       if (directions) markDirectionsDelivered(deps, job.id, `step ${stage.name}`);
       const resume = !!job.session_ref;
-      const r: TurnResult = await deps.runtime.startTurn({ jobId: job.id, sessionRef: job.session_ref ?? job.id, role: agentId, cwd: turnCwd, prompt, resume, model: agent?.model, fallbackModel: ctx.defs.previousModel(agentId), timeoutMs: Number(process.env.CLAUDEBOT_STAGE_TIMEOUT_MS ?? (stage.timeoutMs ?? 15 * 60_000)), onHeartbeat: ctx.beat, onSession: (key) => { if (key !== store.get(job.id)?.session_ref) store.patch(job.id, { session_ref: key, runtime_session_id: key }); }, signal: ctx.signal });
+      const r: TurnResult = await withModelFallback(deps, job.id, agent, agent?.model, ctx.defs.previousModel(agentId), (model, fallbackModel) => deps.runtime.startTurn({ jobId: job.id, sessionRef: job.session_ref ?? job.id, role: agentId, cwd: turnCwd, prompt, resume, model, fallbackModel, timeoutMs: Number(process.env.CLAUDEBOT_STAGE_TIMEOUT_MS ?? (stage.timeoutMs ?? 15 * 60_000)), onHeartbeat: ctx.beat, onSession: (key) => { if (key !== store.get(job.id)?.session_ref) store.patch(job.id, { session_ref: key, runtime_session_id: key }); }, signal: ctx.signal }));
       if (r.runtimeSessionId && r.runtimeSessionId !== job.session_ref) store.patch(job.id, { session_ref: r.runtimeSessionId, runtime_session_id: r.runtimeSessionId });
       noteModelIssue(deps, job.id, agent, r);
       if (r.ok) {
@@ -434,6 +435,7 @@ Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-�
         case 'rate_limited': return { kind: 'retry', reason: `rate limited: ${r.message}` };
         case 'auth_required': return { kind: 'wait_auth', identity: 'claude', operatorAction: 'Reconnect Claude: run `CLAUDE_CONFIG_DIR=$HOME/.claudebot/claude claude auth login --claudeai` in Terminal, then this job resumes automatically.' };
         case 'access_denied': return { kind: 'fail', reason: r.message, operatorAction: 'Claude reported an access problem that login does not fix (organization verification or provider credential). Check the Claude account, then re-queue.', code: 'CLAUDE_ACCESS_DENIED' };
+        case 'model_refused': return { kind: 'fail', reason: r.message, operatorAction: `The Claude connection refused this assistant's model and its fallback. Pick another model in Edit assistant > Advanced, then re-queue.`, code: 'MODEL_REFUSED' };
         case 'cancelled': case 'hung': return { kind: 'retry', reason: `turn ${r.category}: ${r.message}` };
         case 'crashed': case 'transient': case 'internal': default: return { kind: 'retry', reason: `${r.category}: ${r.message}` };
       }
@@ -500,9 +502,31 @@ export function dependencyInputs(db: DB, job: Job): string {
 }
 
 /** A refused model is never silent: the turn's fallback (or the refusal) is recorded and posted to the team group. */
-function noteModelIssue(deps: RunDeps, jobId: string, agent: { id: string; name: string } | undefined, r: TurnResult): void {
+function noteModelIssue(deps: RunDeps, jobId: string, agent: { id: string; name: string; model?: string } | undefined, r: TurnResult): void {
+  // A turn that ran: its model is the assistant's last accepted one, and any failure-streak pause ends (cos/watch.ts).
+  if (r.ok && agent) {
+    const used = r.modelFallback?.used ?? agent.model;
+    const put = deps.db.prepare("INSERT INTO runtime_state(key, value, evidence, observed_at) VALUES (?, ?, 'turn succeeded', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, evidence=excluded.evidence, observed_at=excluded.observed_at");
+    const t = new Date().toISOString();
+    if (used) put.run(`agent.accepted_model.${agent.id}`, JSON.stringify(used), t);
+    put.run(`agent.last_ok.${agent.id}`, JSON.stringify(t), t);
+    deps.db.prepare('DELETE FROM runtime_state WHERE key = ?').run(`agent.paused.${agent.id}`);
+  }
   const issue = r.modelFallback ? { model: r.modelFallback.requested, fallback: r.modelFallback.used, reason: r.modelFallback.reason } : !r.ok && r.modelRefused ? { model: r.modelRefused.model, fallback: null, reason: r.modelRefused.reason } : null;
   if (!issue || !agent) return;
   deps.store.event(jobId, 'engine', r.ok ? 'model.fallback' : 'model.refused', { agent: agent.id, ...issue });
   reportModelProblem(deps.db, deps.store, { agent: agent.id, name: agent.name, model: issue.model, fallback: issue.fallback, reason: issue.reason.replace(/^The model "[^"]*" was not accepted: /, '').slice(0, 160), jobId });
+}
+
+/** A model the connection refuses at turn time ("was not accepted", "did not advertise that model") must not retry for minutes and fail
+ *  quietly: the turn runs once more on the fallback model, the refusal is recorded and the team group and the owner are told. */
+const MODEL_REFUSED_TEXT = /was not accepted|did not advertise that model|MODEL_REFUSED|unknown model/i;
+export async function withModelFallback(deps: RunDeps, jobId: string, agent: { id: string; name: string } | undefined, model: string | undefined, fallback: string | undefined, start: (model: string | undefined, fallback: string | undefined) => Promise<TurnResult>): Promise<TurnResult> {
+  const r = await start(model, fallback);
+  if (r.ok || !model || !fallback || fallback === model || !(r.category === 'model_refused' || MODEL_REFUSED_TEXT.test(r.message)) || r.modelFallback) return r;
+  const reason = r.message.replace(/^The model "[^"]*" was not accepted: /, '').replace(/\s+/g, ' ').slice(0, 160);
+  deps.store.event(jobId, 'engine', 'model.refused', { agent: agent?.id ?? null, model, fallback, message: r.message.slice(0, 300) });
+  if (agent) reportModelProblem(deps.db, deps.store, { agent: agent.id, name: agent.name, model, fallback, reason, jobId });
+  const r2 = await start(fallback, undefined);
+  return r2.ok ? { ...r2, modelFallback: { requested: model, used: fallback, reason } } : r2;
 }

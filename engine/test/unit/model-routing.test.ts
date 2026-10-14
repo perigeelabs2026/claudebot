@@ -24,8 +24,10 @@ test('model ids map to the aliases the ACP agent advertises (verified live: haik
   assert.deepEqual(AGENT_MODELS, ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-1']);
 });
 
-test('every turn carries its assistant\'s model; a refused model fails the turn instead of running on another', () => {
-  const run = src('src/worker/run.ts'); assert.equal((run.match(/deps\.runtime\.startTurn\(\{[^\n]*model: (agent\?\.model|turnModel),/g) || []).length, 2, 'chat turns and workflow stages both pass the model');
+test('every turn carries its assistant\'s model; a refused model falls back once, recorded and announced', () => {
+  const run = src('src/worker/run.ts');
+  assert.match(run, /withModelFallback\(deps, job\.id, agent, turnModel, /, 'chat turns pass their model (with a fallback if it is refused)');
+  assert.match(run, /withModelFallback\(deps, job\.id, agent, agent\?\.model, ctx\.defs\.previousModel\(agentId\)/, 'workflow stages pass their model (with a fallback if it is refused)');
   assert.match(run, /const turnModel = replan && replanModel \? replanModel : agent\?\.model;/, 'the lead re-plans on the opt-in replan_model when delegated work came back blocked or partial'); assert.match(run, /key = 'replan_model'/);
   const acp = src('src/runtime/claude-acp.ts');
   assert.match(acp, /if \(!req\.probeOnly\) modelFallback = await this\.ensureModel\(sessionKey, req\.model, req\.fallbackModel\);/);

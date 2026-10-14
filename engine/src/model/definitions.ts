@@ -62,12 +62,15 @@ export class Definitions {
 
   // ---- agents ----
   listAgents(opts: { includeDisabled?: boolean } = {}): AgentDef[] { return (this.db.prepare(`SELECT * FROM agent_definitions ${opts.includeDisabled ? '' : 'WHERE enabled = 1'} ORDER BY is_system DESC, CASE id WHEN 'coordinator' THEN 0 WHEN 'researcher' THEN 1 WHEN 'reviewer' THEN 2 WHEN 'browser_operator' THEN 3 WHEN 'builder' THEN 4 ELSE 9 END, created_at, id`).all() as Record<string, unknown>[]).map(rowToAgent); }   // stable order: renaming an assistant never moves it
-  /** The model an assistant ran on before its current one (a refused model falls back to it), else its built-in default, else Sonnet. */
+  /** The model a refused model falls back to: the last model the connection accepted for this assistant, else the one it ran on before
+   *  its current one, else its built-in default, else Sonnet. */
   previousModel(id: string): string {
     const cur = this.getAgent(id)?.model;
     const r = this.db.prepare('SELECT value FROM runtime_state WHERE key = ?').get(`agent.previous_model.${id}`) as { value: string } | undefined;
     const prev = (() => { try { return r ? String(JSON.parse(r.value)) : ''; } catch { return ''; } })();
-    for (const m of [prev, SYSTEM_MODEL[id], 'claude-sonnet-5-5']) if (m && m !== cur) return m;
+    const ok = this.db.prepare('SELECT value FROM runtime_state WHERE key = ?').get(`agent.accepted_model.${id}`) as { value: string } | undefined;
+    const accepted = (() => { try { return ok ? String(JSON.parse(ok.value)) : ''; } catch { return ''; } })();
+    for (const m of [accepted, prev, SYSTEM_MODEL[id], 'claude-sonnet-5-5']) if (m && m !== cur) return m;
     return 'claude-haiku-5-5';
   }
   getAgent(id: string): AgentDef | undefined { const r = this.db.prepare('SELECT * FROM agent_definitions WHERE id = ?').get(id) as Record<string, unknown> | undefined; return r ? rowToAgent(r) : undefined; }

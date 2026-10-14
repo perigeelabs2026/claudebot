@@ -21,6 +21,8 @@ export function classifyFailure(input: { errorKind?: string | null; message?: st
   const d = input.detail ?? {};
   const prf = String((d as Record<string, unknown>).providerRuntimeFailureKind ?? (d as Record<string, unknown>).failoverReason ?? '').toLowerCase();
   const lower = msg.toLowerCase();
+  // A model the connection refuses never succeeds on retry: not retryable; the worker falls back or reports it (runtime/model-check.ts).
+  if (kind.includes('model_refused') || /\bmodel\b[^.]{0,80}\b(was not accepted|unknown model|not available|not supported)\b|\bunknown model\b|did not advertise that model/.test(lower)) return { category: 'model_refused', retryable: false, resetAt: null };
   if (kind.includes('quota') || prf.includes('quota') || /usage limit|hit your limit|limit reached|out of .*credits|plan limit/.test(lower)) {
     return { category: 'quota_exhausted', retryable: true, resetAt: parseResetAt(msg) };
   }
@@ -166,12 +168,25 @@ export class ClaudeAcpRuntime implements ModelRuntime {
   /** Each assistant runs on its own model (Edit assistant > Advanced). Set with the documented `/acp model <id> <session>` control
    *  before the turn; if the backend refuses the model, the turn fails and says so rather than running on another model. */
   private models = new Map<string, string>();
+  private refusedModels = new Map<string, { until: number; reason: string }>();
+  /** The models the connection lists (`/acp model` with no arguments), with its reply; null when the reply names none. */
+  async advertisedModels(): Promise<{ models: string[]; reply: string } | null> {
+    const reply = await this.command('/acp model', 20_000).catch(() => '');
+    const models = [...new Set((reply.match(/\b(default|opus|fable|sonnet|haiku|claude-[a-z0-9.-]+(?:\[1m\])?)\b/gi) ?? []).map((m) => m.toLowerCase()))];
+    return models.length ? { models, reply: redact(reply).replace(/\s+/g, ' ').slice(0, 300) } : null;
+  }
   private async ensureModel(sessionKey: string, model: string | undefined, fallback?: string): Promise<ModelFallback | null> {
     if (!model || this.models.get(sessionKey) === model) return null;
     const refused = (reply: string) => /ACP error|unknown|invalid|not (available|allowed|supported|found)|unsupported|usage:/i.test(reply);
-    const reply = await this.command(`/acp model ${acpModel(model)} ${sessionKey}`, 20_000);
-    if (!refused(reply)) { this.models.set(sessionKey, model); this.o.log.info('acp session model set', { sessionKey, model, reply: reply.slice(0, 120) }); return null; }
-    const reason = redact(reply).replace(/\s+/g, ' ').slice(0, 200);
+    // A model refused in the last hour is not requested again: the turn goes straight to the fallback.
+    const cachedKey = `${sessionKey}|${model}`; const cached = this.refusedModels.get(cachedKey);
+    let reason: string;
+    if (cached && cached.until > Date.now()) reason = cached.reason;
+    else {
+      const reply = await this.command(`/acp model ${acpModel(model)} ${sessionKey}`, 20_000);
+      if (!refused(reply)) { this.refusedModels.delete(cachedKey); this.models.set(sessionKey, model); this.o.log.info('acp session model set', { sessionKey, model, reply: reply.slice(0, 120) }); return null; }
+      reason = redact(reply).replace(/\s+/g, ' ').slice(0, 200); this.refusedModels.set(cachedKey, { until: Date.now() + 3600_000, reason });
+    }
     // A refused model falls back to the assistant's previous model for this turn (never silently: the result carries it and the team is told).
     if (fallback && fallback !== model) {
       if (this.models.get(sessionKey) === fallback) return { requested: model, used: fallback, reason };
@@ -242,7 +257,7 @@ export class ClaudeAcpRuntime implements ModelRuntime {
       const err = e as GatewayError;
       const c = classifyFailure({ errorKind: err.code, message: err.message });
       const category = c.category === 'internal' && err instanceof GatewayError && err.retryable ? 'transient' : c.category;
-      return { ok: false, category, message: err.message, resetAt: c.resetAt, retryable: true, runtimeSessionId: sessionKey, ...(err instanceof GatewayError && err.code === 'MODEL_REFUSED' ? { modelRefused: { model: String(req.model), reason: err.message } } : {}) };
+      return { ok: false, category, message: err.message, resetAt: c.resetAt, retryable: category !== 'model_refused', runtimeSessionId: sessionKey, ...(err instanceof GatewayError && err.code === 'MODEL_REFUSED' ? { modelRefused: { model: String(req.model), reason: err.message } } : {}) };
     } finally { off(); this.activeRuns.delete(req.sessionRef); }
   }
 

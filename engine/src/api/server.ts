@@ -24,6 +24,7 @@ import type { Dispatcher } from '../supervisor/dispatcher.ts';
 import type { Scheduler } from '../supervisor/scheduler.ts';
 import { listBackups } from '../supervisor/backup.ts';
 import type { ModelRuntime } from '../runtime/types.ts';
+import { validateModel } from '../runtime/model-check.ts';
 import { Definitions, STAGE_KINDS } from '../model/definitions.ts';
 import { Workspaces } from '../model/workspaces.ts';
 import { Settings } from '../model/settings.ts';
@@ -210,7 +211,10 @@ export class ApiServer {
     if (am2) {
       const a = defs.getAgent(am2[1]); if (!a) return this.json(res, 404, { error: 'agent not found' });
       if (!am2[2] && m === 'GET') return this.json(res, 200, { ...a, ...this.agentLive(a.id), tool_catalogue: Object.keys(TOOL_SCHEMAS) });
-      if (!am2[2] && (m === 'PATCH' || m === 'PUT')) { const b = await this.body(req); if (b.model !== undefined && !AGENT_MODELS.includes(String(b.model))) return this.json(res, 400, { error: `Pick one of: ${AGENT_MODELS.join(', ')}` }); const tools = Array.isArray(b.allowed_tools) ? (b.allowed_tools as string[]).filter((t) => t in TOOL_SCHEMAS) : undefined; const u = defs.upsertAgent({ ...a, ...(b as Record<string, never>), id: a.id, name: String(b.name ?? a.name), purpose: String(b.purpose ?? a.purpose), allowed_tools: tools ?? a.allowed_tools }, 'owner'); this.broadcast('agents', { id: a.id }); return this.json(res, 200, u); }
+      if (!am2[2] && (m === 'PATCH' || m === 'PUT')) { const b = await this.body(req); if (b.model !== undefined && !AGENT_MODELS.includes(String(b.model))) return this.json(res, 400, { error: `Pick one of: ${AGENT_MODELS.join(', ')}` });
+        // A model the Claude connection does not offer is refused at save, in the connection's own words (it would fail every turn).
+        if (b.model !== undefined && String(b.model) !== a.model) { const v = await validateModel(this.d.runtime, String(b.model)); if (!v.ok) return this.json(res, 400, { error: v.reason }); db.prepare('DELETE FROM runtime_state WHERE key = ?').run(`agent.paused.${a.id}`); }
+        const tools = Array.isArray(b.allowed_tools) ? (b.allowed_tools as string[]).filter((t) => t in TOOL_SCHEMAS) : undefined; const u = defs.upsertAgent({ ...a, ...(b as Record<string, never>), id: a.id, name: String(b.name ?? a.name), purpose: String(b.purpose ?? a.purpose), allowed_tools: tools ?? a.allowed_tools }, 'owner'); this.broadcast('agents', { id: a.id }); return this.json(res, 200, u); }
       if (!am2[2] && m === 'DELETE') { const r = defs.deleteAgent(a.id, 'owner'); this.broadcast('agents', { id: a.id }); return this.json(res, r.ok ? 200 : 409, r); }
       if (am2[2] === 'enable' || am2[2] === 'disable') { defs.setAgentEnabled(a.id, am2[2] === 'enable', 'owner'); this.broadcast('agents', { id: a.id }); return this.json(res, 200, defs.getAgent(a.id)); }
       if (am2[2] === 'duplicate' && m === 'POST') { const b = await this.body(req); const nid = String(b.id ?? `${a.id}_copy`); const c = defs.duplicateAgent(a.id, nid, 'owner'); this.broadcast('agents', { id: nid }); return this.json(res, 201, c); }
