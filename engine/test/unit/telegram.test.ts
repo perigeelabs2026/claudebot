@@ -243,3 +243,14 @@ test('T11: a blocker only the owner can clear reaches Telegram as one plain line
   assert.ok(!texts.some((t) => /timed out/.test(t)), 'a timeout is the team\'s to fix');
   f.close();
 });
+
+test('T12: a blocker the answer bank can answer (quota attainment) never pings the owner on Telegram', async () => {
+  const f = await fakeTelegram(); const s = setup(f.base); saveToken(s.secrets, TOKEN);
+  const { code } = newPairingCode(s.db); f.push(msg(1, 777, `/start ${code}`)); await s.bridge.cycle(0);
+  const { vaultDir } = await import('../../src/memory/vault.ts'); const dir = vaultDir(); fs.mkdirSync(path.join(dir, 'Owner'), { recursive: true }); fs.writeFileSync(path.join(dir, 'Owner', 'Application answers.md'), '- Quota attainment: 70% across all quarters\n');
+  const j = s.store.create({ idempotency_key: 'ramp', kind: 'research.report', objective: 'Apply to Ramp', success_contract: {}, agent_role: 'researcher', workspace_id: s.ws.id } as never, 'owner').job;
+  s.db.prepare("UPDATE jobs SET state = 'failed_terminal', blocker_code = 'BLOCKED', failure_detail = 'blocked: the form needs quota attainment for each of the last 4 years', updated_at = ? WHERE id = ?").run(new Date().toISOString(), j.id);
+  f.calls.length = 0; await s.bridge.cycle(0);
+  assert.equal(f.calls.filter((x) => x.method === 'sendMessage').length, 0);
+  f.close();
+});

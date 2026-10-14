@@ -654,3 +654,9 @@ test('the stuck bounce cannot be slipped past: "no alternatives were found" and 
   assert.equal(await bounced('The careers site and Acme?'), true, 'a login sentence exempts only itself');
   assert.equal(await bounced('Acme again?'), false, 'a reply naming the routes tried passes');
 });
+
+test('the tried-check ignores negated and hypothetical routes ("I have not tried LinkedIn yet", "should I check the careers page?")', async () => {
+  const s = setup([{ kind: 'ok', text: "I have not tried LinkedIn yet. The hiring manager's address is unverified." }, { kind: 'ok', text: 'ok' }, { kind: 'ok', text: "The hiring manager's address is unverified. Should I check the careers page?" }, { kind: 'ok', text: 'ok' }]);
+  const d = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] });
+  for (const q of ['Acme?', 'Acme again?']) { const { job } = s.chat.send(d.id, q, s.defs); assert.equal(await run(s, job.id), 'completed'); const b = s.db.prepare('SELECT id FROM jobs WHERE idempotency_key = ?').get(`engine:askback:${job.id}`) as { id: string } | undefined; assert.ok(b, `bounced: ${q}`); assert.equal(await run(s, b!.id), 'completed'); }
+});

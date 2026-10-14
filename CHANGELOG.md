@@ -52,6 +52,9 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Every delegated task (not only chat turns) gets the try-alternatives-first rule and `lookup_answer`. When a task in a conversation comes back blocked or partial, the lead's automatic report may start one follow-up task to try another route.
 - Telegram now sends only replies to messages you wrote on Telegram, decision cards, verified application receipts and the morning line. Everything else stays in the app's team group.
 - Telegram sends one plain line when an assistant hits something only you can clear (a sign-in or a CAPTCHA, including hCaptcha). These lines are held during quiet hours.
+- The app window no longer looks frozen after the engine restarts, because every reconnect refreshes the whole view.
+- A Telegram blocker line is skipped when your answer bank already has the answer.
+- The stuck-reply check ignores negated, "would"/"could" and question sentences when looking for a route that was tried.
 - A verified application now posts its "Applied:" receipt in the team group.
 - The stuck-reply check now needs a route that was actually tried and named, and a sign-in or CAPTCHA mention only excuses its own sentence.
 - Replies that say something "stays unsent" or "could not be verified" without listing other routes tried go back to the assistant to try other people and sources.

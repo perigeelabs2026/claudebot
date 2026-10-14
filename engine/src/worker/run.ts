@@ -334,7 +334,8 @@ Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-�
         const OWNER_BLOCK = /\b(captcha|sign[- ]?in|log[- ]?in|password|verification code)\b/i;
         const TRIED = /\b(tried|checked|searched|contacted|looked (at|up|through)|asked|reached out to|went through)\b[^.?!]{0,100}\b(linkedin|company (site|website|page)|website|press|news|gmail|inbox|ceo|founder|manager|vp|director|team|recruiter|hiring|committee|directory|google|crunchbase|rocketreach|hunter|apollo|zoominfo|pattern|careers page|github|twitter|x\.com)\b/i;
         const stuckSentences = reply.split(/(?<=[.!?])\s+/).filter((x) => STUCK.test(x) && !OWNER_BLOCK.test(x));
-        const stuckReport = stuckSentences.length > 0 && !TRIED.test(reply);
+        const triedSomething = reply.split(/(?<=[.!?])\s+/).some((x) => TRIED.test(x) && !/\b(not|n't|never|should|could|shall|would|will|may|might)\b/i.test(x) && !/\?\s*$/.test(x));   // "I have not tried LinkedIn yet" and "should I check the careers page?" are not routes tried
+        const stuckReport = stuckSentences.length > 0 && !triedSomething;
         const askBack = !String(msg.content ?? '').startsWith('ClaudeBot: do not ask the owner') && (ownerTodo || stuckReport || /\b(should i|shall i|want me to|do you want me to|would you like me to|can i go ahead|ok(ay)? to|or leave (it|them) for later)\b[^?]{0,240}\?\s*$/i.test(lastSentence)
           && !/\b(send|email|e-mail|message|post|publish|pay|buy|purchase|spend|delete|remove)\b/i.test(lastSentence.replace(/\bverify\b[^?]*/i, ''))   // asking to send, spend, post or delete is the owner's call
           && !/\b(password|passcode|verification code|captcha|salary|compensation|pay range|quota|stack rank|essay)\b/i.test(reply.trim().slice(-400)));   // a personal answer may be named in the sentence before the question
