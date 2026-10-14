@@ -38,6 +38,10 @@ function setup(base: string) {
 }
 const msg = (id: number, chatId: number, text: string, extra: Record<string, unknown> = {}) => ({ update_id: id, message: { message_id: id, chat: { id: chatId, type: 'private' }, from: { id: chatId, username: 'owner' }, text, ...extra } });
 
+
+/** Make a conversation the owner's Telegram chat with the lead (as if he had written there from Telegram). */
+function linkTelegram(s: { db: import('node:sqlite').DatabaseSync; chat: ChatStore }, convId: string) { const m = s.chat.add({ conversation_id: convId, role: 'owner', sender: 'owner', content: 'hi from Telegram' }); s.db.prepare("INSERT INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?, 777, 1, 'inbound', ?)").run(m.id, new Date().toISOString()); }
+
 test('T1: no token, nothing happens; a malformed token is refused and the token file is private', async () => {
   const f = await fakeTelegram(); const s = setup(f.base);
   assert.deepEqual(await s.bridge.cycle(0), { updates: 0, sent: 0 }); assert.equal(f.calls.length, 0);
@@ -131,12 +135,13 @@ test('T6: Telegram is a command channel through the lead: plain decision cards t
   const c = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] });
   const turn = s.chat.send(c.id, '@researcher email the hiring manager', s.defs).job;
   s.chat.add({ conversation_id: c.id, role: 'assistant', sender: 'researcher', content: 'specialist chatter' });
-  s.chat.add({ conversation_id: c.id, role: 'assistant', sender: 'coordinator', content: 'lead summary' });
+  s.chat.add({ conversation_id: c.id, role: 'assistant', sender: 'coordinator', content: 'group lead chatter' });
+  const tgc = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] }); linkTelegram(s, tgc.id); s.chat.add({ conversation_id: tgc.id, role: 'assistant', sender: 'coordinator', content: 'lead summary' });
   const ap = s.approvals.request({ job_id: turn.id, action_kind: 'send', target: 'email to hm@example.test', content: 'To: hm@example.test\nSubject: Channel role\n\nHi Sam,\nThe full body.' });
   s.chat.add({ conversation_id: c.id, role: 'system', kind: 'decision', content: 'decision', approval_id: ap.id, job_id: turn.id });
   f.calls.length = 0; await s.bridge.cycle(0);
   const texts = f.calls.filter((x) => x.method === 'sendMessage').map((x) => String(x.body.text));
-  assert.ok(texts.some((t) => t.includes('lead summary'))); assert.ok(!texts.some((t) => t.includes('specialist chatter')), 'only the lead talks on Telegram');
+  assert.ok(texts.some((t) => t.includes('lead summary'))); assert.ok(!texts.some((t) => t.includes('specialist chatter')), 'only the lead talks on Telegram'); assert.ok(!texts.some((t) => t.includes('group lead chatter')), 'group work shows in the group, not on Telegram');
   const card = f.calls.find((x) => x.method === 'sendMessage' && x.body.reply_markup)!;
   assert.match(String(card.body.text), /wants to send this email\. Allow it\?/); assert.ok(!/fingerprint|Expires|https?:\/\/|conv-|job-|apr-/.test(String(card.body.text)), 'no ids, fingerprint, expiry or links'); assert.match(String(card.body.text), /Subject: Channel role\n\nHi Sam,\nThe full body\./, 'the full email copy');
   // decided in the app: the Telegram card loses its buttons and says so
@@ -159,7 +164,7 @@ test('T6: Telegram is a command channel through the lead: plain decision cards t
 test('T7: quiet hours send nothing (held, never sent later) and test projects never reach Telegram', async () => {
   const f = await fakeTelegram(); const s = setup(f.base); saveToken(s.secrets, TOKEN);
   const { code } = newPairingCode(s.db); f.push(msg(1, 777, `/start ${code}`)); await s.bridge.cycle(0);
-  const c = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] });
+  const c = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] }); linkTelegram(s, c.id);
   s.db.prepare("INSERT INTO runtime_state(key, value, evidence, observed_at) VALUES ('telegram.quiet_until', ?, '{}', ?)").run(JSON.stringify({ until: new Date(Date.now() + 3600_000).toISOString() }), new Date().toISOString());
   s.chat.add({ conversation_id: c.id, role: 'assistant', sender: 'coordinator', content: 'night news' }); f.calls.length = 0; await s.bridge.cycle(0);
   assert.ok(!f.calls.some((x) => x.method === 'sendMessage' && String(x.body.text).includes('night news')), 'nothing during quiet hours');
@@ -175,8 +180,8 @@ test('T7: quiet hours send nothing (held, never sent later) and test projects ne
 test('T8: when quiet hours end, one good-morning summary goes out and decisions still waiting arrive as cards; held chatter stays in the app; /status answers', async () => {
   const f = await fakeTelegram(); const s = setup(f.base); saveToken(s.secrets, TOKEN);
   const { code } = newPairingCode(s.db); f.push(msg(1, 777, `/start ${code}`)); await s.bridge.cycle(0);
-  const c = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] });
-  const turn = s.chat.send(c.id, '@researcher apply to the Dragos role', s.defs).job;
+  const c = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] }); linkTelegram(s, c.id);
+  const turn = s.chat.send(c.id, 'apply to the Dragos role', s.defs).job;
   const setQuiet = (ms: number) => s.db.prepare("INSERT INTO runtime_state(key, value, evidence, observed_at) VALUES ('telegram.quiet_until', ?, '{}', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify({ until: new Date(Date.now() + ms).toISOString() }), new Date().toISOString());
   setQuiet(3600_000);
   s.chat.add({ conversation_id: c.id, role: 'assistant', sender: 'coordinator', content: 'night news' });
@@ -207,4 +212,19 @@ test('T9: a browser decision card is one plain sentence (no page address, finger
   const { describeApproval } = await import('../../src/approvals/describe.ts');
   const v = describeApproval({ action_kind: 'send', target: 'x', content: JSON.stringify({ url: 'https://magnitudesoftware.wd1.myworkdayjobs.com/en-US/External/job/apply/applyManually', action: 'press', key: 'Enter', element: { role: 'textbox', name: 'How Did You Hear About Us?' } }) });
   assert.equal(v.text, 'press Enter in "How Did You Hear About Us?" on magnitudesoftware.wd1.myworkdayjobs.com');
+});
+
+test('T10: routine progress never goes to Telegram: assistants\' updates, group replies and team-record lines stay in the app', async () => {
+  const f = await fakeTelegram(); const s = setup(f.base); saveToken(s.secrets, TOKEN);
+  const { code } = newPairingCode(s.db); f.push(msg(1, 777, `/start ${code}`)); await s.bridge.cycle(0);
+  const g = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] });
+  const tgc = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] }); linkTelegram(s, tgc.id);
+  s.chat.add({ conversation_id: tgc.id, role: 'assistant', sender: 'coordinator', content: 'progress line', meta: { update: true } });
+  s.chat.add({ conversation_id: g.id, role: 'assistant', sender: 'coordinator', content: 'group reply' });
+  s.chat.add({ conversation_id: g.id, role: 'system', kind: 'activity', content: 'From Telegram · You: start' });
+  s.chat.add({ conversation_id: tgc.id, role: 'assistant', sender: 'coordinator', content: 'Two applications are in.' });
+  f.calls.length = 0; await s.bridge.cycle(0);
+  const texts = f.calls.filter((x) => x.method === 'sendMessage').map((x) => String(x.body.text));
+  assert.deepEqual(texts, ['Two applications are in.']);
+  f.close();
 });

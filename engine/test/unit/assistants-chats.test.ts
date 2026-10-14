@@ -598,3 +598,20 @@ test('a status report that hands the owner answers the team can find is bounced 
   assert.match(s.runtime.history[0].prompt, /try the alternatives yourself before reporting/); assert.match(s.runtime.history[0].prompt, /Report "stuck" only after that, and list what you tried/);
   const bounce = s.db.prepare("SELECT id, objective FROM jobs WHERE idempotency_key = ?").get(`engine:askback:${job.id}`) as { id: string; objective: string }; assert.ok(bounce); assert.match(bounce.objective, /application-answers\.md/);
 });
+
+test('all work shows in the team group: direct-chat requests, replies, progress and files are recorded there, labelled; approvals and ClaudeBot notes stay private; test projects stay out', async () => {
+  const s = setup(); addAssistant(s, 'scout', 'Scout', 'Job boards');
+  const team = s.chat.create({ workspace_id: s.ws.id, type: 'group', title: 'Job Hunters', members: ['coordinator', 'scout'] });
+  const d = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['scout'] });
+  s.chat.add({ conversation_id: d.id, role: 'owner', sender: 'owner', content: 'Submit all 9 now.' });
+  s.chat.add({ conversation_id: d.id, role: 'assistant', sender: 'scout', content: '2 of 9 done: Northwind submitted and confirmed.', meta: { update: true } });
+  s.chat.add({ conversation_id: d.id, role: 'system', kind: 'wake', content: 'ClaudeBot note: carry on.' });
+  s.chat.add({ conversation_id: d.id, role: 'system', kind: 'decision', content: 'decision' });
+  const test = new Workspaces(s.db, path.join(s.tmp, 'ws')).create({ name: 'Rehearsal (test)', policies: { telegram: false } }, 'test');
+  const td = s.chat.create({ workspace_id: test.id, type: 'direct', members: ['scout'] }); s.chat.add({ conversation_id: td.id, role: 'assistant', sender: 'scout', content: 'rehearsal chatter' });
+  const lines = s.chat.messages(team.id).map((m) => m.content);
+  assert.ok(lines.some((l) => /^From direct chat.* · You: Submit all 9 now\./.test(l)), lines.join('\n'));
+  assert.ok(lines.some((l) => /· Scout: 2 of 9 done: Northwind submitted and confirmed\./.test(l)));
+  assert.ok(!lines.some((l) => /ClaudeBot note|decision|rehearsal chatter/.test(l)), 'notes, approvals and test projects stay out');
+  assert.equal(s.chat.teamConversation(), team.id);
+});

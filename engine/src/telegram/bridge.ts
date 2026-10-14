@@ -167,7 +167,8 @@ export class TelegramBridge {
     await say('Unknown command. Send /help, or just tell your Chief of Staff what you want.'); return 'command:unknown';
   }
 
-  /** Send each new assistant reply, result and decision once, to the bound chat. */
+  /** Send the lead's important updates once, to the bound chat: its replies in the Telegram conversation, decision cards and files it sends
+   *  there (Telegram is reserved for the lead's important updates; all work shows in the group chat instead). */
   async flush(limit = 20, onlyIds: string[] | null = null): Promise<number> {
     const db = this.d.db; const b = binding(db); if (!b) return 0;
     const since = String((rs(db, KEY_SINCE) as { since?: string } | null)?.since ?? now());
@@ -185,7 +186,7 @@ export class TelegramBridge {
       }
       ev(db, 'telegram.quiet_ended', { held: held.length, waiting: waiting.length });
     }
-    const rows = db.prepare(`SELECT m.id, m.conversation_id, m.kind, m.role, m.sender, m.content, m.approval_id, c.title, c.type FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE ${onlyIds ? `m.id IN (${onlyIds.map(() => '?').join(',')}) AND ? <> ''` : 'm.created_at >= ?'} AND ((m.role = 'assistant' AND m.kind = 'text' AND m.sender = 'coordinator' AND COALESCE(json_extract(m.meta, '$.update'), 0) = 0) OR m.kind = 'decision' OR (m.kind = 'result' AND m.artifact_id IS NOT NULL AND c.type = 'direct' AND EXISTS (SELECT 1 FROM conversation_members cm WHERE cm.conversation_id = c.id AND cm.agent_id = 'coordinator'))) AND NOT EXISTS (SELECT 1 FROM telegram_outbox o WHERE o.message_id = m.id) ORDER BY m.created_at LIMIT ?`).all(...(onlyIds ?? []), since, limit) as Array<{ id: string; conversation_id: string; kind: string; role: string; sender: string; content: string; approval_id: string | null; title: string; type: string }>;
+    const rows = db.prepare(`SELECT m.id, m.conversation_id, m.kind, m.role, m.sender, m.content, m.approval_id, c.title, c.type FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE ${onlyIds ? `m.id IN (${onlyIds.map(() => '?').join(',')}) AND ? <> ''` : 'm.created_at >= ?'} AND ((m.role = 'assistant' AND m.kind = 'text' AND m.sender = 'coordinator' AND COALESCE(json_extract(m.meta, '$.update'), 0) = 0 AND m.conversation_id IN (SELECT m2.conversation_id FROM telegram_outbox o2 JOIN messages m2 ON m2.id = o2.message_id WHERE o2.kind = 'inbound')) OR m.kind = 'decision' OR (m.kind = 'result' AND m.artifact_id IS NOT NULL AND c.type = 'direct' AND EXISTS (SELECT 1 FROM conversation_members cm WHERE cm.conversation_id = c.id AND cm.agent_id = 'coordinator'))) AND NOT EXISTS (SELECT 1 FROM telegram_outbox o WHERE o.message_id = m.id) ORDER BY m.created_at LIMIT ?`).all(...(onlyIds ?? []), since, limit) as Array<{ id: string; conversation_id: string; kind: string; role: string; sender: string; content: string; approval_id: string | null; title: string; type: string }>;
     // Quiet hours (runtime_state telegram.quiet_until) and test projects (workspace policies.telegram === false): nothing is sent;
     // the notice is marked held so it never goes later either.
     const quiet = String((rs(db, 'telegram.quiet_until') as { until?: string } | null)?.until ?? ''); const isQuiet = !onlyIds && quiet > now();

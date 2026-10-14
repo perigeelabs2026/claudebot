@@ -34,6 +34,8 @@ import { ChatStore } from '../chat/store.ts';
 import { BrowserLive } from '../browser/live.ts';
 import { KeepAwake } from '../power/awake.ts';
 import { releaseTabsOfFinishedTasks, cdpCloser } from '../browser/tabs.ts';
+import { rollupWorkLogs } from '../memory/worklog.ts';
+import { localDay } from '../memory/vault.ts';
 
 const cfg = loadConfig();
 const VERSION = JSON.parse(fs.readFileSync(path.join(cfg.sourceRoot, 'engine', 'package.json'), 'utf8')).version as string;
@@ -102,6 +104,11 @@ timers.push(setInterval(async () => { try {
   if ((db.prepare("SELECT count(*) AS n FROM jobs WHERE state IN ('leased','running')").get() as { n: number }).n) return;
   api.computerBusy = 'snapshot'; try { await host.snapshot('nightly'); store.event(null, 'engine', 'computer.snapshot_done', { nightly: true }); } finally { api.computerBusy = null; }
 } catch (e) { log.warn('nightly computer snapshot failed', { err: (e as Error).message }); } }, 15 * 60_000));
+// Work log: each assistant's "## Work log" in its memory note, rebuilt from the ledger (no model call) at startup and once a night at 03:00 local.
+let workLogDay = '';
+const runWorkLog = (why: string) => { try { const r = rollupWorkLogs(db); if (r.written.length) log.info('work logs written', { why, entries: r.written.length }); } catch (e) { log.warn('work log rollup failed', { why, err: (e as Error).message }); } };
+runWorkLog('startup');
+timers.push(setInterval(() => { if (new Date().getHours() === 3 && workLogDay !== localDay()) { workLogDay = localDay(); runWorkLog('nightly'); } }, 10 * 60_000));
 let permRunning = false;
 timers.push(setInterval(async () => { if (permRunning) return; permRunning = true; try {
   for (const a of db.prepare("SELECT id, job_id, action_kind, target, content, decided_by FROM approvals WHERE status = 'approved' AND decided_by LIKE 'permission:%'").all() as Array<{ id: string; job_id: string | null; action_kind: string; target: string; content: string; decided_by: string }>) {

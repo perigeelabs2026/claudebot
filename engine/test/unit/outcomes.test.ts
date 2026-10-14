@@ -45,7 +45,7 @@ test('a read blocked by a sign-in wall pauses for owner takeover (browser:<site>
   assert.ok(s.db.prepare('SELECT COUNT(*) AS n FROM checkpoints WHERE job_id = ?').get(j1.id)!.n as number >= 2);
   const j2 = task(s, 'browser.read_task', 'Read https://slow.example/'); s.store.lease({ owner: 'worker:test', leaseSeconds: 30 });
   const cap2 = issueCapability(s.deps.runDir, j2, path.join(s.tmp, 'w2'), s.defs.getAgent('browser_operator')!.allowed_tools);
-  await s.broker.call(cap2, 'report_outcome', { status: 'blocked', reason: 'The page never finished loading.', block_kind: 'timeout', remaining: 'everything' });
+  await s.broker.call(cap2, 'report_outcome', { status: 'blocked', reason: 'The page never finished loading.', block_kind: 'timeout', remaining: 'everything', alternatives_tried: [{ route: 'reloaded the page', result: 'timed out again' }, { route: 'the cached copy and the company press page', result: 'not available' }] });
   assert.equal(await runJob(s.deps, j2.id), 'failed');
   const b = s.store.get(j2.id)!; assert.equal(b.state, 'failed_terminal'); assert.equal(b.blocker_code, 'BLOCKED'); assert.match(String(b.operator_action), /could not be done.*timeout/);
 });

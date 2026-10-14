@@ -1,3 +1,4 @@
+import { lookupAnswer } from '../memory/answer-bank.ts';
 import { safeExtract, sourceAllowed } from './archive.ts';
 import { matchPermission, jobApplicationPermission, isJobSite, isApplicationControl, isApplicationFormControl, contentRecipients, grantJobApplications, revokePermission, JOB_APPLICATIONS } from '../approvals/permissions.ts';
 import fs from 'node:fs';
@@ -90,7 +91,10 @@ export class BrokerApi {
       case 'add_evidence': { const url = String(a.source_url ?? ''); if (!/^https?:\/\/\S+$/.test(url)) return { ok: false, text: 'source_url must be an http(s) URL; evidence without a source is not accepted' }; const id = newId('ev'); db.prepare('INSERT INTO memory_evidence(id, job_id, title, body, source_url, grade, created_at) VALUES (?,?,?,?,?,?,?)').run(id, cap.job_id, String(a.title), String(a.body), url, String(a.grade ?? 'C'), t); return { ok: true, text: `evidence ${id} recorded`, data: { id } }; }
       case 'upsert_record': { const id = String(a.id ?? newId('rec')); const type = String(a.type); const existing = db.prepare('SELECT id FROM records WHERE id = ?').get(id); if (existing) db.prepare('UPDATE records SET data = ?, job_id = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(a.data ?? {}), cap.job_id, t, id); else db.prepare('INSERT INTO records(id, type, data, job_id, created_at, updated_at) VALUES (?,?,?,?,?,?)').run(id, type, JSON.stringify(a.data ?? {}), cap.job_id, t, t); this.store.event(cap.job_id, actor, 'record.upserted', { id, type }); return { ok: true, text: `record ${id} ${existing ? 'updated' : 'created'}`, data: { id } }; }
       case 'propose_memory_change': { const id = newId('prop'); db.prepare('INSERT INTO memory_proposals(id, job_id, title, body, rationale, status, created_at) VALUES (?,?,?,?,?,?,?)').run(id, cap.job_id, String(a.title), String(a.body), String(a.rationale), 'proposed', t); return { ok: true, text: `proposal ${id} recorded for owner review`, data: { id } }; }
-      case 'report_progress': { this.store.patch(cap.job_id, { next_action: String(a.note).slice(0, 200) }); this.store.event(cap.job_id, actor, 'agent.progress', { note: String(a.note).slice(0, 500) }); return { ok: true, text: 'noted' }; }
+      case 'report_progress': { this.store.patch(cap.job_id, { next_action: String(a.note).slice(0, 200) }); this.store.event(cap.job_id, actor, 'agent.progress', { note: String(a.note).slice(0, 500) });
+        // Background tasks post their progress to the team group too (all work shows there), labelled with the assistant and task.
+        try { const me = this.store.get(cap.job_id); const chat = new ChatStore(db, this.store); const team = chat.teamConversation(); const pol = me?.workspace_id ? JSON.parse(((db.prepare('SELECT policies FROM workspaces WHERE id = ?').get(me.workspace_id) as { policies: string } | undefined)?.policies) || '{}') as { telegram?: boolean; dry_run?: boolean } : {};
+          if (team && me && me.kind !== 'chat.turn' && pol.telegram !== false && !pol.dry_run) chat.add({ conversation_id: team, role: 'system', kind: 'activity', content: `${new Definitions(db).getAgent(me.agent_role)?.name ?? me.agent_role} (task): ${String(a.note).replace(/\s+/g, ' ').slice(0, 500)}`, job_id: me.id, meta: { mirror_of: `progress:${cap.job_id}`, task_progress: true } }); } catch { /* progress still recorded on the task */ } return { ok: true, text: 'noted' }; }
       case 'create_job': {
         const defs = new Definitions(db); const wf = defs.getWorkflow(String(a.kind)); if (!wf || !wf.enabled) return { ok: false, text: `unknown workflow ${a.kind}; available: ${defs.listWorkflows().filter((w) => w.id !== 'chat.turn').map((w) => w.id).join(', ')}` };
         if (['chat.turn', 'assistant.draft', 'report.morning', 'priority.rank'].includes(wf.id)) return { ok: false, text: wf.id === 'chat.turn' ? 'chat turns cannot be delegated' : 'new assistants are drafted with propose_assistant, not delegated' };
@@ -261,6 +265,11 @@ export class BrokerApi {
         return { ok: true, text: `Recorded and verified: ${company} – ${role}. Confirmation on the page: "${conf}". ${shotArt ? 'The receipt screenshot shows as a file card under your reply.' : ''} You may now tell the owner it was submitted.`, data: { record_id: recId, receipt: shotArt } };
       }
       // ---- conversation tools (chat replies) ----
+      case 'lookup_answer': {   // the owner's answer bank (read-only): saved application answers, work history, facts the owner gave
+        const q = String(a.question ?? '').trim(); if (!q) return { ok: false, text: 'question is required' };
+        const hits = lookupAnswer(q); this.store.event(cap.job_id, actor, 'answer.lookup', { question: q.slice(0, 200), found: hits.length });
+        return { ok: true, text: hits.length ? `From the owner's answer bank:\n${hits.map((h) => `- ${h.text} (${h.source})`).join('\n')}` : 'The answer bank has nothing for this question.', data: { found: hits.length } };
+      }
       case 'read_conversation': {   // the durable record of a chat the assistant belongs to (approvals and Telegram delivery included); never a reason to ask the owner to export a chat
         const me = this.store.get(cap.job_id); const want = String(a.conversation ?? '').trim();
         const conv = (want ? (db.prepare('SELECT id, title, type FROM conversations WHERE id = ? OR title = ? ORDER BY updated_at DESC LIMIT 1').get(want, want) ?? db.prepare("SELECT id, title, type FROM conversations WHERE title LIKE ? ORDER BY updated_at DESC LIMIT 1").get(`%${want}%`)) : (me?.conversation_id ? db.prepare('SELECT id, title, type FROM conversations WHERE id = ?').get(me.conversation_id) : undefined)) as { id: string; title: string | null; type: string } | undefined;
@@ -361,7 +370,10 @@ export class BrokerApi {
       case 'report_outcome': {
         const status = String(a.status); if (!['complete', 'partial', 'blocked'].includes(status)) return { ok: false, text: 'status must be complete, partial or blocked' };
         const outcome = status === 'complete' ? 'success' : status;
-        const detail = { reason: String(a.reason ?? '').slice(0, 1000), remaining: a.remaining ? String(a.remaining).slice(0, 1000) : null, block_kind: a.block_kind ? String(a.block_kind) : null, site: a.site ? String(a.site).toLowerCase().replace(/^www\./, '') : null, next_action: a.next_action ? String(a.next_action).slice(0, 500) : null, reported_by: cap.role, at: t };
+        // Stopping at the first blocker is not allowed: "blocked" needs at least two other routes tried, unless only the owner can clear it.
+        const tried = Array.isArray(a.alternatives_tried) ? (a.alternatives_tried as Array<Record<string, unknown>>).filter((x) => x && String(x.route ?? '').trim()) : [];
+        if (status === 'blocked' && !['captcha', 'mfa', 'login', 'spend'].includes(String(a.block_kind ?? '')) && tried.length < 2) { this.store.event(cap.job_id, actor, 'outcome.refused', { reason: 'fewer than 2 alternatives tried', tried: tried.length }); return { ok: false, text: 'Not recorded: try another contact, source or route first. "blocked" needs alternatives_tried with at least two other routes you tried (route and result), unless the block is a CAPTCHA, MFA, a sign-in or a spend.' }; }
+        const detail = { alternatives_tried: tried.slice(0, 8).map((x) => ({ route: String(x.route).slice(0, 200), result: String(x.result ?? '').slice(0, 300) })), reason: String(a.reason ?? '').slice(0, 1000), remaining: a.remaining ? String(a.remaining).slice(0, 1000) : null, block_kind: a.block_kind ? String(a.block_kind) : null, site: a.site ? String(a.site).toLowerCase().replace(/^www\./, '') : null, next_action: a.next_action ? String(a.next_action).slice(0, 500) : null, reported_by: cap.role, at: t };
         db.prepare('UPDATE jobs SET outcome = ?, outcome_detail = ?, updated_at = ? WHERE id = ?').run(outcome, JSON.stringify(detail), t, cap.job_id);
         this.store.event(cap.job_id, actor, 'outcome.reported', { outcome, ...detail });
         return { ok: true, text: `outcome recorded: ${status}${status !== 'complete' ? ' — the owner will see exactly what remains unavailable' : ''}` };

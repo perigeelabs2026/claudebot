@@ -4,6 +4,8 @@
  *   Owner.md              the owner's preferences and profile facts
  *   Assistants/<Name>.md  one note per assistant: Preferences, Lessons, Facts (frontmatter: assistant id, updated)
  *   Lessons/YYYY-MM-DD.md what assistants learned that day (a log with [[links]])
+ * Each assistant note also carries a "## Work log" (one "### YYYY-MM-DD" entry per day, last 14 days) written nightly from the
+ * ledger by memory/worklog.ts with no model call; every turn reads the last 3 days of it.
  * The files are the truth: an edit made in Obsidian takes effect on the next turn. Every turn reads Team + Owner + its own note
  * in full. Secrets never go in: text that looks like a password, token or key is refused.
  */
@@ -28,6 +30,19 @@ export function looksSecret(text: string): string | null {
   return null;
 }
 
+export const WORK_LOG = 'Work log';
+/** YYYY-MM-DD in the Mac's local time zone (the owner's day). */
+export function localDay(d: Date = new Date()): string { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+/** Split a note into what comes before "## Work log", its day entries, and any sections after it. */
+function splitWorkLog(text: string): { head: string; entries: Map<string, string[]>; tail: string } {
+  const lines = text.split('\n'); const start = lines.findIndex((l) => l.trim() === `## ${WORK_LOG}`); const entries = new Map<string, string[]>();
+  if (start < 0) return { head: text, entries, tail: '' };
+  let end = lines.findIndex((l, i) => i > start && /^## /.test(l)); if (end < 0) end = lines.length;
+  let cur: string | null = null;
+  for (const l of lines.slice(start + 1, end)) { const m = l.match(/^### (\d{4}-\d{2}-\d{2})\s*$/); if (m) { cur = m[1]; entries.set(cur, []); continue; } if (cur && l.trim().startsWith('- ')) entries.get(cur)!.push(l.trimEnd()); }
+  return { head: lines.slice(0, start).join('\n'), entries, tail: lines.slice(end).join('\n') };
+}
+
 const fileName = (name: string) => `${name.replace(/[\\/:*?"<>|#^[\]]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80) || 'Assistant'}.md`;
 
 export class Vault {
@@ -42,11 +57,16 @@ export class Vault {
   }
   /** The note of one assistant, found by its frontmatter id (so a rename in Obsidian or the app never loses it). Created when missing. */
   notePath(agent: { id: string; name: string }): string {
-    this.ensure(); const dir = path.join(this.dir, 'Assistants');
-    for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.md'))) { const head = fs.readFileSync(path.join(dir, f), 'utf8').slice(0, 400); if (new RegExp(`^assistant:\\s*${agent.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'm').test(head)) return this.renameIfNeeded(path.join(dir, f), agent.name); }
+    const found = this.existingNote(agent); if (found) return found; const dir = path.join(this.dir, 'Assistants');
     const p = path.join(dir, fileName(agent.name));
     fs.writeFileSync(p, `---\nassistant: ${agent.id}\nupdated: ${today()}\n---\n# ${agent.name}\n\nWhat ${agent.name} has learned. Team rules: [[Team]] · About the owner: [[Owner]]\n\n${SECTIONS.map((s) => `## ${s}\n`).join('\n')}`, { flag: 'wx' });
     return p;
+  }
+  /** The assistant's note when it exists (renamed to the assistant's current name), without creating one. */
+  existingNote(agent: { id: string; name: string }): string | null {
+    this.ensure(); const dir = path.join(this.dir, 'Assistants');
+    for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.md'))) { const head = fs.readFileSync(path.join(dir, f), 'utf8').slice(0, 400); if (new RegExp(`^assistant:\\s*${agent.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'm').test(head)) return this.renameIfNeeded(path.join(dir, f), agent.name); }
+    return null;
   }
   /** Keep the note's file name equal to the assistant's name, and fix [[links]] across the vault. */
   private renameIfNeeded(p: string, name: string): string {
@@ -108,10 +128,36 @@ export class Vault {
     return hits.map((h) => fs.readFileSync(path.join(dir, `${h}.md`), 'utf8').replace(/^---\n[\s\S]*?\n---\n/, '').split('## Earlier version')[0].trim()).join('\n\n');
   }
 
-  /** Everything a turn should know, in full: Team, Owner and the assistant's own note (frontmatter stripped). */
+  /** Replace one day's entry under "## Work log" in the assistant's note (the section is added at the end when missing; other
+   *  sections are kept as they are). Entries are "### YYYY-MM-DD" blocks, newest first; only the last `keep` days are kept.
+   *  An empty `lines` removes that day's entry. Lines that look secret are dropped. Returns whether the file changed. */
+  setWorkLog(agent: { id: string; name: string }, day: string, lines: string[], keep = 14): boolean {
+    const file = this.notePath(agent); const before = fs.readFileSync(file, 'utf8');
+    const clean = lines.map((l) => { const indent = /^\s*/.exec(l)![0].length ? '  ' : ''; const t = l.replace(/\s+/g, ' ').trim(); return t ? `${indent}${t.startsWith('- ') ? t : `- ${t}`}` : ''; }).filter((l) => l && !looksSecret(l));
+    const { head, entries, tail } = splitWorkLog(before);
+    entries.set(day, clean);
+    const kept = [...entries.entries()].filter(([, v]) => v.length).sort(([a], [b]) => b.localeCompare(a)).slice(0, keep);
+    const section = `## ${WORK_LOG}\n${kept.map(([d, v]) => `\n### ${d}\n${v.join('\n')}\n`).join('')}`;
+    const body = `${head.trimEnd()}\n\n${section}${tail.trim() ? `\n${tail.trim()}\n` : ''}`;
+    if (body.trimEnd() === before.trimEnd()) return false;
+    fs.writeFileSync(file, `${body.trimEnd()}\n`.replace(/^updated: .*$/m, `updated: ${today()}`)); return true;
+  }
+  /** The assistant's work-log entries for the given days (or the newest `days` calendar days, counting today), newest first. */
+  workLog(agent: { id: string; name: string }, days = 3, now: Date = new Date()): Array<{ day: string; lines: string[] }> {
+    const p = this.existingNote(agent); if (!p) return [];
+    let text = ''; try { text = fs.readFileSync(p, 'utf8'); } catch { return []; }
+    const from = localDay(new Date(now.getTime() - (days - 1) * 86_400_000));
+    return [...splitWorkLog(text).entries.entries()].filter(([d, v]) => d >= from && v.length).sort(([a], [b]) => b.localeCompare(a)).map(([day, lines]) => ({ day, lines }));
+  }
+
+  /** Everything a turn should know, in full: Team, Owner and the assistant's own note (frontmatter stripped), plus the assistant's
+   *  own work log for the last 3 days (the full 14-day log stays in the note for the owner). */
   context(agent: { id: string; name: string }): string {
     const strip = (p: string) => { try { return fs.readFileSync(p, 'utf8').replace(/^---\n[\s\S]*?\n---\n/, '').trim(); } catch { return ''; } };
-    const parts = [['Team rules', this.file('team')], ['About the owner', this.file('owner')], [`Your own memory (${agent.name})`, this.notePath(agent)]].map(([h, p]) => { const body = strip(p).split('\n').filter((l) => !/^# /.test(l)).join('\n').trim(); return /- /.test(body) ? `${h}:\n${body}` : ''; }).filter(Boolean);
+    const own = (p: string) => { const t = strip(p); const s = splitWorkLog(t); return `${s.head}\n${s.tail}`; };
+    const parts = ([['Team rules', this.file('team'), strip], ['About the owner', this.file('owner'), strip], [`Your own memory (${agent.name})`, this.notePath(agent), own]] as Array<[string, string, (p: string) => string]>).map(([h, p, read]) => { const body = read(p).split('\n').filter((l) => !/^# /.test(l)).join('\n').trim(); return /- /.test(body) ? `${h}:\n${body}` : ''; }).filter(Boolean);
+    const log = this.workLog(agent, 3);
+    if (log.length) parts.push(`Your work log, last 3 days (from the ledger; what you actually did — use it when the owner refers to earlier work):\n${log.map((e) => `${e.day}:\n${e.lines.join('\n')}`).join('\n')}`);
     return parts.length ? `Memory (from the owner's memory vault; follow it, it is what you have learned):\n${parts.join('\n\n')}` : '';
   }
 }

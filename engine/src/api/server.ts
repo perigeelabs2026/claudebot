@@ -61,7 +61,7 @@ const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js
 type Req = http.IncomingMessage; type Res = http.ServerResponse;
 
 /** Models an assistant can run on (all through the owner's Claude subscription; verified accepted by the ACP agent). */
-export const AGENT_MODELS = ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5'];
+export const AGENT_MODELS = ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-1'];
 
 export class ApiServer {
   computerBusy: string | null = null;

@@ -1,4 +1,5 @@
 /** "Submit job applications without asking" (owner direction 2026-10-13): what it covers, what it never covers, and who can switch it. */
+import fs from 'node:fs'; import path from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { isJobSite, isApplicationControl, jobApplicationPermission, grantJobApplications } from '../../src/approvals/permissions.ts';
@@ -127,4 +128,18 @@ test('every field and key press inside a job application is covered by the permi
   assert.ok(isJobSite('https://magnitudesoftware.wd1.myworkdayjobs.com/en-US/External/job/USA---Remote/SMB---Mid-Market-Account-Manager_REQ000280/apply/applyManually'));
   for (const name of ['How Did You Hear About Us?', 'Country', 'Phone Device Type', 'Are you legally authorized to work in the US?', 'Select One', 'Desired compensation']) assert.ok(isApplicationFormControl(name), name);
   for (const name of ['Send message', 'Connect', 'Pay now', 'Delete account', 'Post', 'Share profile']) assert.equal(isApplicationFormControl(name), false, name);
+});
+
+test('blocked needs two alternatives tried first (one unverifiable contact is not "stuck"), unless only the owner can clear it; lookup_answer reads the answer bank', async () => {
+  const s = setupBroker(); const c = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] });
+  const turn = s.chat.send(c.id, '@researcher find the hiring manager email', s.defs).job;
+  const one = await s.call(turn, 'report_outcome', { status: 'blocked', reason: 'Jean Laurent address not verified', alternatives_tried: [{ route: 'company site', result: 'no address' }] });
+  assert.equal(one.ok, false); assert.match(one.text, /try another contact, source or route first/);
+  const two = await s.call(turn, 'report_outcome', { status: 'blocked', reason: 'no verifiable contact', alternatives_tried: [{ route: 'Jean Laurent via company site', result: 'unverified' }, { route: 'CEO via LinkedIn and press release', result: 'no public email' }] });
+  assert.equal(two.ok, true, two.text);
+  const cap2 = await s.call(turn, 'report_outcome', { status: 'blocked', block_kind: 'captcha', reason: 'hCaptcha at submit' }); assert.equal(cap2.ok, true);
+  const { vaultDir } = await import('../../src/memory/vault.ts'); const dir = vaultDir(); fs.mkdirSync(path.join(dir, 'Owner'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'Owner', 'Application answers.md'), '- Quota attainment: 70% across all quarters\n- Stack rank: top 20% of the team\n');
+  const q = await s.call(turn, 'lookup_answer', { question: 'What is your % of quota attainment for each of the last 4 years?' }); assert.equal(q.ok, true); assert.match(q.text, /70% across all quarters/);
+  const none = await s.call(turn, 'lookup_answer', { question: 'How did you hear about us?' }); assert.match(none.text, /nothing for this question/);
 });

@@ -11,6 +11,11 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Existing installs: run `claudebot update` to pick up these settings.
 
 ### Added
+- Assistants keep a daily Work log in their memory note, rebuilt every night from what they actually did (no model call). The last 3 days are in every prompt.
+- `node engine/src/ops/certify-cli.ts` gives a read-only go/no-go based on the last hours of real, non-test work.
+- All work shows up in the team group chat: direct and Telegram chats are mirrored there, and background progress is posted there too.
+- Fable 5.1 can be chosen as an assistant's model. Opt-in setting `replan_model` (or `CLAUDEBOT_REPLAN_MODEL`) makes the lead re-plan on that model when work comes back blocked. Defaults are unchanged.
+- `lookup_answer`: assistants check your answer bank (bullet lines in `Owner.md` / `Owner/*.md` in your memory folder) before asking you a form question.
 - Assistants can read the full record of a chat they belong to (the lead can read any), instead of asking you to export it.
 - Assistants remember their other conversations: each turn sees recent messages from your other chats with them (a direct chat knows what went wrong in the group chat).
 - Your Mac stays awake while assistants have work, and can sleep again when they are idle.
@@ -43,6 +48,9 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 ### Fixed
 - The lead no longer refuses work it queued itself from your instructions as "automatic" and asks you again. Automatic reports and event triggers still cannot start work.
 - Assistants stop asking "should I…?" about work the team can do themselves: the reply goes back to the assistant to do it, and the question is not pushed to Telegram. Questions about sending, spending, posting or deleting, and requests for passwords, codes or personal answers, still reach you.
+- An assistant can only report "blocked" after trying at least two other routes, unless the block is a CAPTCHA, MFA, a sign-in or a spend.
+- Telegram now carries only the lead's replies, decisions and files. Other assistants' chatter stays in the app.
+- The application-answers template now says that a blank line means "answer from the resume or skip", never "ask the owner".
 - Assistants try other people, sources and routes before reporting they are stuck, and list what they tried. Form questions are answered from your resume, memory and a new `shared/profile/application-answers.md` in the private computer (an empty template you fill in once). Reports that hand you answers the team can find are sent back to the assistant.
 - With "Submit job applications without asking" turned on, every field, dropdown and key press inside an application form on a job site is covered, so no more approval cards mid-application. The permission is still off until you turn it on.
 - Telegram decision cards are one plain sentence (the email itself for emails), without page address, fingerprint or expiry; the lead's messages arrive as plain text, and link previews are off.

@@ -146,7 +146,38 @@ export class ChatStore {
     const sender = m.sender ?? (m.role === 'owner' ? 'owner' : m.role === 'system' ? 'system' : this.primaryAgent(m.conversation_id));
     this.db.prepare('INSERT INTO messages(id, conversation_id, role, kind, content, job_id, artifact_id, approval_id, meta, created_at, sender, reply_to, mentions, delivery) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(id, m.conversation_id, m.role, m.kind ?? 'text', m.content, m.job_id ?? null, m.artifact_id ?? null, m.approval_id ?? null, JSON.stringify(m.meta ?? {}), t, sender, m.reply_to ?? null, JSON.stringify(m.mentions ?? []), m.delivery ?? 'delivered');
     this.db.prepare('UPDATE conversations SET last_message_at = ?, updated_at = ? WHERE id = ?').run(t, t, m.conversation_id);
-    return this.message(id)!;
+    const msg = this.message(id)!;
+    if (!m.meta?.mirror_of) { try { this.mirrorToTeam(msg); } catch { /* the team record never blocks the original message */ } }
+    return msg;
+  }
+
+  /** The team's group chat: the owner's setting team_conversation_id, else the active group with the lead and the most members. */
+  teamConversation(): string | null {
+    const set = this.db.prepare("SELECT value FROM settings WHERE key = 'team_conversation_id'").get() as { value: string } | undefined;
+    const want = set ? String(JSON.parse(set.value) ?? '') : ''; if (want && (this.db.prepare("SELECT 1 FROM conversations WHERE id = ? AND status = 'active'").get(want))) return want;
+    const r = this.db.prepare(`SELECT c.id FROM conversations c JOIN workspaces w ON w.id = c.workspace_id WHERE c.type = 'group' AND c.status = 'active'
+      AND COALESCE(json_extract(w.policies, '$.telegram'), 1) <> 0 AND COALESCE(json_extract(w.policies, '$.dry_run'), 0) = 0
+      AND EXISTS (SELECT 1 FROM conversation_members cm WHERE cm.conversation_id = c.id AND cm.agent_id = 'coordinator')
+      ORDER BY (SELECT count(*) FROM conversation_members cm WHERE cm.conversation_id = c.id) DESC, c.last_message_at DESC LIMIT 1`).get() as { id: string } | undefined;
+    return r?.id ?? null;
+  }
+
+  /** All work shows in the team group (owner, 2026-10-14: "Always show all work in group chat"): what happens in a direct chat or the
+   *  Telegram chat (the owner's requests, assistants' replies and progress, delegations, hand-offs, results, blockers) is copied there
+   *  as a labelled record of that message. Approvals stay private, ClaudeBot notes stay where they are, and test projects are left out. */
+  private mirrorToTeam(msg: Message): void {
+    if (['decision', 'wake'].includes(msg.kind) || msg.meta?.router) return;
+    const work = msg.role === 'owner' || msg.role === 'assistant' || ['delegation', 'handoff', 'result', 'blocker', 'status'].includes(msg.kind); if (!work) return;
+    const team = this.teamConversation(); if (!team || team === msg.conversation_id) return;
+    const src = this.db.prepare('SELECT c.title, c.type, w.policies FROM conversations c JOIN workspaces w ON w.id = c.workspace_id WHERE c.id = ?').get(msg.conversation_id) as { title: string | null; type: string; policies: string } | undefined; if (!src) return;
+    try { const pol = JSON.parse(src.policies || '{}') as { telegram?: boolean; dry_run?: boolean }; if (pol.telegram === false || pol.dry_run) return; } catch { /* treat as real */ }
+    const names = (id: string) => (this.db.prepare('SELECT name FROM agent_definitions WHERE id = ?').get(id) as { name: string } | undefined)?.name ?? id;
+    const viaTelegram = !!this.db.prepare("SELECT 1 FROM telegram_outbox o JOIN messages m ON m.id = o.message_id WHERE o.kind = 'inbound' AND m.conversation_id = ? LIMIT 1").get(msg.conversation_id);
+    const where = viaTelegram ? 'Telegram' : src.type === 'direct' ? `direct chat${src.title ? ` "${src.title}"` : ''}` : `"${src.title ?? 'another chat'}"`;
+    const who = msg.role === 'owner' ? 'You' : msg.role === 'assistant' ? names(msg.sender) : 'ClaudeBot';
+    if (msg.kind === 'result' && msg.artifact_id) { this.add({ conversation_id: team, role: 'assistant', kind: 'result', sender: msg.sender, content: msg.content, artifact_id: msg.artifact_id, job_id: msg.job_id, meta: { ...(msg.meta ?? {}), mirror_of: msg.id, from_conversation: msg.conversation_id, from_label: where } }); return; }
+    const text = String(msg.content ?? '').replace(/\s+/g, ' ').trim(); if (!text) return;
+    this.add({ conversation_id: team, role: 'system', kind: 'activity', content: `From ${where} · ${who}: ${text.length > 700 ? `${text.slice(0, 700)}…` : text}`, job_id: msg.job_id, meta: { mirror_of: msg.id, from_conversation: msg.conversation_id } });
   }
   message(id: string): Message | undefined { const r = this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as Record<string, unknown> | undefined; return r ? rowM(r) : undefined; }
   messages(conversationId: string, opts: { afterSeq?: number; limit?: number } = {}): Message[] {
@@ -306,19 +337,28 @@ export class ChatStore {
   }
 
   /** What happened recently in this assistant's other conversations (a direct chat cannot see the group chat or Telegram otherwise):
-   *  the owner's words, this assistant's own replies, the lead's replies and results, newest last; test projects are left out. */
-  elsewhere(agentId: string, exceptConversationId: string, opts: { hours?: number; limit?: number; each?: number } = {}): string {
+   *  the owner's words, this assistant's own replies, the lead's replies and results/blockers from the last 72 hours; up to
+   *  `limit` (default 10) per conversation, grouped under each conversation's title (least recently active first, oldest message first
+   *  within each group); test projects (telegram:false or dry_run) are left out. */
+  elsewhere(agentId: string, exceptConversationId: string, opts: { hours?: number; limit?: number; each?: number; conversations?: number } = {}): string {
     const since = new Date(Date.now() - (opts.hours ?? 72) * 3600_000).toISOString();
-    const rows = this.db.prepare(`SELECT m.id, m.role, m.sender, m.kind, m.content, m.artifact_id, m.created_at, c.title, c.type FROM messages m JOIN conversations c ON c.id = m.conversation_id JOIN workspaces w ON w.id = c.workspace_id
-      WHERE m.conversation_id <> ? AND m.created_at >= ? AND EXISTS (SELECT 1 FROM conversation_members cm WHERE cm.conversation_id = c.id AND cm.agent_id = ?)
-        AND COALESCE(json_extract(w.policies, '$.telegram'), 1) <> 0 AND COALESCE(json_extract(w.policies, '$.dry_run'), 0) = 0
-        AND (m.role = 'owner' OR (m.role = 'assistant' AND (m.sender = ? OR m.sender = 'coordinator')) OR m.kind IN ('result','blocker'))
-      ORDER BY m.created_at DESC LIMIT ?`).all(exceptConversationId, since, agentId, agentId, opts.limit ?? 30) as Array<{ id: string; role: string; sender: string; kind: string; content: string; artifact_id: string | null; created_at: string; title: string | null; type: string }>;
+    const perConv = Math.max(1, opts.limit ?? 10); const maxConvs = Math.max(1, opts.conversations ?? 12);
+    const rows = this.db.prepare(`SELECT * FROM (SELECT m.id, m.seq, m.role, m.sender, m.kind, m.content, m.artifact_id, m.created_at, m.conversation_id, c.title, c.type,
+          ROW_NUMBER() OVER (PARTITION BY m.conversation_id ORDER BY m.created_at DESC, m.seq DESC) AS rn
+        FROM messages m JOIN conversations c ON c.id = m.conversation_id JOIN workspaces w ON w.id = c.workspace_id
+        WHERE m.conversation_id <> ? AND m.created_at >= ? AND EXISTS (SELECT 1 FROM conversation_members cm WHERE cm.conversation_id = c.id AND cm.agent_id = ?)
+          AND COALESCE(json_extract(w.policies, '$.telegram'), 1) <> 0 AND COALESCE(json_extract(w.policies, '$.dry_run'), 0) = 0
+          AND (m.role = 'owner' OR (m.role = 'assistant' AND (m.sender = ? OR m.sender = 'coordinator')) OR m.kind IN ('result','blocker')))
+      WHERE rn <= ? ORDER BY created_at, seq`).all(exceptConversationId, since, agentId, agentId, perConv) as Array<{ id: string; seq: number; role: string; sender: string; kind: string; content: string; artifact_id: string | null; created_at: string; conversation_id: string; title: string | null; type: string }>;
     if (!rows.length) return '';
     const names = new Map((this.db.prepare('SELECT id, name FROM agent_definitions').all() as Array<{ id: string; name: string }>).map((a) => [a.id, a.name]));
     const who = (r: { role: string; sender: string }) => (r.role === 'owner' ? 'Owner' : r.role === 'assistant' ? (r.sender === agentId ? 'You' : names.get(r.sender) ?? r.sender) : 'System');
     const day = (s: string) => new Date(s).toLocaleString('en-US', { timeZone: 'America/Phoenix', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-    return rows.reverse().map((r) => `[${day(r.created_at)} · ${r.title || (r.type === 'group' ? 'group chat' : 'chat')}] ${who(r)}: ${this.contextText(r, opts.each ?? 400)}`).join('\n');
+    const groups = new Map<string, typeof rows>();
+    for (const r of rows) { const g = groups.get(r.conversation_id); if (g) g.push(r); else groups.set(r.conversation_id, [r]); }
+    // Rows are oldest first, so each group's last row is its newest; the most recently active conversations are kept and shown last.
+    const ordered = [...groups.values()].sort((a, b) => a[a.length - 1].created_at.localeCompare(b[b.length - 1].created_at) || a[a.length - 1].seq - b[b.length - 1].seq).slice(-maxConvs);
+    return ordered.map((g) => `${g[0].title || (g[0].type === 'group' ? 'group chat' : 'chat')}:\n${g.map((r) => `[${day(r.created_at)}] ${who(r)}: ${this.contextText(r, opts.each ?? 400)}`).join('\n')}`).join('\n\n');
   }
 
   /** What other members said in a group since this assistant last spoke (each member's session sees only its own turns). */

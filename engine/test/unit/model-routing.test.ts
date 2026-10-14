@@ -21,11 +21,12 @@ const src = (f: string) => fs.readFileSync(path.resolve(import.meta.dirname, '..
 test('model ids map to the aliases the ACP agent advertises (verified live: haiku, sonnet, opus); others pass through', () => {
   assert.equal(acpModel('claude-haiku-5-5'), 'haiku'); assert.equal(acpModel('claude-sonnet-5-5'), 'sonnet'); assert.equal(acpModel('claude-opus-5-5'), 'opus');
   assert.equal(acpModel('claude-fable-5-1[1m]'), 'claude-fable-5-1[1m]');
-  assert.deepEqual(AGENT_MODELS, ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5']);
+  assert.deepEqual(AGENT_MODELS, ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-1']);
 });
 
 test('every turn carries its assistant\'s model; a refused model fails the turn instead of running on another', () => {
-  const run = src('src/worker/run.ts'); assert.equal((run.match(/deps\.runtime\.startTurn\(\{[^\n]*model: agent\?\.model,/g) || []).length, 2, 'chat turns and workflow stages both pass the model');
+  const run = src('src/worker/run.ts'); assert.equal((run.match(/deps\.runtime\.startTurn\(\{[^\n]*model: (agent\?\.model|turnModel),/g) || []).length, 2, 'chat turns and workflow stages both pass the model');
+  assert.match(run, /const turnModel = replan && replanModel \? replanModel : agent\?\.model;/, 'the lead re-plans on the opt-in replan_model when delegated work came back blocked or partial'); assert.match(run, /key = 'replan_model'/);
   const acp = src('src/runtime/claude-acp.ts');
   assert.match(acp, /if \(!req\.probeOnly\) await this\.ensureModel\(sessionKey, req\.model\);/);
   assert.match(acp, /throw new GatewayError\('MODEL_REFUSED'/);

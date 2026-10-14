@@ -23,7 +23,7 @@ export const VM_SHARED = `${VM_WORKSPACES}/_shared`;
 /** Seeded once as ./shared/profile/application-answers.md; never overwritten. */
 export const APPLICATION_ANSWERS_TEMPLATE = `# Application answers
 
-Assistants answer job-application questions from your resume, memory and this file. Fill in what you want them to use; leave a line blank to be asked.
+Assistants answer job-application questions from your resume, memory and this file. Fill in what you want them to use. A blank line means: answer from the resume, or skip the field if it is optional. Assistants never ask you about a blank line.
 
 - Desired salary / pay range:
 - Work authorization / sponsorship needed:
