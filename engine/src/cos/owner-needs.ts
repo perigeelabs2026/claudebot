@@ -6,6 +6,8 @@
  * team's to fix and is reported under "Being fixed by the team". Deterministic: the report and Home use this, not the model.
  */
 
+import { OWNER_ACTION } from '../approvals/allowlist.ts';
+
 export type NeedOwner = 'owner' | 'team';
 
 /** Hard owner signals: only the owner can do these, whatever else the text says. */
@@ -19,7 +21,7 @@ const OWNER_HARD: RegExp[] = [
   /\bquota\b|\battainment\b|\bon[- ]target earnings\b|\bote\b/i,
   /\bessay\b|\babout (your|him|her)self\b|\bpersonal (statement|question|answer|story|detail)s?\b|\bonly (you|the owner) (know|can answer)/i,
   /\b(work authori[sz]ation|visa|sponsorship|social security|ssn|date of birth|passport)\b/i,
-  /\b(purchase|buy|buying|spend|spending|payment|pay for|credit card|card details|invoice|subscribe|upgrade (the |your )?plan)\b/i,
+  OWNER_ACTION,   // the approval allowlist: spending money, or the OK to send a message, post publicly or delete
 ];
 
 /** Things an assistant (or the team building ClaudeBot) can fix with a product capability: never put to the owner. */

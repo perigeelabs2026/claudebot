@@ -14,10 +14,10 @@ test('job sites and application controls: ATS hosts, LinkedIn Jobs and careers p
   for (const n of ['Send message', 'Connect', 'Pay now', 'Delete application', 'Withdraw application', 'Share']) assert.ok(!isApplicationControl(n), n);
 });
 
-test('browser policy: "Apply…" links are navigation; attaching a file is preparation; submitting still needs approval or the permission', () => {
+test('browser policy: "Apply…" links are navigation; attaching a file is preparation; submitting an application needs no card', () => {
   assert.equal(decide({ action: 'click', ref: 'e1' }, { ref: 'e1', role: 'link', name: 'Apply on company website' }).verdict, 'allow');
   assert.equal(decide({ action: 'upload', ref: 'e2' }, { ref: 'e2', role: 'button', name: 'Attach resume' }).verdict, 'allow');
-  assert.equal(decide({ action: 'click', ref: 'e3' }, { ref: 'e3', role: 'button', name: 'Submit application' }).verdict, 'needs_approval');
+  assert.equal(decide({ action: 'click', ref: 'e3' }, { ref: 'e3', role: 'button', name: 'Submit application' }).verdict, 'allow', 'submitting an application is not on the approval allowlist');
   assert.equal(decide({ action: 'upload', ref: 'e4' }, { ref: 'e4', role: 'textbox', name: 'Password' }).verdict, 'refuse');
 });
 

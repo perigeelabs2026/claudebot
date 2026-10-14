@@ -29,7 +29,7 @@ ClaudeBot app ─▶ ClaudeBot engine ─▶ OpenClaw gateway ─▶ acpx ─▶
 - **Real background work.** Durable tasks with progress, Stop, redirect, blockers, questions and automatic result delivery. Survives closing the window, restarting the app or the engine.
 - **Files and results.** Attach sources; preview, revise and download outputs with versions and hashes.
 - **A browser you can watch.** A managed, separate browser profile the assistants use for research and form preparation. You take over for logins, passwords and CAPTCHAs.
-- **Approvals.** Sending, publishing, buying and deleting always stop for your Allow once / Always allow / Deny.
+- **Approvals.** Only four things stop for your Allow once / Always allow / Deny: a message to a person, spending money, a public post, and a delete. Everything else (applying, submitting forms, signing up, uploading) just happens and is recorded.
 - **Voice.** On-device dictation and live voice conversation (macOS speech; Claude only ever sees text).
 - **Routines.** "Every weekday at 8:30" becomes a schedule; results land in the same chat. A morning report from the Chief of Staff.
 - **Telegram.** Talk to your Chief of Staff and answer approvals from your phone.

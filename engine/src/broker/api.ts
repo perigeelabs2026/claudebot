@@ -506,7 +506,7 @@ export class BrokerApi {
     const el = byRef(req.ref);
     const lastTyped = db.prepare("SELECT detail FROM job_events WHERE job_id = ? AND type = 'browser.act' ORDER BY seq DESC LIMIT 1").get(cap.job_id) as { detail: string } | undefined;
     const focused = req.action === 'press' ? (() => { try { const d = JSON.parse(lastTyped?.detail ?? '{}') as { ref?: string }; return byRef(d.ref); } catch { return undefined; } })() : undefined;
-    const verdict = decide(req, el, focused);
+    const verdict = decide(req, el, focused, els);
     const urlNow = await this.tabUrl(tab);
     const typed: string[] = (db.prepare("SELECT detail FROM job_events WHERE job_id = ? AND type = 'browser.act' ORDER BY seq").all(cap.job_id) as Array<{ detail: string }>).map((r) => { try { const d = JSON.parse(r.detail) as { url?: string; value?: string; values?: string[] }; return d.url === urlNow ? [d.value, ...(d.values ?? [])].filter((x): x is string => typeof x === 'string') : []; } catch { return []; } }).flat();
     const elementLog = el ? { ref: el.ref, role: el.role, name: el.name.slice(0, 200) } : { ref: req.ref ?? null };
@@ -518,9 +518,12 @@ export class BrokerApi {
       this.store.event(cap.job_id, actor, 'browser.act', { action: 'type', ...elementLog, url: urlNow, why: 'preparation (the submit is held for approval)', value: req.text ?? '' });
       typed.push(req.text ?? '');
     }
-    if (verdict.verdict === 'needs_approval') {
-      // Dry-run projects (workspace policies.dry_run): everything up to the final submit, never the submit itself, whatever permission is on.
+    // Dry-run projects (workspace policies.dry_run): everything up to the final submit, never the submit itself, whatever permission is on.
+    // That covers allowed commits (Submit application, Enter in a form) as well as allowlisted actions.
+    if (verdict.verdict === 'needs_approval' || (verdict.verdict === 'allow' && verdict.commit && (req.action !== 'click' || /\b(submit|send|apply|finish|complete|confirm|register|sign ?up|create)\b/i.test(el?.name ?? '')))) {
       try { const pol = JSON.parse((db.prepare('SELECT w.policies FROM jobs j JOIN workspaces w ON w.id = j.workspace_id WHERE j.id = ?').get(cap.job_id) as { policies: string } | undefined)?.policies || '{}') as { dry_run?: boolean }; if (pol.dry_run) { this.store.event(cap.job_id, actor, 'browser.dry_run_stop', { url: urlNow, control: el?.name ?? null }); return { ok: false, text: `Dry run: stopped before "${el?.name ?? 'submit'}". Nothing was submitted. The form stays filled; report what is filled and attached.` }; } } catch { /* no policy */ }
+    }
+    if (verdict.verdict === 'needs_approval') {
       const target = `${urlNow} — ${el ? `${el.role} "${el.name}"` : `key ${req.key}`}`;
       const content = approvalContent({ url: urlNow, element: el ?? focused, action: req.action === 'type' ? 'press' : req.action, key: req.key ?? (req.submit ? 'Enter' : undefined), typed });
       const shown = JSON.stringify({ page: urlNow, control: el ? `${el.role} "${el.name}"` : `Enter${focused ? ` in ${focused.role} "${focused.name}"` : ''}`, values_entered_in_this_tab: typed }, null, 1);
@@ -600,7 +603,7 @@ export class BrokerApi {
       }
       default: return { ok: false, text: 'unknown action' };
     }
-    this.store.event(cap.job_id, actor, r.ok ? 'browser.act' : 'browser.act_failed', { action: req.action, ...elementLog, url: urlNow, why: verdict.reason, ...extra });
+    this.store.event(cap.job_id, actor, r.ok ? 'browser.act' : 'browser.act_failed', { action: req.action, ...elementLog, url: urlNow, why: verdict.reason, ...(verdict.verdict === 'allow' && verdict.commit ? { commit: true } : {}), ...extra });   // commit: a submit-type control, allowed (not on the allowlist) and audited
     if (!r.ok) return { ok: false, text: `the browser could not ${req.action}: ${(r.stderr || r.stdout).replace(/\s+/g, ' ').slice(0, 200)}` };
     return { ok: true, text: `${req.action} done (${verdict.reason}).${req.action === 'download' && extra.artifact_id ? ` Saved as artifact ${extra.artifact_id} (${extra.bytes} bytes).` : ''}${req.action === 'upload' ? ` The page now holds ${String(extra.file)}; click the form's own submit/upload button next.` : ''} Take a snapshot to see the page now.`, data: extra };
   }

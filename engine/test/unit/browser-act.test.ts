@@ -60,7 +60,8 @@ test('act policy: parses real snapshot lines and classifies preparation, consequ
   assert.equal(decide({ action: 'click', ref: 'e61' }, el('e61')).verdict, 'allow');
   assert.equal(decide({ action: 'click', ref: 'e16' }, el('e16')).verdict, 'allow');
   assert.equal(decide({ action: 'press', key: 'Enter' }, undefined, el('e60')).verdict, 'allow', 'Enter in a search box');
-  assert.equal(decide({ action: 'press', key: 'Enter' }, undefined, el('e5')).verdict, 'needs_approval', 'Enter in a form field submits');
+  assert.equal(decide({ action: 'press', key: 'Enter' }, undefined, el('e5'), els).verdict, 'needs_approval', 'Enter in a form whose button places an order');
+  assert.equal(decide({ action: 'press', key: 'Enter' }, undefined, el('e5')).verdict, 'allow', 'Enter in an ordinary form field is not on the approval allowlist');
   assert.equal(decide({ action: 'press', key: 'Meta+a' }, undefined).verdict, 'refuse');
   assert.equal(decide({ action: 'download', ref: 'e62' }, el('e62')).verdict, 'allow');
   assert.equal(decide({ action: 'click', ref: 'e99' }, undefined).verdict, 'refuse', 'unknown element');

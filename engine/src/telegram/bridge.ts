@@ -1,5 +1,6 @@
 import { bankKnows } from '../memory/answer-bank.ts';
 import { classifyBlocked } from '../cos/owner-needs.ts';
+import { allowlistEntry } from '../approvals/allowlist.ts';
 /**
  * Telegram bridge (long polling; no public webhook is needed on a Mac). Owner-only:
  * - the bot token lives in secrets/telegram.token (0600), set by the owner in the app, never logged or returned;
@@ -228,7 +229,7 @@ export class TelegramBridge {
         const v = describeApproval(ap); const asker = ap.job_id ? (db.prepare('SELECT agent_role FROM jobs WHERE id = ?').get(ap.job_id) as { agent_role: string } | undefined)?.agent_role : undefined;
         // One plain sentence about what will happen, and the email itself when it is an email; no ids, fingerprints, expiry or raw links.
         const askerName = (asker ? this.d.defs.getAgent(asker)?.name : null)?.replace(/\s*\(.*\)$/, '') ?? 'An assistant';
-        const text = v.email ? `${askerName} wants to send this email. Allow it?\n\n${v.text.slice(0, 3400)}` : v.browser ? `${askerName} wants to ${v.text}. Allow it?` : `${askerName} wants to ${v.label.toLowerCase()}: ${String(ap.target).replace(/https?:\/\/\S+/g, '').trim().slice(0, 300)}. Allow it?`;
+        const text = v.email ? `${askerName} wants to send this email. Allow it?\n\n${v.text.slice(0, 3400)}` : v.browser ? `${askerName} wants to ${v.text}. Allow it?` : `${askerName} wants to ${allowlistEntry(ap.action_kind)?.verb ?? v.label.toLowerCase()}: ${String(ap.target).replace(/https?:\/\/\S+/g, '').trim().slice(0, 300)}. Allow it?`;
         const keys = v.missingBody ? [{ text: 'Deny', callback_data: `ap:${ap.id}:${ap.content_hash.slice(0, 12)}:deny` }] : [{ text: 'Allow once', callback_data: `ap:${ap.id}:${ap.content_hash.slice(0, 12)}:allow` }, { text: 'Deny', callback_data: `ap:${ap.id}:${ap.content_hash.slice(0, 12)}:deny` }];
         body = { chat_id: b.chat_id, text, reply_markup: { inline_keyboard: [keys] } };
       } else if (r.kind === 'result') {
