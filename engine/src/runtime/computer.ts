@@ -88,7 +88,16 @@ export class ComputerRuntime implements ModelRuntime {
       }
     } catch (e) { return { ok: false, category: 'crashed', message: `could not prepare the task folder in the assistants' computer: ${(e as Error).message.slice(0, 200)}`, retryable: true } as TurnResult; }
     let r: TurnResult;
-    try { r = await this.inner.startTurn({ ...req, cwd: vmDir }); }
+    try {
+      r = await this.inner.startTurn({ ...req, cwd: vmDir });
+      // "Sign in again" only when Claude in the computer really is signed out. A computer that was restarting or briefly unreachable
+      // is a transient failure (retried), never a sign-in request to the owner.
+      if (!r.ok && (r as { category?: string }).category === 'auth_required') {
+        let signedIn = false; try { signedIn = (JSON.parse(await computerAuthStatus()) as { loggedIn?: boolean }).loggedIn === true; } catch { signedIn = false; }
+        let reachable = true; try { await computerAuthStatus(); } catch { reachable = false; }
+        if (signedIn || !reachable) r = { ...(r as object), category: 'transient', retryable: true, message: `the assistants' computer was not ready (${signedIn ? 'Claude is signed in' : 'unreachable'}); retrying` } as TurnResult;
+      }
+    }
     finally {
       // Files the turn wrote in the computer come back to the task folder on the Mac (results, drafts, downloads).
       try { fs.mkdirSync(hostDir, { recursive: true }); await this.rsync(`${SSH_HOST}:${vmDir}/`, `${hostDir}/`); } catch (e) { this.o.log.warn('copying files back from the assistants\' computer failed', { err: (e as Error).message.slice(0, 200), hostDir }); }

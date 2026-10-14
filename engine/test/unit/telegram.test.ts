@@ -155,3 +155,19 @@ test('T6: Telegram is a command channel through the lead: plain decision cards t
   assert.equal(f.calls.filter((x) => x.method === 'sendMessage' && String(x.body.text).startsWith('Needs your decision')).length, 1);
   f.close();
 });
+
+test('T7: quiet hours send nothing (held, never sent later) and test projects never reach Telegram', async () => {
+  const f = await fakeTelegram(); const s = setup(f.base); saveToken(s.secrets, TOKEN);
+  const { code } = newPairingCode(s.db); f.push(msg(1, 777, `/start ${code}`)); await s.bridge.cycle(0);
+  const c = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] });
+  s.db.prepare("INSERT INTO runtime_state(key, value, evidence, observed_at) VALUES ('telegram.quiet_until', ?, '{}', ?)").run(JSON.stringify({ until: new Date(Date.now() + 3600_000).toISOString() }), new Date().toISOString());
+  s.chat.add({ conversation_id: c.id, role: 'assistant', sender: 'coordinator', content: 'night news' }); f.calls.length = 0; await s.bridge.cycle(0);
+  assert.ok(!f.calls.some((x) => x.method === 'sendMessage' && String(x.body.text).includes('night news')), 'nothing during quiet hours');
+  s.db.prepare("DELETE FROM runtime_state WHERE key = 'telegram.quiet_until'").run(); await s.bridge.cycle(0);
+  assert.ok(!f.calls.some((x) => x.method === 'sendMessage' && String(x.body.text).includes('night news')), 'held notices are not sent later');
+  const ws2 = new Workspaces(s.db, path.join(os.tmpdir(), `tg-ws-${Date.now()}`)).create({ name: 'Test project', policies: { telegram: false } }, 'test');
+  const c2 = s.chat.create({ workspace_id: ws2.id, type: 'direct', members: ['coordinator'] }); s.chat.add({ conversation_id: c2.id, role: 'assistant', sender: 'coordinator', content: 'rehearsal chatter' });
+  s.chat.add({ conversation_id: c.id, role: 'assistant', sender: 'coordinator', content: 'real morning news' }); f.calls.length = 0; await s.bridge.cycle(0);
+  const texts = f.calls.filter((x) => x.method === 'sendMessage').map((x) => String(x.body.text)); assert.ok(texts.some((x) => x.includes('real morning news'))); assert.ok(!texts.some((x) => x.includes('rehearsal chatter')));
+  f.close();
+});

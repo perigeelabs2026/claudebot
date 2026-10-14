@@ -11,6 +11,7 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Existing installs: run `claudebot update` to pick up these settings.
 
 ### Added
+- Telegram quiet hours: notices are held while `telegram.quiet_until` is set, and projects with Telegram turned off in their policies never send.
 - Assistants can know your name (Settings key `owner_name`, unset by default): work is made for you, and "Chief, …" reads as you talking to the Chief of Staff.
 - **Assistants keep going until the goal is done.** An assistant can schedule its next round on the same goal (up to 6 per request). After a failed round it must try a different approach, and it checks its own result before stopping.
 - **Team skills.** Assistants save what they learn about a site to `Skills/<site>.md` in the memory vault, and every turn reads the skills for the sites in play.
@@ -34,6 +35,7 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Assistants can open zip and tar archives you give them: files are extracted into a new folder inside the task. Links, paths that escape the folder, and oversized archives are refused. Documents and PDFs also get text copies the assistants can read.
 
 ### Fixed
+- No false "signed out" alarms from the private computer: a sign-in failure is re-checked against Claude's real sign-in there and retried if you are still signed in.
 - The honesty check flags only real submission claims ("I submitted…") and accepts honest negatives ("nothing was applied for") and a teammate's verified submit.
 - In the private computer, uploads reach the site (the browser's private /tmp could not read staged files), and the browser keeps track of the task's own tab.
 - Upload results say plainly that the page holds the file.
