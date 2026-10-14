@@ -231,7 +231,7 @@ test('1: with no ACP session at startup nothing is probed, and the first assista
   assert.equal(sent.slice(n).filter((m) => /claudebot-model-probe/.test(m)).length, 0, 'later turns do not probe again');
 });
 
-type ProbeRt = { command: (m: string) => Promise<string>; advertisedModels: (o?: unknown) => Promise<{ models: string[]; reply: string } | null>; probeOn: (k: string, cur?: string) => Promise<boolean>; models: Map<string, string>; lastEmptyProbe: number; probedSessions: Set<string> };
+type ProbeRt = { command: (m: string) => Promise<string>; advertisedModels: (o?: unknown) => Promise<{ models: string[]; reply: string } | null>; probeOn: (k: string, cur?: string) => Promise<string>; ensureModel: (k: string, m?: string) => Promise<unknown>; roleModels: Record<string, string>; models: Map<string, string>; lastEmptyProbe: number; probedSessions: Set<string> };
 const probeRt = () => new ClaudeAcpRuntime({ gateway: {} as never, log, claudeExecutable: '/bin/false', claudeConfigDir: '/tmp/none' }) as unknown as ProbeRt;
 
 test('1 (Fable d160a2c): while the list is unverified each session is probed once, and a probe that lists nothing starts a 10-minute cooldown for every path', async () => {
@@ -248,7 +248,7 @@ test('1 (Fable d160a2c): while the list is unverified each session is probed onc
 test('1 (Fable d160a2c): a probe the gateway accepts is undone: the session model is forgotten and, on another assistant\'s session, set back', async () => {
   const rt = probeRt(); const sent: string[] = []; rt.command = async (m) => { sent.push(m); return 'Model set to claudebot-model-probe.'; };
   rt.models.set('agent:researcher:acp:aa', 'claude-opus-5-5');
-  assert.equal(await rt.probeOn('agent:researcher:acp:aa'), false);
+  assert.equal(await rt.probeOn('agent:researcher:acp:aa'), 'empty');
   assert.deepEqual(sent, ['/acp model claudebot-model-probe agent:researcher:acp:aa', '/acp model opus agent:researcher:acp:aa'], 'the previous model is re-sent');
   assert.equal(rt.models.get('agent:researcher:acp:aa'), 'claude-opus-5-5', 'and recorded again once accepted');
   // The turn's own session: forgotten, not restored here (ensureModel sets its model right after).
@@ -270,4 +270,39 @@ test('1 (Fable d160a2c): the last few distinct ACP sessions are tried in order u
   rt.command = async (m) => { sent.push(m); if (/acp:03/.test(m)) throw new Error('ACP session not found'); return 'ACP error: unknown model. Available models: default, opus, fable, sonnet, haiku'; };
   const v = await advertised(rt, { db: s.db }); assert.equal(v.verified, true, 'the next candidate lists');
   assert.deepEqual(sent, ['/acp model claudebot-model-probe agent:writer:acp:03', '/acp model claudebot-model-probe agent:builder:acp:02'], 'the broken newest one errors, the next is tried, and the walk stops at the first list');
+});
+
+test('1 (Fable f6ef346): after a restart an accepted probe is undone from the role in the session key (configured model, else default); a turn with no model still resets it', async () => {
+  const rt = probeRt(); const sent: string[] = []; rt.command = async (m) => { sent.push(m); return /claudebot-model-probe/.test(m) ? 'Model set.' : 'ok'; };
+  await rt.advertisedModels({ sessionKeys: ['agent:researcher:acp:aa'], roleModels: { researcher: 'claude-opus-5-5' } });
+  assert.deepEqual(sent, ['/acp model claudebot-model-probe agent:researcher:acp:aa', '/acp model opus agent:researcher:acp:aa'], 'the role\'s configured model, with nothing in memory');
+  const rt2 = probeRt(); const sent2: string[] = []; rt2.command = async (m) => { sent2.push(m); return /claudebot-model-probe/.test(m) ? 'Model set.' : 'ok'; };
+  await rt2.probeOn('agent:mystery:acp:bb'); assert.equal(sent2[1], '/acp model default agent:mystery:acp:bb', 'nothing known: default');
+  // The turn's own session took the probe; the turn names no model: ensureModel still resets it, once.
+  const rt3 = probeRt(); const sent3: string[] = []; rt3.command = async (m) => { sent3.push(m); return /claudebot-model-probe/.test(m) ? 'Model set.' : 'ok'; }; rt3.roleModels = { builder: 'claude-sonnet-5-5' };
+  await rt3.probeOn('agent:builder:acp:cc', 'agent:builder:acp:cc'); assert.equal(sent3.length, 1, 'the turn\'s own session is reset by ensureModel, not here');
+  await rt3.ensureModel('agent:builder:acp:cc', undefined); assert.equal(sent3[1], '/acp model sonnet agent:builder:acp:cc');
+  await rt3.ensureModel('agent:builder:acp:cc', undefined); assert.equal(sent3.length, 2, 'reset once');
+});
+
+test('1 (Fable f6ef346): a timeout ends the walk, a missing session moves on, the walk is capped at about 20 s, and no second walk follows a timed-out one', async () => {
+  const { PROBE_WALK_MS } = await import('../../src/runtime/claude-acp.ts'); assert.equal(PROBE_WALK_MS, 20_000);
+  const rt = probeRt(); const sent: string[] = []; const budgets: number[] = [];
+  (rt as unknown as { command: (m: string, t: number) => Promise<string> }).command = async (m, t) => { sent.push(m); budgets.push(t);
+    if (/acp:01/.test(m)) throw new Error('ACP session not found: agent:a:acp:01'); if (/acp:02/.test(m)) throw new Error('OpenClaw control request timed out after 20000 ms'); return 'ACP error. Available models: default, opus'; };
+  await rt.advertisedModels({ sessionKeys: ['agent:a:acp:01', 'agent:b:acp:02', 'agent:c:acp:03'] });
+  assert.deepEqual(sent.map((m) => m.split(' ').pop()), ['agent:a:acp:01', 'agent:b:acp:02'], 'not-found continues; the timeout ends the walk');
+  assert.ok(budgets.every((b) => b <= 20_000) && budgets[0] <= 20_000);
+  await rt.advertisedModels({ fresh: true, sessionKeys: ['agent:c:acp:03'] }); assert.equal(sent.length, 2, 'no second walk after a timed-out one');
+  // The total cap: each probe gets only what is left of the walk budget, and the walk stops when under a second remains.
+  const rt2 = probeRt(); const b2: number[] = [];
+  (rt2 as unknown as { command: (m: string, t: number) => Promise<string> }).command = async (_m, t) => { b2.push(t); await new Promise((r) => setTimeout(r, 400)); throw new Error('ACP session not found'); };
+  const t0 = Date.now(); await rt2.advertisedModels({ sessionKeys: ['agent:a:acp:1', 'agent:a:acp:2', 'agent:a:acp:3', 'agent:a:acp:4', 'agent:a:acp:5'], budgetMs: 1800 });
+  assert.ok(Date.now() - t0 < 1800, 'the walk ends inside its budget'); assert.ok(b2.length < 5 && b2[1] < b2[0], 'later probes get only the remaining budget');
+});
+
+test('1 (Fable f6ef346): an empty, non-error reply to the probe counts as accepted, so the session model is put back', async () => {
+  const rt = probeRt(); const sent: string[] = []; rt.command = async (m) => { sent.push(m); return /claudebot-model-probe/.test(m) ? '' : 'ok'; };
+  rt.models.set('agent:researcher:acp:aa', 'claude-opus-5-5');
+  assert.equal(await rt.probeOn('agent:researcher:acp:aa'), 'empty'); assert.equal(sent[1], '/acp model opus agent:researcher:acp:aa');
 });

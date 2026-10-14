@@ -46,6 +46,7 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Assistants can open zip and tar archives you give them: files are extracted into a new folder inside the task. Links, paths that escape the folder, and oversized archives are refused. Documents and PDFs also get text copies the assistants can read.
 
 ### Fixed
+- After a restart, a session that wrongly accepted the model probe gets its assistant's configured model back (or `default`), even on a turn that names no model. A probe walk is capped at about 20 seconds, stops on a timeout, and moves past closed sessions. An empty reply to the probe counts as accepted.
 - Model list probes are limited: each assistant session is asked at most once while the list is unknown, and a probe that lists nothing pauses probing for 10 minutes. If the connection ever accepts the probe, the session's real model is put back. The last few assistant sessions are tried in order until one lists.
 - The model check now asks a real assistant session for the list of available models (the most recent one), not the internal control session, which never lists them. With no assistant session yet, the first assistant turn fetches the list. A session error is treated as "not verified yet", never as a refused model.
 - The harvested model list expires after an hour and is then probed again. A probe that lists nothing keeps the older list. Saving an assistant with a model the cached list lacks probes again first, and the save is refused only if the fresh list still lacks it.

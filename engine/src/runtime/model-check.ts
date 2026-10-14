@@ -28,7 +28,10 @@ export const latestAcpSession = (db: DB | null | undefined): string | null => la
 
 /** The connection's own list, or the fallback list when it names none. */
 export async function advertised(runtime: Pick<ModelRuntime, 'advertisedModels'> | null | undefined, opts: { fresh?: boolean; db?: DB | null } = {}): Promise<{ models: readonly string[]; reply: string | null; verified: boolean }> {
-  try { const sessionKeys = latestAcpSessions(opts.db); const r = await runtime?.advertisedModels?.(opts.fresh || sessionKeys.length ? { ...(opts.fresh ? { fresh: true } : {}), ...(sessionKeys.length ? { sessionKeys } : {}) } : undefined); if (r && r.models.length) return { models: r.models, reply: r.reply, verified: true }; } catch { /* the fallback list */ }
+  try {
+    const sessionKeys = latestAcpSessions(opts.db);
+    const roleModels = opts.db ? Object.fromEntries((opts.db.prepare("SELECT id, model FROM agent_definitions WHERE model IS NOT NULL AND model != ''").all() as Array<{ id: string; model: string }>).map((r) => [r.id, r.model])) : undefined;
+    const r = await runtime?.advertisedModels?.(opts.fresh || sessionKeys.length || roleModels ? { ...(opts.fresh ? { fresh: true } : {}), ...(sessionKeys.length ? { sessionKeys } : {}), ...(roleModels ? { roleModels } : {}) } : undefined); if (r && r.models.length) return { models: r.models, reply: r.reply, verified: true }; } catch { /* the fallback list */ }
   return { models: ADVERTISED_MODELS, reply: null, verified: false };
 }
 
