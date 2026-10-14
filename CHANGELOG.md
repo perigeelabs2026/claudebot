@@ -4,6 +4,10 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 
 ## 2026-10-14
 
+### Added
+- **Follow-up emails after an application** (only while "Send emails without asking" is on, never in test projects). Each verified application gets one follow-up task: the Reviewer checks the Sent folder first, finds the hiring contact with a published address that proves the pattern, sends one email from your webmail and proves it from the Sent folder. If no address can be found, it records what it tried. A second email for the same application is refused. `claudebot maintenance followup-requeue <record>` (or `--all-failed`) re-runs a failed follow-up without sending twice.
+- A workflow that has never passed and keeps failing its own check no longer pauses its assistant's queue; you get one line naming the workflow instead.
+
 ### Security
 - Build checks are fenced in tighter: the builder account reaches only GitHub and npm (no longer Anthropic), only the computer's own DNS resolver, and only the engine's port on your Mac. A check that tampers with its worktree's git pointer fails the task, commits never follow it, and nothing a check started keeps running after it ends. Failed `npm ci` output now shows in the check result. See [docs/BUILD-TASKS.md](docs/BUILD-TASKS.md). Existing installs: run `claudebot computer update`.
 

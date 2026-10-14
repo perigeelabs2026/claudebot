@@ -9,6 +9,7 @@ import { ActionStore } from '../actions/store.ts';
 import { ApprovalStore } from '../approvals/store.ts';
 import { runProbe } from '../infra/probe.ts';
 import { collectReport, openWork } from '../cos/report.ts';
+import { isSentSearchUrl } from '../jobs/followup.ts';
 import { buildShell, shellFor, buildRepo, ensureClone, prepareWorktree, runBuildCheck, commitBuild, exportBuild, stageBundle, NO_BUILD_REPO, type BuildCheck } from '../build/repo.ts';
 
 export interface DetCtx { db: DB; store: JobStore; job: Job; workspace: string; previous: Record<string, unknown>; actor: string; approvals: ApprovalStore; actions: ActionStore; /** the assistants' computer is on (build jobs run there) */ vmOn?: boolean }
@@ -27,6 +28,33 @@ export const DETERMINISTIC: Record<string, DetFn> = {
   /** Morning report, step 1: snapshot the ledger (counts and lists of real rows) for the Chief of Staff to write from. */
   collect_report: async (ctx) => { const r = collectReport(ctx.db, ctx.job.id, ctx.job.workspace_id ?? null); return { ok: true, payload: r }; },
   /** Morning report, last step: the Chief of Staff must have written the headline and lede (save_report); otherwise the report failed. */
+  // jobs.follow_up_email: passes on proof only. Either the send (record_followup "sent": the Sent-folder search URL and the recipient,
+  // checked on the page) with at least one sourced evidence row that shows a published address at the recipient's domain, or
+  // record_followup "no_address" with what was tried. Its own check: verify_evidence and the research contracts are not involved.
+  verify_followup: async (ctx) => {
+    const ev = (type: string) => (ctx.db.prepare('SELECT detail FROM job_events WHERE job_id = ? AND type = ? ORDER BY seq DESC LIMIT 1').get(ctx.job.id, type) as { detail: string } | undefined);
+    const fail = (reason: string) => ({ ok: false as const, reason, terminal: true, operatorAction: 'The follow-up was not proven. Open the task: check the Sent folder before re-running it (re-queue with the follow-up requeue).' });
+    const sent = ev('followup.sent');
+    if (sent) {
+      const d = JSON.parse(sent.detail) as { recipient?: string; sent_search_url?: string; record?: string };
+      const to = String(d.recipient ?? '').toLowerCase(); const domain = /^[^@\s]+@([a-z0-9.-]+\.[a-z]{2,})$/.exec(to)?.[1];
+      if (!domain) return fail(`followup.sent has no valid recipient (${to || 'none'})`);
+      if (!d.sent_search_url || !isSentSearchUrl(d.sent_search_url)) return fail('followup.sent has no Sent-folder search URL');
+      const rows = ctx.db.prepare('SELECT title, body, source_url FROM memory_evidence WHERE job_id = ?').all(ctx.job.id) as Array<{ title: string | null; body: string | null; source_url: string | null }>;
+      const at = new RegExp(`[a-z0-9._%+-]+@${domain.replace(/\./g, '\\.')}\\b`, 'i');
+      const proof = rows.filter((r) => /^https?:\/\//.test(r.source_url ?? '') && at.test(`${r.title ?? ''} ${r.body ?? ''}`));
+      if (!proof.length) return fail(`no evidence row with a published @${domain} address and its source (add_evidence) proves the address`);
+      return { ok: true, payload: { followup: 'sent', recipient: to, sent_search_url: d.sent_search_url, evidence: proof.length } };
+    }
+    const none = ev('followup.no_address');
+    if (none) {
+      const d = JSON.parse(none.detail) as { tried?: unknown };
+      const tried = Array.isArray(d.tried) ? d.tried.map(String).filter((x) => x.trim()) : [];
+      if (!tried.length) return fail('followup.no_address lists nothing that was tried');
+      return { ok: true, payload: { followup: 'no_address', tried } };
+    }
+    return fail('no follow-up was recorded: record_followup was never called with "sent" or "no_address"');
+  },
   verify_report: async (ctx) => { const r = ctx.db.prepare("SELECT id, status FROM reports WHERE job_id = ? ORDER BY created_at DESC LIMIT 1").get(ctx.job.id) as { id: string; status: string } | undefined; if (!r) return { ok: false, reason: 'no report was collected', terminal: true }; if (r.status !== 'written') { ctx.db.prepare("UPDATE reports SET status = 'failed' WHERE id = ?").run(r.id); return { ok: false, reason: 'the Chief of Staff did not write the report (save_report was not called)', terminal: true, operatorAction: 'Generate the report again.' }; } return { ok: true, payload: { report_id: r.id, written: true } }; },
   /** Ranking, step 1: the open work to rank, as plain text. */
   collect_open_work: async (ctx) => { const open = openWork(ctx.db); return { ok: true, payload: { open_count: open.length, open_text: open.length ? open.map((o) => `- task ${o.id}: ${o.title} (${o.agent}, ${o.state}${o.rank ? `, currently rank ${o.rank}` : ', unranked'})`).join('\n') : '- none' } }; },

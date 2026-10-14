@@ -1,5 +1,6 @@
 import { lookupAnswer } from '../memory/answer-bank.ts';
 import { safeExtract, sourceAllowed } from './archive.ts';
+import { FOLLOWUP_KIND, createFollowUp, sentFollowUp, isSentSearchUrl } from '../jobs/followup.ts';
 import { matchPermission, jobApplicationPermission, emailPermission, grantEmails, EMAILS, emailRecipients, teamPermissionState, untilText, webmailName, CODES, codesPermission, grantVerificationCodes, isJobSite, isApplicationControl, isApplicationFormControl, contentRecipients, grantJobApplications, revokePermission, JOB_APPLICATIONS } from '../approvals/permissions.ts';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -254,6 +255,27 @@ export class BrokerApi {
         this.store.event(cap.job_id, actor, 'goal.continue', { root, round, next_step: next, what_changed: changed || null, failed, next_job: j.id });
         return { ok: true, text: `Round ${round} scheduled; it starts right after this reply. End this reply with a one-line status for the owner (no claim of done).`, data: { job_id: j.id, round } };
       }
+      case 'record_followup': {
+        const me = this.store.get(cap.job_id); if (me?.kind !== FOLLOWUP_KIND) return { ok: false, text: 'record_followup is for follow-up email tasks only' };
+        const record = String((JSON.parse(me.inputs || '{}') as { record?: string }).record ?? ''); if (!record) return { ok: false, text: 'this follow-up task names no application record' };
+        if (a.result === 'no_address') {
+          const tried = (Array.isArray(a.tried) ? a.tried : []).map((x) => String(x).trim().slice(0, 300)).filter(Boolean).slice(0, 40);
+          if (!tried.length) return { ok: false, text: 'Not recorded: list every source and address pattern you tried in tried.' };
+          this.store.event(cap.job_id, actor, 'followup.no_address', { record, tried });
+          return { ok: true, text: `Recorded: no address found for this application (${tried.length} tried). Nothing was sent.` };
+        }
+        if (a.result !== 'sent') return { ok: false, text: 'result must be "sent" or "no_address"' };
+        const to = String(a.recipient ?? '').trim().toLowerCase(); if (!/^[^@\s]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(to)) return { ok: false, text: 'recipient must be the email address the follow-up went to' };
+        const prior = sentFollowUp(db, record); if (prior && prior.job_id !== cap.job_id) return { ok: false, text: `Already recorded: the follow-up for this application went to ${prior.recipient} (${prior.at.slice(0, 16)}). Do not send another.` };
+        const tab = taskTab(db, cap.job_id) ?? this.resumedTab(cap.job_id); if (!tab) return { ok: false, text: 'Not recorded: this task has no browser tab. Open the Sent search for the recipient in your tab first.' };
+        const urlNow = await this.tabUrl(tab);
+        if (!isSentSearchUrl(urlNow)) return { ok: false, text: `Not recorded: your tab (${urlNow}) is not a webmail Sent-folder search. Open the Sent search for ${to} (Gmail: https://mail.google.com/mail/u/0/#search/in%3Asent+to%3A${encodeURIComponent(to)}) and call this again.` };
+        const ev = await this.browserRunner(['evaluate', '--fn', '() => (document.title + "\\n" + location.href + "\\n" + document.body.innerText).slice(0, 20000)', '--target-id', tab], 'browser.evaluate', 30_000);
+        if (!(ev.stdout ?? '').toLowerCase().includes(to)) return { ok: false, text: `Not recorded: the Sent search in your tab does not show an email to ${to}. If it was not sent, it is NOT sent.` };
+        this.store.event(cap.job_id, actor, 'followup.sent', { record, recipient: to, sent_search_url: urlNow, already_sent: a.already_sent === true });
+        try { const r = db.prepare('SELECT data FROM records WHERE id = ?').get(record) as { data: string } | undefined; if (r) { const d = JSON.parse(r.data); d.followup = { sent_to: to, recorded_at: now(), task: cap.job_id, already_sent: a.already_sent === true }; db.prepare('UPDATE records SET data = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(d), now(), record); } } catch { /* the event stands */ }
+        return { ok: true, text: `Recorded: the follow-up to ${to} is in Sent.` };
+      }
       case 'record_application': {
         // An application counts as submitted only with proof: the task's own browser tab must be showing the site's confirmation.
         // The page text is checked, a screenshot is saved as a receipt (a file card), and the record is written. No proof, no record.
@@ -278,6 +300,7 @@ export class BrokerApi {
         const recId = newId('rec'); const rt = now();
         db.prepare('INSERT INTO records(id, type, data, job_id, created_at, updated_at) VALUES (?,?,?,?,?,?)').run(recId, 'application', JSON.stringify({ title: `${company} – ${role}`, company, role, url: urlNow, submitted_at: rt, confirmation: conf, receipt_artifact: shotArt, verified: true }), cap.job_id, rt, rt);
         this.store.event(cap.job_id, actor, 'application.verified', { record: recId, company, role, url: urlNow, confirmation: conf, receipt: shotArt });
+        try { const f = createFollowUp(db, this.store, recId); if (f) this.store.event(cap.job_id, actor, 'followup.created', { record: recId, job: f.id }); } catch (e) { this.store.event(cap.job_id, actor, 'followup.create_failed', { record: recId, error: (e as Error).message.slice(0, 200) }); }
         // The receipt shows in the team group too (all work shows there).
         try { const chat = new ChatStore(db, this.store); const team = chat.teamConversation(); const me = this.store.get(cap.job_id); const pol = me?.workspace_id ? JSON.parse(((db.prepare('SELECT policies FROM workspaces WHERE id = ?').get(me.workspace_id) as { policies: string } | undefined)?.policies) || '{}') as { telegram?: boolean; test?: boolean; dry_run?: boolean } : {};
           if (team && pol.test !== true && !pol.dry_run) chat.add({ conversation_id: team, role: 'system', kind: 'activity', content: `Applied: ${company}, ${role}. Confirmation page seen and receipt saved.`, job_id: cap.job_id, meta: { mirror_of: `receipt:${recId}`, receipt: recId } }); } catch { /* the record stands */ }
@@ -622,6 +645,11 @@ export class BrokerApi {
       }
       // Webmail Send in the team browser (Gmail, Outlook, Yahoo) is covered by "Send emails without asking" (recorded like an approval, shown in the team group).
       const webmail = webmailName(urlNow); let emailWhy = '';
+      if (webmail && verdict.action_kind === 'send' && /^send\b/i.test(ctl)) {   // a follow-up task never sends a second email for the same application
+        const me = this.store.get(cap.job_id); const rec = me?.kind === FOLLOWUP_KIND ? String((JSON.parse(me.inputs || '{}') as { record?: string }).record ?? '') : '';
+        const prior = rec ? sentFollowUp(db, rec) : null;
+        if (prior) { this.store.event(cap.job_id, actor, 'browser.act_refused', { action: req.action, ...elementLog, reason: 'follow-up already sent', url: urlNow }); return { ok: false, text: `Not sent: the follow-up for this application is already recorded as sent to ${prior.recipient} (${prior.at.slice(0, 16)}). Do not send another; call report_outcome (complete).` }; }
+      }
       if (!approvalId && verdict.action_kind === 'send' && webmail && /^send\b/i.test(ctl)) {
         const est = teamPermissionState(db, EMAILS); const ep = est.live;
         if (est.capped) { emailWhy = `; the daily email cap of ${est.capped.max_per_day} is reached`; teamLine(db, this.store, { key: `email-cap:${est.capped.id}:${now().slice(0, 10)}`, owner: true, jobId: cap.job_id, text: `Daily email cap of ${est.capped.max_per_day} reached: further emails today wait for your approval. To raise it, tell your Chief of Staff the new number.` }); }

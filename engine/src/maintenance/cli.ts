@@ -30,5 +30,12 @@ else if (cmd === 'purge') {
   } catch (e) { console.error(`gateway session cleanup skipped: ${(e as Error).message}`); }
   console.log(JSON.stringify({ ...r, closed_sessions: closed, markers_after: markerHits(db), integrity: integrityCheck(db) }, null, 2));
 } else if (cmd === 'compact') { console.log(JSON.stringify(compact(db))); }
-else { console.error('usage: claudebot maintenance counts | purge --confirm [--include-real-projects] | purge --all --yes-delete-every-task-and-result --confirm | compact'); process.exit(2); }
+else if (cmd === 'followup-requeue') {
+  // A failed follow-up re-created on jobs.follow_up_email under the same followup:<record> key; refused when Sent already has one.
+  const { JobStore } = await import('../jobs/store.ts'); const { requeueFollowUp, failedFollowUps } = await import('../jobs/followup.ts');
+  const records = rest.includes('--all-failed') ? failedFollowUps(db) : rest.filter((x) => !x.startsWith('--'));
+  if (!records.length) { console.error('usage: claudebot maintenance followup-requeue <application record id>... | --all-failed'); process.exit(2); }
+  const store = new JobStore(db); console.log(JSON.stringify(records.map((r) => { const x = requeueFollowUp(db, store, r, 'owner:cli'); return x.ok ? { record: r, job: x.job.id, replaced: x.replaced } : { record: r, refused: x.reason }; }), null, 2));
+}
+else { console.error('usage: claudebot maintenance counts | purge --confirm [--include-real-projects] | purge --all --yes-delete-every-task-and-result --confirm | compact | followup-requeue <record>... | followup-requeue --all-failed'); process.exit(2); }
 db.close();

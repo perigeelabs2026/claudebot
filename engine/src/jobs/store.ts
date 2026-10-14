@@ -207,7 +207,7 @@ export class JobStore {
   }
 
   failTerminal(id: string, actor: string, reason: string, operatorAction: string, blockerCode = 'TERMINAL_FAILURE'): Job {
-    return this.transition(id, 'failed_terminal', actor, { failure_kind: 'terminal', failure_detail: reason, blocker_code: blockerCode, operator_action: operatorAction, next_action: 'owner decision' }, { reason });
+    return this.transition(id, 'failed_terminal', actor, { failure_kind: 'terminal', failure_detail: reason, blocker_code: blockerCode, operator_action: operatorAction, next_action: 'owner decision' }, { reason, code: blockerCode });
   }
 
   waitForReset(id: string, actor: string, resetAt: string | null, limitInfo: Record<string, unknown>, probeCount = 0): Job {

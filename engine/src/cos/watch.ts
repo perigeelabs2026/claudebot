@@ -19,6 +19,10 @@ const names = (db: DB) => new Map((db.prepare('SELECT id, name FROM agent_defini
 /** An engine restart cancels or re-queues work on purpose: never counted as a failure. */
 const NOT_RESTART = "COALESCE(json_extract(e.detail, '$.reason'), '') NOT LIKE '%engine shutdown or restart%'";
 export const STREAK = { failures: 3, tasks: 2, windowMs: 30 * 60_000, pauseMs: 30 * 60_000 };
+/** A contract or validation failure (CONTRACT_UNMET, or a deterministic check stage: STAGE_FAILED) of a workflow that has never passed
+ *  once: the workflow is unproven, not the assistant failing. Those never count toward an assistant's streak or pause its queue; they
+ *  have their own counter (unprovenWorkflows). Normal turn failures still count. */
+const UNPROVEN_FAILURE = "(json_extract(e.detail, '$.to') = 'failed_terminal' AND COALESCE(json_extract(e.detail, '$.code'), j.blocker_code) IN ('CONTRACT_UNMET', 'STAGE_FAILED') AND NOT EXISTS (SELECT 1 FROM jobs x WHERE x.kind = j.kind AND x.state = 'completed'))";
 
 /** 1. Three failures by one assistant within 30 minutes (since its last successful turn): one owner line, and its queue pauses until a
  *  turn succeeds, its model is changed, or 30 minutes pass (then one task runs as a probe). */
@@ -26,11 +30,11 @@ export function failureStreaks(db: DB, store: JobStore, nowMs = Date.now()): str
   const since = iso(nowMs - STREAK.windowMs); const who = names(db); const out: string[] = [];
   const rows = db.prepare(`SELECT j.agent_role AS agent, COUNT(*) AS n, COUNT(DISTINCT j.id) AS tasks, GROUP_CONCAT(COALESCE(json_extract(e.detail, '$.reason'), j.failure_detail), ' | ') AS reasons
     FROM job_events e JOIN jobs j ON j.id = e.job_id
-    WHERE e.type = 'job.transition' AND json_extract(e.detail, '$.to') IN ('failed_terminal', 'retry_scheduled') AND e.at > ? AND ${REAL_PROJECT} AND ${NOT_RESTART}
+    WHERE e.type = 'job.transition' AND json_extract(e.detail, '$.to') IN ('failed_terminal', 'retry_scheduled') AND e.at > ? AND ${REAL_PROJECT} AND ${NOT_RESTART} AND NOT ${UNPROVEN_FAILURE}
     GROUP BY j.agent_role HAVING n >= ? AND tasks >= ?`).all(since, STREAK.failures, STREAK.tasks) as Array<{ agent: string; n: number; reasons: string | null }>;
   for (const r of rows) {
     const lastOk = String(getRs(db, `agent.last_ok.${r.agent}`) ?? '');
-    const c = (db.prepare(`SELECT COUNT(*) AS n, COUNT(DISTINCT e.job_id) AS tasks FROM job_events e JOIN jobs j ON j.id = e.job_id WHERE e.type = 'job.transition' AND json_extract(e.detail, '$.to') IN ('failed_terminal', 'retry_scheduled') AND e.at > ? AND e.at > ? AND j.agent_role = ? AND ${REAL_PROJECT} AND ${NOT_RESTART}`).get(since, lastOk || '0', r.agent) as { n: number; tasks: number });
+    const c = (db.prepare(`SELECT COUNT(*) AS n, COUNT(DISTINCT e.job_id) AS tasks FROM job_events e JOIN jobs j ON j.id = e.job_id WHERE e.type = 'job.transition' AND json_extract(e.detail, '$.to') IN ('failed_terminal', 'retry_scheduled') AND e.at > ? AND e.at > ? AND j.agent_role = ? AND ${REAL_PROJECT} AND ${NOT_RESTART} AND NOT ${UNPROVEN_FAILURE}`).get(since, lastOk || '0', r.agent) as { n: number; tasks: number });
     const n = c.n; if (n < STREAK.failures || c.tasks < STREAK.tasks) continue;   // one flaky task retrying is not a streak
     const paused = getRs(db, `agent.paused.${r.agent}`) as { until?: string; since?: string } | null;
     if (paused?.since && paused.since > lastOk) continue;   // this streak is already paused and reported
@@ -42,6 +46,22 @@ export function failureStreaks(db: DB, store: JobStore, nowMs = Date.now()): str
     teamLine(db, store, { key: `streak:${r.agent}:${t}`, owner: true,
       text: `${name} failed ${n} times in the last 30 minutes${reason ? ` (last: ${reason})` : ''}. ${name}'s queue is paused until a turn works, the model is changed, or 30 minutes pass.${waiting ? ` ${waiting} decision${waiting === 1 ? '' : 's'} also wait${waiting === 1 ? 's' : ''} on you.` : ''}` });
     out.push(r.agent);
+  }
+  return out;
+}
+
+/** 1b. The separate counter: a workflow that has never passed and has failed its contract or check STREAK.failures times gets one
+ *  owner line naming the workflow (once; after it passes it is no longer unproven). Its assistant's queue is not paused. */
+export function unprovenWorkflows(db: DB, store: JobStore): string[] {
+  const rows = db.prepare(`SELECT j.kind, COUNT(*) AS n, MIN(j.agent_role) AS agent, (SELECT COALESCE(json_extract(e2.detail, '$.reason'), '') FROM job_events e2 JOIN jobs j2 ON j2.id = e2.job_id WHERE j2.kind = j.kind AND e2.type = 'job.transition' AND json_extract(e2.detail, '$.to') = 'failed_terminal' ORDER BY e2.seq DESC LIMIT 1) AS last
+    FROM job_events e JOIN jobs j ON j.id = e.job_id
+    WHERE e.type = 'job.transition' AND ${UNPROVEN_FAILURE} AND ${REAL_PROJECT} AND ${NOT_RESTART}
+    GROUP BY j.kind HAVING n >= ?`).all(STREAK.failures) as Array<{ kind: string; n: number; agent: string; last: string }>;
+  const out: string[] = []; const who = names(db);
+  for (const r of rows) {
+    const wf = (db.prepare('SELECT name FROM workflow_definitions WHERE id = ?').get(r.kind) as { name: string } | undefined)?.name ?? r.kind;
+    const reason = String(r.last ?? '').replace(/\s+/g, ' ').slice(0, 160);
+    if (teamLine(db, store, { key: `unproven:${r.kind}`, owner: true, text: `The workflow "${wf}" (${r.kind}) has failed its check ${r.n} times and has never passed${reason ? ` (last: ${reason})` : ''}. ${who.get(r.agent) ?? r.agent}'s queue is not paused for it; the workflow needs fixing.` })) out.push(r.kind);
   }
   return out;
 }
@@ -141,7 +161,7 @@ export function permissionNotices(db: DB, store: JobStore, t: number): number {
 
 export function watchTick(db: DB, store: JobStore, opts: { workerLimit: number; nowMs?: number }): void {
   const t = opts.nowMs ?? Date.now();
-  for (const f of [() => failureStreaks(db, store, t), () => routineLines(db, store, t), () => governorLine(db, store, t), () => starvation(db, store, opts.workerLimit, t), () => resetLapsed(db, store, t), () => approvalReminders(db, store, t), () => permissionNotices(db, store, t)]) {
+  for (const f of [() => failureStreaks(db, store, t), () => unprovenWorkflows(db, store), () => routineLines(db, store, t), () => governorLine(db, store, t), () => starvation(db, store, opts.workerLimit, t), () => resetLapsed(db, store, t), () => approvalReminders(db, store, t), () => permissionNotices(db, store, t)]) {
     try { f(); } catch { /* one check failing never stops the others */ }
   }
 }
