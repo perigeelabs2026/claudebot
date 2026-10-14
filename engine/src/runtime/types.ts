@@ -9,6 +9,8 @@ export interface TurnRequest {
   label?: string;            // ACP session label (defaults to jobId); conversations use their own id so turns share one session
   role: string;
   cwd: string;
+  /** A working folder inside the assistants' computer (a build worktree): the turn runs there directly, nothing is copied. cwd stays the task folder on the Mac. */
+  vmCwd?: string;
   prompt: string;
   resume: boolean;           // true when continuing an existing session after interruption
   timeoutMs: number;

@@ -54,3 +54,18 @@ test('each assistant gets its own screen, and windows open one at a time so each
   const src = fs.readFileSync(new URL('../../../computer/computerd/server.mjs', import.meta.url), 'utf8');
   assert.match(src, /sort\(\(a, b\) => b\.id - a\.id\)\[0\]/);   // computerd places the newest browser window, not whatever has focus
 });
+
+test('step 1: a build turn runs in its worktree inside the computer (vmCwd): capability and bridge go there, nothing is copied either way; only worktrees under the repos folder', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crt-')); const ws = path.join(tmp, 'workspaces'); const runDir = path.join(tmp, 'run'); const dir = path.join(ws, 'general', 'tasks', 'job-b1'); fs.mkdirSync(dir, { recursive: true });
+  const cap = issueCapability(runDir, { id: 'job-b1', agent_role: 'coordinator' }, dir, ['run_project_check']); void cap; fs.writeFileSync(path.join(dir, '.mcp.json'), mcpJson('/src', 'job-b1', tmp));
+  const calls: Array<{ cmd: string; args: string[]; input?: string }> = []; let seenCwd = '';
+  const inner = { id: 'claude-acp', describe: () => ({ label: 'x', route: 'r', account: '' }), health: async () => ({}) as never, cancel: async () => {}, startTurn: async (r: TurnRequest) => { seenCwd = r.cwd; return { ok: true, text: 'done' } as never; } } as unknown as ModelRuntime;
+  const rt = new ComputerRuntime(inner, { hostWorkspaces: ws, runDir, enginePort: 48311, log: { info: () => {}, warn: () => {} }, exec: async (cmd, args, input) => { calls.push({ cmd, args, input }); return ''; } });
+  const wt = `${VM_WORKSPACES}/repos/claudebot-worktrees/job-b1`;
+  const r = await rt.startTurn({ jobId: 'job-b1', sessionRef: 'job-b1', role: 'coordinator', cwd: dir, vmCwd: wt, prompt: 'p', resume: false, timeoutMs: 1000 });
+  assert.equal(r.ok, true); assert.equal(seenCwd, wt, 'the turn runs in the worktree');
+  assert.equal(calls.filter((c) => c.cmd === 'rsync').length, 0, 'nothing copied into or out of the worktree');
+  assert.ok(calls.some((c) => c.cmd === 'ssh' && c.args.at(-1)!.includes(`'${wt}'/.claudebot/capability.json`)), 'the capability goes into the worktree');
+  const bad = await rt.startTurn({ jobId: 'job-b1', sessionRef: 'job-b1', role: 'coordinator', cwd: dir, vmCwd: `${VM_WORKSPACES}/general`, prompt: 'p', resume: false, timeoutMs: 1000 });
+  assert.equal(bad.ok, false); assert.match((bad as { message: string }).message, /build worktree/);
+});

@@ -9,8 +9,9 @@ import { ActionStore } from '../actions/store.ts';
 import { ApprovalStore } from '../approvals/store.ts';
 import { runProbe } from '../infra/probe.ts';
 import { collectReport, openWork } from '../cos/report.ts';
+import { buildShell, shellFor, buildRepo, ensureClone, prepareWorktree, runBuildCheck, commitBuild, type BuildCheck } from '../build/repo.ts';
 
-export interface DetCtx { db: DB; store: JobStore; job: Job; workspace: string; previous: Record<string, unknown>; actor: string; approvals: ApprovalStore; actions: ActionStore }
+export interface DetCtx { db: DB; store: JobStore; job: Job; workspace: string; previous: Record<string, unknown>; actor: string; approvals: ApprovalStore; actions: ActionStore; /** the assistants' computer is on (build jobs run there) */ vmOn?: boolean }
 export type DetResult = { ok: true; payload: Record<string, unknown> } | { ok: false; reason: string; terminal?: boolean; operatorAction?: string };
 export type DetFn = (ctx: DetCtx) => Promise<DetResult>;
 
@@ -63,6 +64,56 @@ export const DETERMINISTIC: Record<string, DetFn> = {
     const summaryLine = ran.map((x) => `${x.label} ${x.ok ? 'passed' : 'FAILED'}`).join(', ') || 'no checks could run';
     ctx.db.prepare('UPDATE jobs SET outcome = ?, outcome_detail = ?, updated_at = ? WHERE id = ?').run(passed ? 'success' : 'partial', JSON.stringify({ reason: `final checks: ${summaryLine}${note ? ` (${note})` : ''}`, remaining: passed ? null : 'failing or missing checks; see the saved outputs', reported_by: 'engine', at: now() }), now(), ctx.job.id);
     return { ok: true, payload: { test_result: passed ? 'pass' : 'fail', checks: results, test_output_artifact: results.find((x) => x.artifact)?.artifact ?? null, summary: String(ctx.previous.summary ?? '') + ` · ${summaryLine}` } };
+  },
+  /** build.task, step 1: the app's clone in the assistants' computer (cloned once, fetched each time) and this job's own worktree on
+   *  the branch <lead>/<job-id>. The worktree path is written into the job's inputs so run_project_check and later steps find it. */
+  async prepare_build_worktree(ctx) {
+    const sh = buildShell(!!ctx.vmOn); if (!sh) return { ok: false, reason: 'build jobs run inside the assistants\' computer, which is not on', terminal: true, operatorAction: 'Turn on the assistants\' computer (Settings), then re-run the task.' };
+    const repo = buildRepo(ctx.db);
+    const c = await ensureClone(sh, repo); if (!c.ok) return { ok: false, reason: `could not clone or fetch ${repo.url}: ${c.error}`, terminal: false };
+    const w = await prepareWorktree(sh, repo, ctx.job.id, ctx.job.agent_role || 'coordinator'); if (!w.ok) return { ok: false, reason: `could not create the worktree: ${w.error}`, terminal: true, operatorAction: 'See the task detail.' };
+    const inputs = JSON.parse(ctx.job.inputs || '{}') as Record<string, unknown>;
+    ctx.db.prepare('UPDATE jobs SET inputs = ?, updated_at = ? WHERE id = ?').run(JSON.stringify({ ...inputs, worktree: w.dir, branch: w.branch, repo_where: sh.where, app: repo.app }), now(), ctx.job.id);
+    fs.mkdirSync(ctx.workspace, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(ctx.workspace, 'JOB.md'), `# Build ${ctx.job.id}\n\nObjective: ${ctx.job.objective}\nRepository: ${repo.app} (${sh.where === 'vm' ? 'in the assistants\' computer' : 'local'})\nWorktree: ${w.dir}\nBranch: ${w.branch} (from ${w.base})\n`);
+    ctx.store.event(ctx.job.id, ctx.actor, 'build.worktree', { app: repo.app, where: sh.where, worktree: w.dir, branch: w.branch, base: w.base });
+    return { ok: true, payload: { repository: w.dir, branch: w.branch, base: w.base, repo_where: sh.where, app: repo.app } };
+  },
+  /** build.task, checks: the engine runs test and typecheck (or the task's checks) in the worktree. Any failure fails the job and names the tests. */
+  async run_build_checks(ctx) {
+    const inputs = JSON.parse((ctx.db.prepare('SELECT inputs FROM jobs WHERE id = ?').get(ctx.job.id) as { inputs: string } | undefined)?.inputs ?? ctx.job.inputs ?? '{}') as { worktree?: string; repo_where?: string; checks?: unknown };
+    const sh = shellFor(inputs.repo_where ?? ctx.previous.repo_where); const dir = String(inputs.worktree ?? ctx.previous.repository ?? '');
+    if (!sh || !dir) return { ok: false, reason: 'the build worktree is missing', terminal: true, operatorAction: 'Re-run the task.' };
+    const checks = (Array.isArray(inputs.checks) ? inputs.checks : ['test', 'typecheck']).map(String).filter((c): c is BuildCheck => c === 'test' || c === 'typecheck');
+    fs.mkdirSync(ctx.workspace, { recursive: true, mode: 0o700 });
+    const results: Array<{ check: string; label: string; ok: boolean; notRun: boolean; failing: string[]; artifact: string | null }> = [];
+    for (const check of checks.length ? checks : ['test' as const]) {
+      const r = await runBuildCheck(sh, dir, check);
+      const file = path.join(ctx.workspace, `final-${check}-output.txt`); fs.writeFileSync(file, r.output);
+      const artifact = recordArtifact(ctx, 'checks', 'file', `Final ${r.label} (${r.notRun ? 'not run' : r.ok ? 'passed' : 'failed'})`, file, { command: r.label, where: sh.where });
+      ctx.store.event(ctx.job.id, ctx.actor, 'command.ran', { command: r.label, cwd: dir, exit: r.ok ? 0 : 1, final: true, failing: r.failing });
+      results.push({ check, label: r.label, ok: r.ok, notRun: r.notRun, failing: r.failing, artifact });
+    }
+    const failed = results.filter((x) => !x.ok && !x.notRun);
+    if (failed.length) {
+      const names = [...new Set(failed.flatMap((f) => f.failing))];
+      const reason = `${failed.map((f) => `${f.label} failed`).join(', ')}${names.length ? `: ${names.map((n) => `"${n}"`).join(', ')}` : ''}`;
+      ctx.store.event(ctx.job.id, ctx.actor, 'build.checks_failed', { failing: names, checks: failed.map((f) => f.label) });
+      return { ok: false, reason, terminal: true, operatorAction: `Failing ${names.length ? `test${names.length > 1 ? 's' : ''}: ${names.join('; ')}` : 'checks'}. See the saved output.` };
+    }
+    if (!results.some((x) => x.ok)) return { ok: false, reason: 'no check could run in the worktree', terminal: true, operatorAction: 'The repository has no test or typecheck script.' };
+    return { ok: true, payload: { test_result: 'pass', checks: results, summary: `${String(ctx.previous.summary ?? '')} ${results.map((x) => `${x.label} ${x.notRun ? 'not run' : 'passed'}`).join(', ')}`.trim() } };
+  },
+  /** build.task, last step: commit the worktree on its own branch (never main, never pushed in this step). */
+  async commit_build(ctx) {
+    const fresh = (ctx.db.prepare('SELECT inputs FROM jobs WHERE id = ?').get(ctx.job.id) as { inputs: string } | undefined)?.inputs ?? ctx.job.inputs;
+    const inputs = { ...(JSON.parse(fresh || '{}') as { worktree?: string; repo_where?: string; branch?: string }) };
+    inputs.worktree ??= ctx.previous.repository as string | undefined; inputs.branch ??= ctx.previous.branch as string | undefined; inputs.repo_where ??= ctx.previous.repo_where as string | undefined;
+    const sh = shellFor(inputs.repo_where); if (!sh || !inputs.worktree || !inputs.branch) return { ok: false, reason: 'the build worktree is missing', terminal: true, operatorAction: 'Re-run the task.' };
+    const c = await commitBuild(sh, inputs.worktree, inputs.branch, `${ctx.job.objective.replace(/\s+/g, ' ').slice(0, 72)}\n\nBuild task ${ctx.job.id}`);
+    if (!c.ok) return { ok: false, reason: `commit refused: ${c.error}`, terminal: true, operatorAction: 'See the task detail.' };
+    ctx.store.event(ctx.job.id, ctx.actor, 'build.committed', { branch: inputs.branch, commit: c.commit, files: c.files });
+    return { ok: true, payload: { branch: inputs.branch, commit: c.commit, files: c.files, summary: `${String(ctx.previous.summary ?? '')}${c.commit ? ` · committed ${c.commit.slice(0, 7)} on ${inputs.branch} (${c.files.length} file${c.files.length === 1 ? '' : 's'}; not pushed)` : ' · no changes to commit'}`.trim() } };
   },
   async verify_artifacts(ctx) {
     const rows = ctx.db.prepare("SELECT id, path, sha256 FROM artifacts WHERE job_id = ? AND kind = 'file'").all(ctx.job.id) as Array<{ id: string; path: string | null; sha256: string | null }>;

@@ -24,7 +24,8 @@
     "jq",
     "ca-certificates",
     "curl",
-    "rsync"
+    "rsync",
+    "git"
   ],
   "chromium": {
     "source": "snap (Canonical)",

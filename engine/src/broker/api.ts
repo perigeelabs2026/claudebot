@@ -24,6 +24,8 @@ import { parseSnapshot, decide, approvalContent, type ActRequest, type SnapshotE
 import crypto from 'node:crypto';
 import { markdownToHtml, renderDocument } from '../documents/render.ts';
 import { Vault } from '../memory/vault.ts';
+import { shellFor, runBuildCheck } from '../build/repo.ts';
+import { ACP_MODEL_ALIAS } from '../runtime/claude-acp.ts';
 import { taskTitle } from '../model/wording.ts';
 import type { Capability } from './capabilities.ts';
 import type { EngineConfig } from '../config.ts';
@@ -107,7 +109,15 @@ export class BrokerApi {
         const agent = named ? named.id : wf.default_agent;
         const assignee = defs.getAgent(agent); if (!assignee || !assignee.enabled) return { ok: false, text: `${assignee?.name ?? agent} is switched off, so the task was not created. Give it to an assistant who is on (agent_role), or ask the owner to switch ${assignee?.name ?? agent} on.` };
         const objective = String(a.objective ?? '').trim(); if (!objective) return { ok: false, text: 'objective is required' };
-        const inputs = (a.inputs && typeof a.inputs === 'object' ? a.inputs : {}) as Record<string, unknown>;
+        const inputs = { ...(a.inputs && typeof a.inputs === 'object' ? a.inputs : {}) } as Record<string, unknown>;
+        { // A model for this task only (alias: fable, opus, sonnet, haiku, default); the assistant's chat turns keep their own model.
+          const want = String(a.model ?? inputs.model ?? '').trim().toLowerCase(); delete inputs.model;
+          if (want) {
+            const alias = ACP_MODEL_ALIAS[want] ?? want;
+            if (!['default', 'opus', 'sonnet', 'haiku', 'fable'].includes(alias)) return { ok: false, text: `model must be an alias: fable, opus, sonnet, haiku or default (got "${a.model ?? inputs.model}")` };
+            inputs.model = alias;
+          }
+        }
         const wanted = Array.isArray(a.depends_on) ? (a.depends_on as unknown[]).map(String) : [];
         const depends = wanted.filter((id) => { const d = this.store.get(id); return d && (d.workspace_id ?? null) === (parent?.workspace_id ?? null) && (!parent?.conversation_id || d.conversation_id === parent.conversation_id); });   // dependencies stay inside the same conversation
         if (wanted.length && depends.length !== wanted.length) return { ok: false, text: `dependency task id(s) not found in this conversation: ${wanted.filter((x) => !depends.includes(x)).join(', ')}` };
@@ -483,7 +493,22 @@ export class BrokerApi {
       }
       case 'run_project_check': {
         const profile = String(a.profile) as CheckProfile; if (!['test', 'build', 'typecheck', 'lint'].includes(profile)) return { ok: false, text: 'profile must be test, build, typecheck or lint' };
-        const job = this.store.get(cap.job_id); const inputs = JSON.parse(job?.inputs || '{}') as { repository?: string };
+        const job = this.store.get(cap.job_id); const inputs = JSON.parse(job?.inputs || '{}') as { repository?: string; worktree?: string; repo_where?: string };
+        if (job?.kind === 'build.task') {   // the build worktree inside the assistants' computer: test and typecheck profiles
+          if (profile !== 'test' && profile !== 'typecheck') return { ok: false, text: 'build tasks run the test and typecheck profiles' };
+          const sh = shellFor(inputs.repo_where); const wt = String(inputs.worktree ?? '');
+          if (!sh || !wt.startsWith(`${sh.root}/`)) { this.store.event(cap.job_id, actor, 'command.refused', { profile, worktree: wt || null, reason: 'no build worktree for this task' }); return { ok: false, text: 'This build task has no worktree yet.' }; }
+          const n = (db.prepare("SELECT count(*) AS n FROM job_events WHERE job_id = ? AND type = 'command.ran'").get(cap.job_id) as { n: number }).n;
+          if (n >= 20) return { ok: false, text: 'this task already ran 20 checks; report what remains instead of retrying' };
+          const r = await runBuildCheck(sh, wt, profile);
+          if (r.notRun) return { ok: false, text: `not run: ${r.output.slice(-400)}` };
+          const dir = path.resolve(cap.workspace); fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+          const file = path.join(dir, `check-${profile}-${n + 1}.txt`); fs.writeFileSync(file, r.output, { mode: 0o600 });
+          const sha = crypto.createHash('sha256').update(r.output).digest('hex'); const id = newId('art');
+          db.prepare('INSERT INTO artifacts(id, job_id, stage_name, kind, path, sha256, title, provenance, created_at) VALUES (?,?,?,?,?,?,?,?,?)').run(id, cap.job_id, job.stage_name ?? 'claude', 'file', file, sha, `${r.label} (${r.ok ? 'passed' : 'failed'})`, JSON.stringify({ actor, command: r.label, where: sh.where }), now());
+          this.store.event(cap.job_id, actor, 'command.ran', { command: r.label, cwd: wt, exit: r.ok ? 0 : 1, artifact_id: id, failing: r.failing });
+          return { ok: true, text: `${r.label}: ${r.ok ? 'passed' : `FAILED${r.failing.length ? ` (${r.failing.join('; ')})` : ''}`}. Output saved as ${id}.\n\n${r.output.slice(-6000)}`, data: { passed: r.ok, artifact_id: id, failing: r.failing } };
+        }
         const repo = inputs.repository ? allowedRepo(inputs.repository, cap.workspace) : null;
         if (!repo) { this.store.event(cap.job_id, actor, 'command.refused', { profile, repository: inputs.repository ?? null, reason: 'repository outside the disposable repos folder or task workspace' }); return { ok: false, text: 'This task has no repository inside the disposable repositories folder (~/ClaudeBot-Repos) or its workspace; refused and recorded.' }; }
         const runs = db.prepare("SELECT count(*) AS n FROM job_events WHERE job_id = ? AND type = 'command.ran'").get(cap.job_id) as { n: number };

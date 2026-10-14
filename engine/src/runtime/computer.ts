@@ -113,12 +113,13 @@ export class ComputerRuntime implements ModelRuntime {
 
   async startTurn(req: TurnRequest): Promise<TurnResult> {
     const hostDir = req.cwd; let vmDir: string;
-    try { vmDir = vmPath(this.o.hostWorkspaces, hostDir); } catch (e) { return { ok: false, category: 'access_denied', message: (e as Error).message, retryable: false } as TurnResult; }
+    try { vmDir = req.vmCwd ?? vmPath(this.o.hostWorkspaces, hostDir); } catch (e) { return { ok: false, category: 'access_denied', message: (e as Error).message, retryable: false } as TurnResult; }
+    if (req.vmCwd && !req.vmCwd.startsWith(`${VM_WORKSPACES}/repos/`)) return { ok: false, category: 'access_denied', message: 'a turn may run in the computer only in a build worktree under the repos folder', retryable: false } as TurnResult;
     const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
     try {
       const answers = `${VM_SHARED}/profile/application-answers.md`;   // an empty template the owner fills in once; assistants answer forms from it
       await this.ssh(`mkdir -p ${q(vmDir)}/.claudebot ${q(VM_SHARED)}/profile && chmod 700 ${q(vmDir)}/.claudebot && ln -sfn ${q(VM_SHARED)} ${q(vmDir)}/shared && { [ -e ${q(answers)} ] || cat > ${q(answers)}; }`, APPLICATION_ANSWERS_TEMPLATE);
-      if (fs.existsSync(hostDir)) await this.rsync(`${hostDir}/`, `${SSH_HOST}:${vmDir}/`);
+      if (!req.vmCwd && fs.existsSync(hostDir)) await this.rsync(`${hostDir}/`, `${SSH_HOST}:${vmDir}/`);   // a build worktree lives in the computer; nothing is copied into it
       const key = capabilityKey(hostDir); const cap = key ? readCapability(this.o.runDir, key) : null;
       if (cap) {
         await this.ssh(`umask 077; cat > ${q(vmDir)}/.claudebot/capability.json`, JSON.stringify({ token: cap.token, job_id: cap.job_id, key: cap.key ?? key }));
@@ -138,7 +139,7 @@ export class ComputerRuntime implements ModelRuntime {
     }
     finally {
       // Files the turn wrote in the computer come back to the task folder on the Mac (results, drafts, downloads).
-      try { fs.mkdirSync(hostDir, { recursive: true }); await this.rsync(`${SSH_HOST}:${vmDir}/`, `${hostDir}/`); } catch (e) { this.o.log.warn('copying files back from the assistants\' computer failed', { err: (e as Error).message.slice(0, 200), hostDir }); }
+      if (!req.vmCwd) try { fs.mkdirSync(hostDir, { recursive: true }); await this.rsync(`${SSH_HOST}:${vmDir}/`, `${hostDir}/`); } catch (e) { this.o.log.warn('copying files back from the assistants\' computer failed', { err: (e as Error).message.slice(0, 200), hostDir }); }
     }
     return r;
   }
