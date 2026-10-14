@@ -98,6 +98,8 @@ claudebot computer up
 
 It shares no folders with your Mac and is reachable only from your Mac (127.0.0.1), guarded by a token kept in your Keychain. Manage it in **More › Browser › Computer** or with `claudebot computer status | snapshot | reset | update | down`. A snapshot is taken every night when idle and before every update (the last 3 are kept). It uses about 6 GB of memory while running; `claudebot computer down` stops it.
 
+Assistants keep working on your Mac by default. To run their Claude turns inside the private computer, press **Run assistants here** on the Computer card; **Run on my Mac instead** switches back.
+
 ## Privacy and safety
 
 - Everything runs locally. The engine and gateway listen on loopback only (`127.0.0.1:48311` and `:48310`) and require a local token.

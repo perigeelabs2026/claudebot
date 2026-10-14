@@ -6,12 +6,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { limaYaml, LimaHost, versions, NAME } from '../../src/computer/host.ts';
 
-test('the VM template: pinned image and size from versions.json, no host mounts, only computerd forwarded and only to 127.0.0.1, everything else ignored', () => {
+test('the VM template: pinned image and size from versions.json, no host mounts, only computerd and the gateway forwarded, only to 127.0.0.1, everything else ignored', () => {
   const y = limaYaml(); const v = versions();
   assert.match(y, /^mounts: \[\]$/m); assert.match(y, /^vmType: vz$/m); assert.match(y, new RegExp(`memory: "${v.vm.memory}"`)); assert.ok(y.includes(v.image.location));
   const fw = y.split('portForwards:')[1].split('provision:')[0];
   assert.match(fw, /guestIP: "127\.0\.0\.1"\n    guestPort: 7777\n    hostPort: 47777\n    hostIP: "127\.0\.0\.1"/);
-  assert.equal((fw.match(/hostIP:/g) || []).length, 1, 'exactly one forwarded port');
+  assert.equal((fw.match(/hostIP: "127\.0\.0\.1"/g) || []).length, 2, 'exactly two forwarded ports (computerd and the token-protected gateway), both on 127.0.0.1'); assert.ok(!/hostIP: "0\.0\.0\.0"/.test(fw)); assert.match(fw, /guestPort: 18789\n    hostPort: 48789\n    hostIP: "127\.0\.0\.1"/);
   for (const ip of ['127.0.0.1', '0.0.0.0', '::']) assert.ok(fw.includes(`guestIP: "${ip}"`) && /ignore: true/.test(fw), ip);
   assert.match(fw, /proto: udp\n    ignore: true/);
   assert.ok(!/token/i.test(y.replace(/computerd/g, '')) || !/[0-9a-f]{64}/.test(y), 'no token in the template');

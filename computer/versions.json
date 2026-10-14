@@ -1,9 +1,54 @@
 {
   "lima": "2.2.1",
-  "image": { "location": "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img", "arch": "aarch64", "release": "Ubuntu 24.04 LTS" },
-  "vm": { "cpus": 4, "memory": "6GiB", "disk": "20GiB", "data_disk": "30GiB", "zram_mb": 2048, "screens": 2 },
-  "packages": ["sway", "wayvnc", "xwayland", "foot", "fonts-dejavu-core", "zram-tools", "nodejs", "jq", "ca-certificates", "curl"],
-  "chromium": { "source": "snap (Canonical)", "flags": ["--ozone-platform=wayland", "--renderer-process-limit=6", "--no-first-run", "--no-default-browser-check"] },
-  "pinned_later": { "openclaw": "2026.9.8", "claude_code": "2.1.296", "node_lts": "phase 2 installs the pinned Node LTS for OpenClaw/acpx/Claude Code" },
-  "ports": { "computerd_guest": 7777, "computerd_host": 47777 }
+  "image": {
+    "location": "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img",
+    "arch": "aarch64",
+    "release": "Ubuntu 24.04 LTS"
+  },
+  "vm": {
+    "cpus": 4,
+    "memory": "6GiB",
+    "disk": "20GiB",
+    "data_disk": "30GiB",
+    "zram_mb": 2048,
+    "screens": 2
+  },
+  "packages": [
+    "sway",
+    "wayvnc",
+    "xwayland",
+    "foot",
+    "fonts-dejavu-core",
+    "zram-tools",
+    "nodejs",
+    "jq",
+    "ca-certificates",
+    "curl",
+    "rsync"
+  ],
+  "chromium": {
+    "source": "snap (Canonical)",
+    "flags": [
+      "--ozone-platform=wayland",
+      "--renderer-process-limit=6",
+      "--no-first-run",
+      "--no-default-browser-check"
+    ]
+  },
+  "ports": {
+    "computerd_guest": 7777,
+    "computerd_host": 47777,
+    "gateway_guest": 18789,
+    "gateway_host": 48789
+  },
+  "node": {
+    "version": "v26.8.1",
+    "sha256_linux_arm64": "23c1b4d19e2f12a7d06fe8aa3d6e0e4923cf77a47e13c5ccdf32fadaa33960f2"
+  },
+  "runtime": {
+    "openclaw": "2026.9.8",
+    "acpx_plugin": "@openclaw/acpx@2026.9.7",
+    "claude_agent_acp": "0.79.0",
+    "claude_code": "2.1.296"
+  }
 }

@@ -1,0 +1,164 @@
+{
+  "gateway": {
+    "mode": "local",
+    "bind": "loopback",
+    "port": 18789,
+    "auth": {
+      "mode": "token",
+      "token": {
+        "source": "file",
+        "provider": "claudebot",
+        "id": "value"
+      }
+    },
+    "controlUi": {
+      "enabled": false
+    }
+  },
+  "secrets": {
+    "providers": {
+      "claudebot": {
+        "source": "file",
+        "path": "/mnt/lima-claudebot-computer-data/secrets/gateway.token",
+        "mode": "singleValue"
+      }
+    }
+  },
+  "plugins": {
+    "entries": {
+      "anthropic": {
+        "config": {
+          "sessionCatalog": {
+            "enabled": false
+          }
+        }
+      },
+      "codex": {
+        "enabled": false,
+        "config": {
+          "sessionCatalog": {
+            "enabled": false
+          }
+        }
+      },
+      "memory-core": {
+        "config": {
+          "dreaming": {
+            "enabled": false
+          }
+        }
+      },
+      "llama-cpp": {
+        "enabled": false
+      },
+      "agentsapi": {
+        "enabled": false
+      },
+      "openai": {
+        "enabled": false
+      },
+      "migrate-claude": {
+        "enabled": false
+      },
+      "acpx": {
+        "enabled": true,
+        "config": {
+          "permissionMode": "approve-reads",
+          "nonInteractivePermissions": "deny",
+          "probeAgent": "claude",
+          "timeoutSeconds": 180,
+          "pluginToolsMcpBridge": false,
+          "openClawToolsMcpBridge": false,
+          "agents": {
+            "claude": {
+              "command": "/opt/claudebot/bin/claude-acp",
+              "args": []
+            }
+          }
+        }
+      }
+    }
+  },
+  "browser": {
+    "enabled": false
+  },
+  "agents": {
+    "defaults": {
+      "workspace": "/mnt/lima-claudebot-computer-data/workspace/_control",
+      "sandbox": {
+        "mode": "off"
+      },
+      "heartbeat": {
+        "every": "0m"
+      },
+      "skills": [],
+      "model": "anthropic/claude-opus-5-5",
+      "subagents": {
+        "runTimeoutSeconds": 3600
+      }
+    },
+    "ownership": "explicit",
+    "entries": {
+      "claude": {
+        "workspace": "/mnt/lima-claudebot-computer-data/workspace/_control",
+        "sandbox": {
+          "mode": "off"
+        },
+        "runtime": {
+          "type": "acp",
+          "acp": {
+            "agent": "claude",
+            "backend": "acpx",
+            "mode": "persistent",
+            "cwd": "/mnt/lima-claudebot-computer-data/workspace"
+          }
+        }
+      },
+      "control": {
+        "workspace": "/mnt/lima-claudebot-computer-data/workspace/_control",
+        "sandbox": {
+          "mode": "off"
+        }
+      }
+    }
+  },
+  "tools": {
+    "elevated": {
+      "enabled": false
+    }
+  },
+  "memory": {
+    "search": {
+      "enabled": false,
+      "rememberAcrossConversations": false
+    }
+  },
+  "telemetry": {
+    "enabled": false
+  },
+  "cron": {
+    "enabled": false
+  },
+  "skills": {
+    "workshop": {
+      "autonomous": {
+        "mode": "off"
+      },
+      "approvalPolicy": "pending"
+    }
+  },
+  "acp": {
+    "enabled": true,
+    "dispatch": {
+      "enabled": true
+    },
+    "backend": "acpx",
+    "defaultAgent": "claude",
+    "allowedAgents": [
+      "claude"
+    ],
+    "stream": {
+      "deliveryMode": "live"
+    }
+  }
+}

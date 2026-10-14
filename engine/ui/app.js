@@ -1163,10 +1163,12 @@ async function computerCard() {
       c.disk && c.disk.data ? [h('dt', {}, 'Files and logins'), h('dd', {}, `${Math.round(c.disk.data.used_mb / 1024 * 10) / 10} of ${Math.round(c.disk.data.total_mb / 1024)} GB`)] : null,
       c.screens ? [h('dt', {}, 'Screens'), h('dd', {}, `${c.screens.filter((s) => s.streaming).length} of ${c.screens.length} live`)] : null,
       [h('dt', {}, 'Last snapshot'), h('dd', {}, last ? ago(last.at) : 'none yet')],
+      [h('dt', {}, 'Assistants work'), h('dd', {}, c.location === 'computer' ? 'inside this computer' : 'on your Mac')],
       c.state !== 'running' ? [h('dt', {}, 'Status'), h('dd', {}, c.detail)] : null),
     h('div', { class: 'row', style: 'gap:8px;margin-top:10px' },
       c.state === 'error' || c.state === 'stopped' ? h('button', { class: 'btn2 primary', disabled: !!c.busy, onclick: act('recover') }, c.state === 'stopped' ? 'Start' : 'Recover') : null,
       h('button', { class: 'btn2', disabled: !!c.busy || c.state !== 'running', onclick: act('update') }, 'Update'),
+      h('button', { class: 'btn2', disabled: !!c.busy || (c.location !== 'computer' && c.state !== 'running'), onclick: async () => { const to = c.location === 'computer' ? 'mac' : 'computer'; if (!confirmBox(to === 'computer' ? 'Move the assistants\' work into this computer? ClaudeBot restarts for a moment.' : 'Move the assistants\' work back to your Mac? ClaudeBot restarts for a moment.')) return; const r = await api('/api/computer/location', { method: 'POST', body: { location: to } }).catch((e) => ({ error: e.message })); if (r.error) notify(r.error, true); else { notify('Restarting ClaudeBot…'); setTimeout(() => location.reload(), 6000); } } }, c.location === 'computer' ? 'Run on my Mac instead' : 'Run assistants here'),
       h('button', { class: 'btn2 danger', disabled: !!c.busy || !last, title: last ? `Restore ${ago(last.at)}` : 'No snapshot yet', onclick: act('reset', `Reset the computer to the snapshot from ${last ? ago(last.at) : ''}? Files and sign-ins changed since then are lost.`) }, 'Reset to snapshot')));
 }
 // Memory: the assistant's own note in the owner's memory vault (Obsidian-compatible Markdown). Read at the start of every turn.

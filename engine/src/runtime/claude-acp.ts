@@ -10,6 +10,8 @@ export interface ClaudeAcpOptions {
   claudeExecutable: string; claudeConfigDir: string;
   /** maps an ClaudeBot agent id to the OpenClaw agent id (defaults to identity) */
   agentIdForRole?: (role: string) => string;
+  /** where Claude runs elsewhere (the assistants' computer): returns `claude auth status` JSON from there */
+  authProbe?: () => Promise<string>;
 }
 
 /** Classify a turn failure from the Gateway/adapter error text. Exported for tests. */
@@ -80,7 +82,7 @@ export class ClaudeAcpRuntime implements ModelRuntime {
     let account: RuntimeHealth['account'] | undefined; let authDetail = '';
     try {
       // `claude auth status` exits non-zero when logged out but still prints JSON; read stdout either way. Never print tokens.
-      const probe = await runProbe(this.o.claudeExecutable, ['auth', 'status'], { timeoutMs: 20_000, label: 'claude.auth_status', env: { ...process.env, CLAUDE_CONFIG_DIR: this.o.claudeConfigDir } });
+      const probe = this.o.authProbe ? { stdout: await this.o.authProbe(), stderr: '', code: 0, signal: null, timedOut: false, skipped: undefined } as Awaited<ReturnType<typeof runProbe>> : await runProbe(this.o.claudeExecutable, ['auth', 'status'], { timeoutMs: 20_000, label: 'claude.auth_status', env: { ...process.env, CLAUDE_CONFIG_DIR: this.o.claudeConfigDir } });
       const stdout = probe.stdout;
       if (!stdout.trim()) throw new Error(probe.timedOut ? 'claude auth status timed out after 20 s (process group killed)' : probe.skipped === 'storm_guard' ? probe.stderr : `claude auth status exit ${probe.code ?? probe.signal}: ${probe.stderr.replace(/\s+/g, ' ').slice(0, 160)}`);
       const j = JSON.parse(stdout) as { loggedIn?: boolean; authMethod?: string; subscriptionType?: string; email?: string };

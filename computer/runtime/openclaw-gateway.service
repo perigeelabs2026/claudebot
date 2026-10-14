@@ -1,0 +1,13 @@
+[Unit]
+Description=OpenClaw gateway for ClaudeBot (inside the assistants' computer; loopback only, token required)
+After=network-online.target
+[Service]
+User=__USER__
+Environment=OPENCLAW_STATE_DIR=/mnt/lima-claudebot-computer-data/openclaw
+Environment=OPENCLAW_HIDE_BANNER=1
+Environment=PATH=/opt/node/bin:/usr/bin:/bin
+ExecStart=/opt/node/bin/node --max-old-space-size=2048 /opt/node/lib/node_modules/openclaw/dist/index.js --profile computer gateway --port 18789
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target

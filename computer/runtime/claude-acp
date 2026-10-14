@@ -1,0 +1,9 @@
+#!/bin/bash
+# Inside the assistants' computer: acpx → Claude Code ACP adapter, pinned to the computer's own Claude sign-in (data disk).
+set -euo pipefail
+D=/mnt/lima-claudebot-computer-data
+export CLAUDE_CONFIG_DIR="$D/claude"
+export CLAUDE_CODE_EXECUTABLE="$HOME/.local/bin/claude"
+export CLAUDE_AGENT_LOGS="$D/logs/claude-agent-acp.log"
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX OPENAI_API_KEY
+exec /opt/node/bin/node /opt/claudebot/acp/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js "$@"

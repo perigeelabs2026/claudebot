@@ -6,7 +6,7 @@ import { JobStore } from '../jobs/store.ts';
 import { ApprovalStore } from '../approvals/store.ts';
 import { ActionStore } from '../actions/store.ts';
 import { GatewayClient } from '../gateway/client.ts';
-import { ClaudeAcpRuntime } from '../runtime/claude-acp.ts';
+import { makeRuntime } from '../runtime/select.ts';
 import { SimulatedRuntime } from '../runtime/simulated.ts';
 import { runJob } from './run.ts';
 import { browserLoginCheck } from '../browser/health.ts';
@@ -18,10 +18,10 @@ const owner = `worker:${process.pid}`;
 const log = createLogger({ name: 'worker', file: path.join(cfg.logsDir, 'worker.log'), base: { pid: process.pid } });
 const db = openDatabase(cfg.dbPath);
 const store = new JobStore(db); const approvals = new ApprovalStore(db); const actions = new ActionStore(db, approvals);
-const gateway = new GatewayClient({ url: cfg.gatewayUrl, tokenFile: cfg.gatewayTokenFile, log });
+const picked = makeRuntime(cfg, db, log); const gateway = picked.gateway; log.info('runtime location', { location: picked.location });
 const runtime: ModelRuntime = process.env.CLAUDEBOT_RUNTIME === 'simulated'
   ? Object.assign(new SimulatedRuntime(JSON.parse(process.env.CLAUDEBOT_SIM_SCRIPT ?? '[]')), { authed: process.env.CLAUDEBOT_SIM_AUTHED !== '0' })
-  : new ClaudeAcpRuntime({ gateway, log, claudeExecutable: cfg.claudeExecutable, claudeConfigDir: cfg.claudeConfigDir });
+  : picked.runtime;
 const roles = process.env.CLAUDEBOT_WORKER_ROLES?.split(',').filter(Boolean);
 const ac = new AbortController();
 let stopping = false;

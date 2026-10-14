@@ -14,7 +14,7 @@ import { JobStore } from '../jobs/store.ts';
 import { ApprovalStore } from '../approvals/store.ts';
 import { ActionStore } from '../actions/store.ts';
 import { GatewayClient } from '../gateway/client.ts';
-import { ClaudeAcpRuntime } from '../runtime/claude-acp.ts';
+import { makeRuntime } from '../runtime/select.ts';
 import { SimulatedRuntime } from '../runtime/simulated.ts';
 import { anthropicApiStub, bedrockStub, vertexStub, claudeWorkStub } from '../runtime/stubs.ts';
 import { Dispatcher } from './dispatcher.ts';
@@ -51,9 +51,9 @@ const definitions = new Definitions(db); const settings = new Settings(db); cons
 definitions.seedSystemDefaults();
 if (!fs.existsSync(cfg.uiTokenFile)) { fs.writeFileSync(cfg.uiTokenFile, (await import('node:crypto')).randomBytes(27).toString('base64url') + '\n', { mode: 0o600 }); }
 
-const gateway = new GatewayClient({ url: cfg.gatewayUrl, tokenFile: cfg.gatewayTokenFile, log });
+const picked = makeRuntime(cfg, db, log); const gateway = picked.gateway; log.info('runtime location', { location: picked.location });
 const simulated = process.env.CLAUDEBOT_RUNTIME === 'simulated';
-const runtime: ModelRuntime = simulated ? Object.assign(new SimulatedRuntime(), { authed: process.env.CLAUDEBOT_SIM_AUTHED !== '0' }) : new ClaudeAcpRuntime({ gateway, log, claudeExecutable: cfg.claudeExecutable, claudeConfigDir: cfg.claudeConfigDir });
+const runtime: ModelRuntime = simulated ? Object.assign(new SimulatedRuntime(), { authed: process.env.CLAUDEBOT_SIM_AUTHED !== '0' }) : picked.runtime;
 const runtimes: ModelRuntime[] = [runtime, claudeWorkStub, anthropicApiStub, bedrockStub, vertexStub];
 const dispatcher = new Dispatcher(cfg, store, log, settings, simulated ? { CLAUDEBOT_RUNTIME: 'simulated', CLAUDEBOT_SIM_SCRIPT: process.env.CLAUDEBOT_SIM_SCRIPT ?? '[]' } : {});
 const scheduler = new Scheduler(db, store);
