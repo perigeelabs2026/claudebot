@@ -17,7 +17,9 @@ export const VM_WORKSPACES = `${VM_DATA}/workspace`;
 const NAME = process.env.CLAUDEBOT_COMPUTER_NAME ?? 'claudebot-computer';
 const SSH_CONFIG = path.join(os.homedir(), '.lima', NAME, 'ssh.config');
 const SSH_HOST = `lima-${NAME}`;
-const EXCLUDE = ['--exclude', '.mcp.json', '--exclude', '.claudebot/', '--exclude', '.claude/'];
+const EXCLUDE = ['--exclude', '.mcp.json', '--exclude', '.claudebot/', '--exclude', '.claude/', '--exclude', '/shared'];
+/** The team's shared folder inside the computer: every task folder gets it as ./shared (same files for every assistant). */
+export const VM_SHARED = `${VM_WORKSPACES}/_shared`;
 
 /** The VM path of a host task folder; only folders under the engine's workspaces root are ever mapped. */
 export function vmPath(hostWorkspaces: string, hostDir: string): string {
@@ -47,6 +49,8 @@ export async function fromComputer(src: string, dest: string): Promise<{ ok: boo
 
 export class ComputerRuntime implements ModelRuntime {
   readonly id = 'claude-acp' as const;
+  /** turns get ./shared, the team's folder in the computer */
+  readonly sharedFolder = true;
   private inner: ModelRuntime; private o: { hostWorkspaces: string; runDir: string; enginePort: number; log: { info: (m: string, d?: Record<string, unknown>) => void; warn: (m: string, d?: Record<string, unknown>) => void }; exec?: (cmd: string, args: string[], input?: string) => Promise<string> };
   constructor(inner: ModelRuntime, o: ComputerRuntime['o']) { this.inner = inner; this.o = o; }
   describe() { const d = this.inner.describe(); return { ...d, label: `${d.label}, inside the assistants' computer`, route: d.route.replace('OpenClaw Gateway', 'OpenClaw Gateway (in the assistants\' computer)') }; }
@@ -67,7 +71,7 @@ export class ComputerRuntime implements ModelRuntime {
     try { vmDir = vmPath(this.o.hostWorkspaces, hostDir); } catch (e) { return { ok: false, category: 'access_denied', message: (e as Error).message, retryable: false } as TurnResult; }
     const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
     try {
-      await this.ssh(`mkdir -p ${q(vmDir)}/.claudebot && chmod 700 ${q(vmDir)}/.claudebot`);
+      await this.ssh(`mkdir -p ${q(vmDir)}/.claudebot ${q(VM_SHARED)} && chmod 700 ${q(vmDir)}/.claudebot && ln -sfn ${q(VM_SHARED)} ${q(vmDir)}/shared`);
       if (fs.existsSync(hostDir)) await this.rsync(`${hostDir}/`, `${SSH_HOST}:${vmDir}/`);
       const key = capabilityKey(hostDir); const cap = key ? readCapability(this.o.runDir, key) : null;
       if (cap) {

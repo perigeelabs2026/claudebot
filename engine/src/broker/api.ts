@@ -188,6 +188,11 @@ export class BrokerApi {
         this.store.event(cap.job_id, actor, 'document.rendered', { title, files: ids, from });
         return { ok: true, text: `Saved ${ids.map((x) => `${x.format.toUpperCase()} ${x.id}`).join(' and ')} for "${title}". They appear as file cards under your reply.`, data: { files: ids } };
       }
+      case 'save_skill': {   // a method that worked, saved for the whole team and shown to whoever works on that site or topic next
+        const r = new Vault().saveSkill({ topic: String(a.topic ?? ''), title: String(a.title ?? ''), steps: String(a.steps ?? ''), by: cap.role });
+        if (!r.ok) return { ok: false, text: r.reason }; this.store.event(cap.job_id, actor, 'skill.saved', { topic: a.topic, file: path.basename(r.file) });
+        return { ok: true, text: `Saved as a team skill (${path.basename(r.file)}). Whoever works on ${a.topic} next gets these steps.` };
+      }
       case 'remember': case 'forget': {   // the memory vault (Team / Owner / own note); see memory/vault.ts
         const defs = new Definitions(db); const me = defs.getAgent(cap.role); if (!me) return { ok: false, text: 'unknown assistant' };
         const scope = (['team', 'owner', 'self'].includes(String(a.scope)) ? String(a.scope) : 'self') as 'team' | 'owner' | 'self';
@@ -200,6 +205,51 @@ export class BrokerApi {
         const r = vault.remember({ scope, section: a.section as never, text: String(a.text ?? ''), agent: target, source: src });
         if (!r.ok) return { ok: false, text: r.reason }; this.store.event(cap.job_id, actor, 'memory.saved', { scope, assistant: target.id, added: r.added });
         return { ok: true, text: r.added ? `remembered in ${path.basename(r.file)}` : 'already remembered' };
+      }
+      case 'continue_working': {
+        // The goal loop: an assistant whose work is not finished schedules its own next turn (plan, act, check, again) until the goal is
+        // verified. Capped per request; after a failed round it must say what it will do differently, and it may not repeat itself.
+        const me = this.store.get(cap.job_id); if (!me || me.kind !== 'chat.turn' || !me.conversation_id) return { ok: false, text: 'continue_working is for conversation work' };
+        let inp: Record<string, unknown> = {}; try { inp = JSON.parse(me.inputs || '{}'); } catch { /* */ }
+        const root = String(inp.chain_root ?? me.message_id ?? me.id); const round = Number(inp.continue_round ?? 0) + 1; const MAX = 6;
+        if (round > MAX) return { ok: false, text: `Stop here: this request has had ${MAX} rounds. Tell the owner exactly what is done (with proof), what is not, and what you need.` };
+        const next = String(a.next_step ?? '').trim().slice(0, 600); const changed = String(a.what_changed ?? '').trim().slice(0, 600); const failed = a.last_attempt_failed === true;
+        if (!next) return { ok: false, text: 'next_step is required: the concrete next thing you will do' };
+        if (failed && !changed) return { ok: false, text: 'Your last attempt failed: say in what_changed what you will do differently this time (another route, another tool, another selector). Repeating the same attempt is not allowed.' };
+        const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+        const prior = db.prepare("SELECT detail FROM job_events WHERE type = 'goal.continue' AND json_extract(detail, '$.root') = ?").all(root) as Array<{ detail: string }>;
+        if (changed && prior.some((p) => { try { return norm(String(JSON.parse(p.detail).what_changed ?? '')) === norm(changed); } catch { return false; } })) return { ok: false, text: 'You already tried exactly that. Pick a genuinely different approach, or stop and tell the owner what is blocking you.' };
+        const goalMsg = new ChatStore(db, this.store).message(String(inp.chain_root ?? '')); const goal = goalMsg ? goalMsg.content.slice(0, 1500) : me.objective.slice(0, 1500);
+        const content = `Continuing (round ${round} of ${MAX}) for ${new Definitions(db).getAgent(me.agent_role)?.name ?? me.agent_role}.\nGoal: ${goal}\nNext step: ${next}${changed ? `\nWhat is different this time: ${changed}` : ''}\nWork until the goal is verified (proof: confirmation pages, files that exist, tool results). If it is done, say so with the proof; if not and you can still make progress, call continue_working again.`;
+        const j = new ChatStore(db, this.store).engineTurn(me.conversation_id, me.agent_role, content, `continue:${root}:${round}`, new Definitions(db));
+        if (!j) return { ok: false, text: 'could not schedule the next round (are you still a member of this chat?)' };
+        db.prepare('UPDATE jobs SET inputs = json_set(inputs, \'$.chain_root\', ?, \'$.continue_round\', ?) WHERE id = ?').run(root, round, j.id);
+        this.store.event(cap.job_id, actor, 'goal.continue', { root, round, next_step: next, what_changed: changed || null, failed, next_job: j.id });
+        return { ok: true, text: `Round ${round} scheduled; it starts right after this reply. End this reply with a one-line status for the owner (no claim of done).`, data: { job_id: j.id, round } };
+      }
+      case 'record_application': {
+        // An application counts as submitted only with proof: the task's own browser tab must be showing the site's confirmation.
+        // The page text is checked, a screenshot is saved as a receipt (a file card), and the record is written. No proof, no record.
+        const tab = taskTab(db, cap.job_id) ?? this.resumedTab(cap.job_id);
+        if (!tab) return { ok: false, text: 'Not recorded: this task has no browser tab. Submit in your tab first, then record it while the confirmation is showing.' };
+        const company = String(a.company ?? '').trim().slice(0, 120); const role = String(a.role ?? '').trim().slice(0, 160); if (!company || !role) return { ok: false, text: 'company and role are required' };
+        const ev = await this.browserRunner(['evaluate', '--fn', '() => (document.title + "\\n" + location.href + "\\n" + document.body.innerText).slice(0, 20000)', '--target-id', tab], 'browser.evaluate', 30_000);
+        const pageText = ev.stdout ?? ''; const urlNow = await this.tabUrl(tab);
+        const CONFIRM = /(thank(s| you)[^.\n]{0,40}(for )?(apply|application|your interest|submitting))|(application (has been |was )?(submitted|received|sent|complete))|(we('| ha)ve received your application)|(successfully (submitted|applied))|(your application is (in|complete))|(applied\s*[✓✔]?\s*$)/im;
+        const ERROR = /(is required|please (fix|correct|complete)|there (was|were) (an )?(error|problem)s?|invalid|captcha|verify you are human)/i;
+        if (!ev.ok || !CONFIRM.test(pageText) || (ERROR.test(pageText) && !/thank/i.test(pageText))) return { ok: false, text: `Not recorded: the page in your tab (${urlNow}) does not show an application confirmation${ERROR.test(pageText) ? ' and shows an error or required field' : ''}. It is NOT submitted. Read the page, fix what it asks for (or try another way to attach the file), submit again, then record it. Never tell the owner it was submitted until this succeeds.` };
+        const conf = (pageText.split('\n').find((l) => CONFIRM.test(l)) ?? '').trim().slice(0, 300);
+        let shotArt: string | null = null;
+        try {
+          const sh = await this.browserRunner(['screenshot', '--target-id', tab], 'browser.screenshot', 60_000); const where = (sh.stdout.match(/(\/[^\s]+\.(png|jpe?g))/) ?? [])[1];
+          if (sh.ok && where) { const dir = path.join(path.resolve(cap.workspace), 'receipts'); fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); const dest = path.join(dir, `${company.replace(/[^A-Za-z0-9]+/g, '-')}-${Date.now()}.png`);
+            const got = (this.cfg as { browserInComputer?: boolean }).browserInComputer ? await fromComputer(where, dest) : (fs.copyFileSync(where, dest), { ok: true });
+            if (got.ok && fs.existsSync(dest)) { const sha = crypto.createHash('sha256').update(fs.readFileSync(dest)).digest('hex'); shotArt = newId('art'); db.prepare('INSERT INTO artifacts(id, job_id, stage_name, kind, path, sha256, title, provenance, created_at) VALUES (?,?,?,?,?,?,?,?,?)').run(shotArt, cap.job_id, this.store.get(cap.job_id)?.stage_name ?? 'claude', 'file', dest, sha, `Receipt: ${company} – ${role}`, JSON.stringify({ actor, receipt: true, url: urlNow }), now()); } }
+        } catch { /* the record stands on the page text; the screenshot is a bonus */ }
+        const recId = newId('rec'); const rt = now();
+        db.prepare('INSERT INTO records(id, type, data, job_id, created_at, updated_at) VALUES (?,?,?,?,?,?)').run(recId, 'application', JSON.stringify({ title: `${company} – ${role}`, company, role, url: urlNow, submitted_at: rt, confirmation: conf, receipt_artifact: shotArt, verified: true }), cap.job_id, rt, rt);
+        this.store.event(cap.job_id, actor, 'application.verified', { record: recId, company, role, url: urlNow, confirmation: conf, receipt: shotArt });
+        return { ok: true, text: `Recorded and verified: ${company} – ${role}. Confirmation on the page: "${conf}". ${shotArt ? 'The receipt screenshot shows as a file card under your reply.' : ''} You may now tell the owner it was submitted.`, data: { record_id: recId, receipt: shotArt } };
       }
       // ---- conversation tools (chat replies) ----
       case 'read_message': {   // the full text of a long message in this conversation (context lines never cut silently)
@@ -248,13 +298,14 @@ export class BrokerApi {
           return { ok: true, text: 'group updated' };
         } catch (e) { return { ok: false, text: e instanceof ChatRuleError ? e.message : (e as Error).message }; }
       }
-      case 'rename_assistant': case 'disable_assistant': case 'add_member': case 'remove_member': {
+      case 'rename_assistant': case 'disable_assistant': case 'enable_assistant': case 'add_member': case 'remove_member': {
         const asked = ownerAsked(db, cap.job_id, a.owner_words); if (!asked.ok) return { ok: false, text: `Not done: ${asked.reason}.` };
         const defs = new Definitions(db); const key = String(a.assistant ?? a.id ?? '').trim().toLowerCase().replace(/^@/, '');
         const ag = defs.listAgents({ includeDisabled: true }).find((x) => x.id.toLowerCase() === key || x.name.toLowerCase() === key || x.name.toLowerCase().split(/[\s(]+/)[0] === key); if (!ag) return { ok: false, text: `there is no assistant "${key}"` };
         const me = this.store.get(cap.job_id)!; const chat = new ChatStore(db, this.store);
         try {
           if (tool === 'rename_assistant') { const nn = String(a.name ?? '').replace(/\s+/g, ' ').trim().slice(0, 40); if (!nn || /^everyone$/i.test(nn)) return { ok: false, text: 'give a name' }; if (defs.listAgents({ includeDisabled: true }).some((x) => x.id !== ag.id && x.name.toLowerCase() === nn.toLowerCase())) return { ok: false, text: `another assistant is already called ${nn}` }; defs.upsertAgent({ ...ag, name: nn }, 'owner:chat'); return { ok: true, text: `${ag.name} is now ${nn}` }; }
+          if (tool === 'enable_assistant') { defs.setAgentEnabled(ag.id, true, 'owner:chat'); return { ok: true, text: `${ag.name} is switched on` }; }
           if (tool === 'disable_assistant') { if (ag.id === 'coordinator') return { ok: false, text: 'the lead cannot switch itself off' }; defs.setAgentEnabled(ag.id, false, 'owner:chat'); return { ok: true, text: `${ag.name} is switched off` }; }
           const conv = String(a.conversation ?? me.conversation_id ?? '');
           if (tool === 'add_member') { chat.addMember(conv, ag.id, 'owner:chat'); return { ok: true, text: `${ag.name} added` }; }
@@ -377,7 +428,8 @@ export class BrokerApi {
     if (!tab) return { ok: false, text: 'This task has no browser tab yet. Open the page with browser_read first; browser_act works only in that tab.' };
     const req: ActRequest = { action: String(a.action) as ActRequest['action'], ref: a.ref ? String(a.ref) : undefined, text: a.text !== undefined ? String(a.text) : undefined, key: a.key ? String(a.key) : undefined, values: Array.isArray(a.values) ? a.values.map(String) : undefined, submit: a.submit === true, fields: Array.isArray(a.fields) ? (a.fields as Array<{ ref: string; value: string }>).map((f) => ({ ref: String(f.ref), value: String(f.value) })) : undefined };
     const tgt = ['--target-id', tab];
-    const snap = await this.browserRunner(['snapshot', '--format', 'ai', ...tgt], 'browser.snapshot');
+    let snap = await this.browserRunner(['snapshot', '--format', 'ai', ...tgt], 'browser.snapshot');
+    if (!snap.ok && /timeout/i.test(snap.stderr + snap.stdout)) snap = await this.browserRunner(['snapshot', '--format', 'aria', ...tgt], 'browser.snapshot');   // some pages time out the AI snapshot; the accessibility tree still works
     if (!snap.ok) return { ok: false, text: `could not read the task tab: ${(snap.stderr || snap.stdout).replace(/\s+/g, ' ').slice(0, 200)}` };
     if (req.action === 'snapshot') { this.store.event(cap.job_id, actor, 'browser.act', { action: 'snapshot' }); return { ok: true, text: snap.stdout.slice(0, 60_000) }; }
     const els = parseSnapshot(snap.stdout); const byRef = (r?: string) => els.find((e) => e.ref === r);
@@ -447,7 +499,14 @@ export class BrokerApi {
         const stage = path.join('/tmp/openclaw/uploads', cap.job_id.replace(/[^a-z0-9-]/gi, '')); fs.mkdirSync(stage, { recursive: true, mode: 0o700 });
         const staged = path.join(stage, path.basename(f.path)); fs.writeFileSync(staged, f.buf, { mode: 0o600 });
         if ((this.cfg as { browserInComputer?: boolean }).browserInComputer) { const cp = await toComputer(staged, f.buf); if (!cp.ok) return { ok: false, text: `Not attached: could not hand the file to the assistants' computer (${cp.error}).` }; }
-        r = await this.browserRunner(['upload', staged, ...(a.file_input ? ['--input-ref', req.ref!] : ['--ref', req.ref!]), '--timeout-ms', '30000', ...tgt], 'browser.upload', 60_000);
+        // Set the file input directly first (works for hidden inputs behind "Attach" buttons); fall back to clicking the chooser.
+        // Then check the page really holds the file, so "attached" is never claimed for a stuck upload.
+        const fname = path.basename(staged);
+        const holds = async () => { const ev = await this.browserRunner(['evaluate', '--fn', `() => [...document.querySelectorAll('input[type=file]')].some((i) => [...(i.files || [])].some((f) => f.name === ${JSON.stringify(fname)}))`, ...tgt], 'browser.evaluate', 20_000); return ev.ok && /true/.test(ev.stdout); };
+        const tries: string[][] = a.file_input === false ? [['--ref', req.ref!], ['--input-ref', req.ref!]] : [['--input-ref', req.ref!], ['--ref', req.ref!]];
+        r = { ok: false, stdout: '', stderr: 'not attempted' };
+        for (const how of tries) { r = await this.browserRunner(['upload', staged, ...how, '--timeout-ms', '20000', ...tgt], 'browser.upload', 45_000); if (r.ok && await holds()) break; r = { ...r, ok: false, stderr: r.stderr || 'the page does not hold the file after this attempt' }; }
+        if (!r.ok) return { ok: false, text: `Not attached: the page does not show ${fname} in any file field after trying the file input directly and the chooser. Take a fresh snapshot, find the real file field (often an input next to "Attach"/"Choose File"), and try that ref; or use another route the site offers (paste the resume text, a "Upload resume" link).` };
         extra = { artifact_id: String(a.artifact_id), file: path.basename(f.path), sha256: f.sha256 }; break;
       }
       case 'download': {

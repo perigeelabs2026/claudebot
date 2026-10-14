@@ -52,3 +52,14 @@ test('remember is the assistant\'s own tool; team rules and other notes are the 
     assert.match((await s.call(lt, 'forget', { assistant: 'researcher', contains: 'paste', owner_words: 'forget the rule about pasting' })).text, /removed 1/);
   } finally { delete process.env.CLAUDEBOT_MEMORY_DIR; }
 });
+
+test('team skills: a saved method is shown to whoever works on that site next; the old version is kept; secrets refused', () => {
+  const v = fresh();
+  assert.equal(v.saveSkill({ topic: 'https://job-boards.greenhouse.io', title: 'Greenhouse apply', steps: '1. Fill fields\n2. Attach via the hidden file input', by: 'researcher' }).ok, true);
+  assert.match(v.skillsFor('open https://job-boards.greenhouse.io/britive/jobs/1 and apply'), /hidden file input/);
+  assert.match(v.skillsFor('apply on Greenhouse for Britive'), /hidden file input/, 'the site name alone matches');
+  assert.equal(v.skillsFor('write a cover letter'), '');
+  v.saveSkill({ topic: 'job-boards.greenhouse.io', title: 'Greenhouse apply v2', steps: '1. Country first\n2. Attach via input', by: 'researcher' });
+  assert.match(v.skillsFor('greenhouse'), /Country first/); assert.ok(!v.skillsFor('greenhouse').includes('Fill fields'), 'only the newest version is shown');
+  assert.equal(v.saveSkill({ topic: 'x.com', title: 't', steps: 'password: hunter2hunter2', by: 'r' }).ok, false);
+});

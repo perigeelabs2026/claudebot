@@ -11,6 +11,11 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Existing installs: run `claudebot update` to pick up these settings.
 
 ### Added
+- **Assistants keep going until the goal is done.** An assistant can schedule its next round on the same goal (up to 6 per request). After a failed round it must try a different approach, and it checks its own result before stopping.
+- **Team skills.** Assistants save what they learn about a site to `Skills/<site>.md` in the memory vault, and every turn reads the skills for the sites in play.
+- **Verified job applications.** An application counts as submitted only when the site's confirmation page shows it: ClaudeBot saves a receipt screenshot and a verified record, and anything else is reported as "NOT submitted". A reply that claims a submission without one is flagged.
+- In the private computer, all assistants share a team folder (`./shared`) and get a real shell.
+- The lead can switch an assistant back on when you ask, from chat or Telegram.
 - **Watch the private computer live, and take over.** The Computer card shows the assistants' screens live. Screens are view-only by default; **Take over** gives you the mouse and keyboard on that screen and pauses the assistants' browser, and **Hand back** returns it. When assistants run in the private computer, their browser runs there too (on screen 1), with uploads and downloads handed in and out. Opt-in; the default Mac setup is unchanged.
 - **Assistants can work inside the private computer (opt-in).** In More › Browser › Computer, press **Run assistants here** to run their Claude turns inside the VM instead of on your Mac; each task folder is copied in and back, and the VM gets only that task's permissions. **Run on my Mac instead** switches back. New installs keep running on your Mac and never need Lima.
 - **Submit job applications without asking (off by default).** Turn it on in More › Settings › Standing permissions, or ask the lead in your own words. It covers Apply/Next/Submit on job sites and applicant-tracking forms (Greenhouse, Lever, Ashby, Workday, LinkedIn Jobs, career pages); every submission is recorded. Emails, LinkedIn messages, purchases, posts, deletions, passwords, codes, CAPTCHAs and payments still ask you.
@@ -28,6 +33,9 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Assistants can open zip and tar archives you give them: files are extracted into a new folder inside the task. Links, paths that escape the folder, and oversized archives are refused. Documents and PDFs also get text copies the assistants can read.
 
 ### Fixed
+- File uploads really attach: ClaudeBot sets the file field directly, falls back to the file chooser, and only reports success when the page holds the file.
+- Pages that time out the page reader fall back to the accessibility tree.
+- Submits covered by "Submit job applications without asking" no longer post a decision card.
 - Allowing a browser step no longer gets lost when the page reopens blank: the assistant carries on in the same tab, on the same filled form.
 - Assistants know which standing permissions are already on, so they stop asking you to switch on one that is.
 - In a chat's Browser tab, when assistants work in the private computer, you see its live screen with Take over / Hand back instead of window buttons that had nothing to open.

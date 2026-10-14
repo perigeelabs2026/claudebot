@@ -43,3 +43,61 @@ test('a fresh install has "Submit job applications without asking" off: nothing 
   assert.equal(jobApplicationPermission(s.db), null);
   assert.equal((s.db.prepare("SELECT count(*) AS n FROM standing_permissions WHERE action_kind = 'job_application'").get() as { n: number }).n, 0);
 });
+
+test('a submit covered by the job-application permission never gets a decision card in the chat', async () => {
+  const s = setupBroker(); const c = s.chat.create({ workspace_id: s.ws.id }); const turn = s.chat.send(c.id, '@coordinator apply', s.defs).job;
+  const p = grantJobApplications(s.db, 'owner'); const aps = new ApprovalStore(s.db);
+  const ap = aps.request({ job_id: turn.id, action_kind: 'send', target: 'https://job-boards.greenhouse.io/x/jobs/1 — button "Submit application"', content: '{"url":"https://job-boards.greenhouse.io/x/jobs/1","action":"click","element":{"name":"Submit application"}}' });
+  aps.decide(ap.id, 'approved', `permission:${p.id}`); const other = aps.request({ job_id: turn.id, action_kind: 'send', target: 'email to a@example.test', content: 'To: a@example.test\nSubject: x\n\nhi' });
+  s.chat.sync(s.defs);
+  const cards = s.chat.messages(c.id).filter((m) => m.kind === 'decision').map((m) => m.approval_id);
+  assert.ok(!cards.includes(ap.id), 'no card for a covered application submit'); assert.ok(cards.includes(other.id), 'an email still gets its card');
+});
+
+test('record_application: only a page that confirms the submission is recorded (with a receipt); an error page is refused and says it is NOT submitted', async () => {
+  const s = setupBroker(); const c = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] });
+  const turn = s.chat.send(c.id, '@researcher apply to Acmeish', s.defs).job;
+  const { recordTaskTab } = await import('../../src/browser/tabs.ts'); recordTaskTab(s.db, turn.id, 'tab-1');
+  let page = 'Apply for Channel Manager\nResume/CV is required\nPlease complete all required fields';
+  (s.broker as unknown as { browserRunner: (a: string[]) => Promise<{ ok: boolean; stdout: string; stderr: string }> }).browserRunner = async (args) => ({ ok: true, stdout: args[0] === 'evaluate' ? page : '', stderr: '' });
+  const bad = await s.call(turn, 'record_application', { company: 'Example Co', role: 'Channel Manager' });
+  assert.equal(bad.ok, false); assert.match(bad.text, /NOT submitted/);
+  page = 'Thank you for applying!\nYour application has been submitted. We will be in touch.';
+  const ok = await s.call(turn, 'record_application', { company: 'Example Co', role: 'Channel Manager' });
+  assert.equal(ok.ok, true, ok.text); assert.match(ok.text, /Recorded and verified/);
+  const rec = s.db.prepare("SELECT data FROM records WHERE type = 'application'").get() as { data: string }; const d = JSON.parse(rec.data); assert.equal(d.company, 'Example Co'); assert.equal(d.verified, true); assert.match(d.confirmation, /Thank you for applying|submitted/);
+  assert.ok(s.db.prepare("SELECT 1 FROM job_events WHERE job_id = ? AND type = 'application.verified'").get(turn.id));
+});
+
+test('goal loop: continue_working schedules the next round with the goal; after a failure it needs a different approach; never the same twice; capped at 6', async () => {
+  const s = setupBroker(); const c = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] });
+  const t1 = s.chat.send(c.id, '@researcher submit the Britive application', s.defs).job;
+  const r1 = await s.call(t1, 'continue_working', { next_step: 'retry the upload', last_attempt_failed: true });
+  assert.equal(r1.ok, false); assert.match(r1.text, /what you will do differently/);
+  const r2 = await s.call(t1, 'continue_working', { next_step: 'attach the PDF', what_changed: 'use the hidden file input directly instead of the Attach button', last_attempt_failed: true });
+  assert.equal(r2.ok, true, r2.text); const j2 = s.store.get((r2.data as { job_id: string }).job_id)!;
+  assert.equal(j2.agent_role, 'researcher'); assert.match(s.chat.messages(c.id).find((m) => m.job_id === j2.id && m.kind === 'wake')!.content, /Goal: @researcher submit the Britive application[\s\S]*hidden file input/);
+  const r3 = await s.call(j2, 'continue_working', { next_step: 'attach again', what_changed: 'Use the hidden file input directly instead of the Attach button!', last_attempt_failed: true });
+  assert.equal(r3.ok, false); assert.match(r3.text, /already tried exactly that/);
+  let cur = j2; for (let i = 2; i <= 6; i++) { const r = await s.call(cur, 'continue_working', { next_step: `step ${i}`, what_changed: `approach number ${i}`, last_attempt_failed: true }); assert.equal(r.ok, true, r.text); cur = s.store.get((r.data as { job_id: string }).job_id)!; }
+  const capped = await s.call(cur, 'continue_working', { next_step: 'more', what_changed: 'yet another way' }); assert.equal(capped.ok, false); assert.match(capped.text, /6 rounds/);
+});
+
+test('upload: sets the file field directly, falls back to the chooser, and only reports attached when the page holds the file; the AI snapshot falls back to the accessibility tree', async () => {
+  const s = setupBroker(); const c = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] });
+  const turn = s.chat.send(c.id, '@researcher attach my resume', s.defs).job;
+  const { recordTaskTab } = await import('../../src/browser/tabs.ts'); recordTaskTab(s.db, turn.id, 'tab-1');
+  const fs2 = await import('node:fs'); const p2 = await import('node:path'); const wsRoot = (s.db.prepare('SELECT root_path FROM workspaces WHERE id = ?').get(s.ws.id) as { root_path: string }).root_path;
+  const f = p2.join(wsRoot, 'resume.pdf'); fs2.writeFileSync(f, '%PDF-1.4 x'); const art = 'art-test-resume'; s.db.prepare("INSERT INTO artifacts(id, job_id, stage_name, kind, path, sha256, title, provenance, created_at) VALUES (?,?,?,?,?,?,?,?,?)").run(art, turn.id, 'claude', 'file', f, null, 'Resume', '{}', new Date().toISOString());
+  const calls: string[][] = []; let holdAfter = 2; let snapTimeouts = 1;
+  (s.broker as unknown as { browserRunner: (a: string[]) => Promise<{ ok: boolean; stdout: string; stderr: string }> }).browserRunner = async (args) => { calls.push(args);
+    if (args[0] === 'snapshot') { if (args[2] === 'ai' && snapTimeouts-- > 0) return { ok: false, stdout: '', stderr: 'TimeoutError: page.ariaSnapshot: Timeout 5000ms exceeded.' }; return { ok: true, stdout: '- button "Attach" [ref=ax18]', stderr: '' }; }
+    if (args[0] === 'evaluate') return { ok: true, stdout: calls.filter((c) => c[0] === 'upload').length >= holdAfter ? 'true' : 'false', stderr: '' };
+    return { ok: true, stdout: '', stderr: '' }; };
+  (s.broker as unknown as { tabUrl: () => Promise<string> }).tabUrl = async () => 'https://job-boards.greenhouse.io/x/jobs/1';
+  const ok = await s.call(turn, 'browser_act', { action: 'upload', ref: 'ax18', artifact_id: art });
+  assert.equal(ok.ok, true, ok.text); const ups = calls.filter((c) => c[0] === 'upload'); assert.equal(ups.length, 2); assert.ok(ups[0].includes('--input-ref') && ups[1].includes('--ref'));
+  assert.ok(calls.some((c) => c[0] === 'snapshot' && c[2] === 'aria'), 'fell back to the accessibility tree');
+  calls.length = 0; holdAfter = 99;
+  const bad = await s.call(turn, 'browser_act', { action: 'upload', ref: 'ax18', artifact_id: art }); assert.equal(bad.ok, false); assert.match(bad.text, /Not attached: the page does not show/);
+});

@@ -490,6 +490,8 @@ export class ChatStore {
     // 3. Decisions: every approval raised by a job of the conversation gets one decision card.
     for (const a of this.db.prepare(`SELECT a.id, a.job_id, a.action_kind, a.target, a.content AS body, a.status, j.conversation_id FROM approvals a JOIN jobs j ON j.id = a.job_id WHERE j.conversation_id IS NOT NULL`).all() as Array<{ id: string; job_id: string; action_kind: string; target: string; body: string; status: string; conversation_id: string }>) {
       if (this.db.prepare('SELECT 1 FROM messages WHERE approval_id = ? AND kind = ?').get(a.id, 'decision')) continue;
+      // Submits covered by "Submit job applications without asking" never show a card (the owner asked for none); they are in the ledger.
+      if ((this.db.prepare("SELECT 1 FROM approvals ap JOIN standing_permissions sp ON ap.decided_by = 'permission:' || sp.id WHERE ap.id = ? AND sp.action_kind = 'job_application'").get(a.id))) continue;
       this.add({ conversation_id: a.conversation_id, role: 'system', kind: 'decision', content: `Your decision is needed before anything is ${a.action_kind === 'send' ? 'sent' : a.action_kind === 'publish' ? 'published' : a.action_kind === 'purchase' ? 'purchased' : a.action_kind === 'delete' ? 'deleted' : 'done'}: ${a.action_kind} → ${a.target}`, job_id: a.job_id, approval_id: a.id, meta: { action_kind: a.action_kind, target: a.target, preview: a.body.slice(0, 1200) } }); touched.add(a.conversation_id);
     }
     return [...touched];

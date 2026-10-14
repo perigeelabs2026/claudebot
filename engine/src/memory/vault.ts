@@ -90,6 +90,24 @@ export class Vault {
     fs.writeFileSync(this.notePath(agent), body); return { ok: true };
   }
 
+  /** A method that worked, saved for the whole team: Skills/<site or topic>.md (newest version wins; the old one is kept below). */
+  saveSkill(input: { topic: string; title: string; steps: string; by: string }): { ok: true; file: string } | { ok: false; reason: string } {
+    const topic = String(input.topic ?? '').toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/[^a-z0-9.-]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
+    const steps = String(input.steps ?? '').trim().slice(0, 4000); if (!topic || !steps) return { ok: false, reason: 'topic and steps are required' };
+    const secret = looksSecret(steps); if (secret) return { ok: false, reason: `not saved: ${secret}` };
+    this.ensure(); const dir = path.join(this.dir, 'Skills'); fs.mkdirSync(dir, { recursive: true }); const file = path.join(dir, `${topic}.md`);
+    const old = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').replace(/^---\n[\s\S]*?\n---\n/, '') : '';
+    fs.writeFileSync(file, `---\nskill: ${topic}\nupdated: ${today()}\nby: ${input.by}\n---\n# ${String(input.title ?? topic).slice(0, 120)}\n\n${steps}\n${old ? `\n## Earlier version\n${old.replace(/^# .*\n/, '').split('## Earlier version')[0].trim()}\n` : ''}`);
+    fs.appendFileSync(path.join(this.dir, 'Lessons', `${today()}.md`), `- skill saved: [[${topic}]] by ${input.by}\n`);
+    return { ok: true, file };
+  }
+  /** Skills whose topic appears in the text (a site host such as job-boards.greenhouse.io matches greenhouse.io, greenhouse). */
+  skillsFor(text: string, max = 3): string {
+    const dir = path.join(this.dir, 'Skills'); if (!fs.existsSync(dir)) return ''; const low = String(text).toLowerCase();
+    const hits = fs.readdirSync(dir).filter((f) => f.endsWith('.md')).map((f) => f.slice(0, -3)).filter((topic) => { const core = topic.replace(/\.(com|io|co|net|org|ai|hr)$/, '').split('.').pop() ?? topic; return low.includes(topic) || (core.length >= 4 && low.includes(core)); }).slice(0, max);
+    return hits.map((h) => fs.readFileSync(path.join(dir, `${h}.md`), 'utf8').replace(/^---\n[\s\S]*?\n---\n/, '').split('## Earlier version')[0].trim()).join('\n\n');
+  }
+
   /** Everything a turn should know, in full: Team, Owner and the assistant's own note (frontmatter stripped). */
   context(agent: { id: string; name: string }): string {
     const strip = (p: string) => { try { return fs.readFileSync(p, 'utf8').replace(/^---\n[\s\S]*?\n---\n/, '').trim(); } catch { return ''; } };

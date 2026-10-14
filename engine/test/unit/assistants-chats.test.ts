@@ -481,3 +481,22 @@ test('groups: the lead creates and renames groups on the owner\'s words; purpose
   const initials = new Function(`${app.match(/const initials = [^\n]+/)![0]}; return initials;`)() as (n: string) => string;
   assert.equal(initials('Abdul El-Sayed'), 'AE'); assert.equal(initials('Jude (Job Applicator)'), 'J'); assert.equal(initials('Roger'), 'R'); assert.ok(!/'CS'/.test(app), 'no hard-coded initials');
 });
+
+test('honesty check: a reply that says an application was submitted, without a verified confirmation, gets a plain note under it; "not submitted" does not', async () => {
+  const s = setup([{ kind: 'ok', text: 'Done! I submitted the Britive application.' }, { kind: 'ok', text: 'Britive is not submitted yet: the upload failed.' }]);
+  const c = s.chat.create({ workspace_id: s.ws.id });
+  const t1 = s.chat.send(c.id, 'apply to Britive', s.defs).job; await run(s, t1.id);
+  const notes = () => s.chat.messages(c.id).filter((m) => (m.meta as { honesty_check?: boolean }).honesty_check);
+  assert.equal(notes().length, 1); assert.match(notes()[0].content, /not yet submitted/);
+  const t2 = s.chat.send(c.id, 'status?', s.defs).job; await run(s, t2.id);
+  assert.equal(notes().length, 1, 'an honest "not submitted" gets no note');
+});
+
+test('the lead switches an assistant off and back on, only on the owner\'s words (morning restart after a pause)', async () => {
+  const s = setup(); const c = s.chat.create({ workspace_id: s.ws.id });
+  const t1 = s.chat.send(c.id, 'Abdul, pause Jude for tonight', s.defs).job;
+  assert.equal((await s.broker.call(cap(t1, ['disable_assistant']), 'disable_assistant', { assistant: 'researcher', owner_words: 'pause Jude for tonight' })).ok, true); assert.equal(s.defs.getAgent('researcher')!.enabled, false);
+  const t2 = s.chat.send(c.id, 'Abdul, turn everyone back on and start the job search', s.defs).job;
+  assert.equal((await s.broker.call(cap(t2, ['enable_assistant']), 'enable_assistant', { assistant: 'researcher', owner_words: 'make jude work' })).ok, false);
+  assert.equal((await s.broker.call(cap(t2, ['enable_assistant']), 'enable_assistant', { assistant: 'researcher', owner_words: 'turn everyone back on' })).ok, true); assert.equal(s.defs.getAgent('researcher')!.enabled, true);
+});
