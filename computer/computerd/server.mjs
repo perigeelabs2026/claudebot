@@ -2,6 +2,8 @@
 // Every request needs the per-install token (Authorization: Bearer <token>, or ?token= for a websocket). Without it: 401.
 //   GET  /health        VM heartbeat, screens, memory, disk
 //   GET  /screen/<n>    websocket → that screen's VNC (wayvnc on guest loopback 5900+n-1)
+//   *    /cdp/...       the managed browser's DevTools (HTTP and websocket), for ClaudeBot on the Mac
+//   POST /input/<n>?on=1|0  owner takeover: enable remote input on screen n only (every other screen goes view-only)
 import http from 'node:http';
 import net from 'node:net';
 import fs from 'node:fs';
@@ -14,6 +16,7 @@ const HOST = process.env.COMPUTERD_HOST ?? '0.0.0.0';   // inside the VM; Lima f
 const DATA = process.env.COMPUTERD_DATA ?? '/mnt/lima-claudebot-computer-data';
 const TOKEN_FILE = process.env.COMPUTERD_TOKEN_FILE ?? `${DATA}/computerd/token`;
 const VNC_BASE = Number(process.env.COMPUTERD_VNC_BASE ?? 5900);
+const CDP_PORT = Number(process.env.COMPUTERD_CDP_PORT ?? 48323);   // the managed browser's DevTools endpoint (guest loopback only)
 const SCREENS = Number(process.env.COMPUTERD_SCREENS ?? 4);
 const started = new Date().toISOString();
 
@@ -35,13 +38,33 @@ const server = http.createServer(async (req, res) => {
     const screens = []; for (let i = 1; i <= SCREENS; i++) screens.push({ n: i, streaming: await listening(VNC_BASE + i - 1) });
     return send(200, { ok: true, computerd: { started, now: new Date().toISOString(), uptime_s: Math.round(os.uptime()) }, memory: memory(), disk: { root: disk('/'), data: disk(DATA) }, screens });
   }
+  const inp = /^\/input\/(\d+)$/.exec(url.pathname);
+  if (req.method === 'POST' && inp) {
+    const n = Number(inp[1]); const on = url.searchParams.get('on') === '1'; if (!(n >= 1 && n <= SCREENS)) return send(404, { error: 'no such screen' });
+    const env = { ...process.env, XDG_RUNTIME_DIR: `/run/user/${process.getuid()}` };
+    try {
+      for (let i = 1; i <= SCREENS; i++) { const want = on && i === n ? '' : '--disable-input'; const f = `${env.XDG_RUNTIME_DIR}/wayvnc-${i}.env`; const cur = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : 'WAYVNC_FLAGS=--disable-input\n'; const next = `WAYVNC_FLAGS=${want}\n`; if (cur !== next) { fs.writeFileSync(f, next); execFileSync('systemctl', ['--user', 'restart', `wayvnc@${i}.service`], { env }); } }
+      return send(200, { ok: true, input: on ? n : null });
+    } catch (e) { return send(500, { error: e.message }); }
+  }
+  if (url.pathname.startsWith('/cdp/')) {   // DevTools HTTP (tab list, new, close); bodies pass through unchanged
+    const up = http.request({ host: '127.0.0.1', port: CDP_PORT, path: url.pathname.slice(4) + url.search, method: req.method, headers: Object.fromEntries(Object.entries({ ...req.headers, host: `127.0.0.1:${CDP_PORT}` }).filter(([k]) => k !== 'authorization')) }, (r) => { res.writeHead(r.statusCode ?? 502, r.headers); r.pipe(res); });
+    up.on('error', () => send(502, { error: 'the browser is not running' })); req.pipe(up); return;
+  }
   return send(404, { error: 'not found' });
 });
 
 // Websocket → VNC bridge (RFC 6455, binary frames). Only after the token check above has passed in 'upgrade'.
 server.on('upgrade', (req, socket) => {
   if (!authorized(req)) { socket.end('HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n'); return; }
-  const m = /^\/screen\/(\d+)$/.exec(new URL(req.url, 'http://x').pathname); const n = m ? Number(m[1]) : 0;
+  const path0 = new URL(req.url, 'http://x').pathname;
+  if (path0.startsWith('/cdp/')) {   // DevTools websocket: raw pass-through after re-issuing the upgrade to the browser
+    const up = net.connect(CDP_PORT, '127.0.0.1');
+    up.once('error', () => socket.destroy());
+    up.once('connect', () => { const hdrs = Object.entries(req.headers).filter(([k]) => !['authorization', 'host'].includes(k)).map(([k, v]) => `${k}: ${v}`).join('\r\n'); up.write(`GET ${path0.slice(4)} HTTP/1.1\r\nHost: 127.0.0.1:${CDP_PORT}\r\n${hdrs}\r\n\r\n`); up.pipe(socket); socket.pipe(up); });
+    const end = () => { up.destroy(); socket.destroy(); }; socket.on('error', end); socket.on('close', end); up.on('close', end); return;
+  }
+  const m = /^\/screen\/(\d+)$/.exec(path0); const n = m ? Number(m[1]) : 0;
   if (!(n >= 1 && n <= SCREENS)) { socket.end('HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n'); return; }
   const key = req.headers['sec-websocket-key']; if (!key) { socket.end('HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n'); return; }
   const accept = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
@@ -65,4 +88,5 @@ function parse(b) {
   return { op, data, length: off + len };
 }
 
+process.on('uncaughtException', (e) => console.error('computerd error', e.message));   // one bad request never takes the door down
 server.listen(PORT, HOST, () => console.log(`computerd listening on ${HOST}:${PORT}`));

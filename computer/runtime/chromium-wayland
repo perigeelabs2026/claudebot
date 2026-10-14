@@ -1,0 +1,4 @@
+#!/bin/bash
+# The assistants' browser inside the computer: Chromium on the headless sway desktop (screen 1), so the owner can watch and take over.
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"; export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"
+exec /snap/bin/chromium --ozone-platform=wayland --renderer-process-limit=6 --no-first-run --no-default-browser-check --password-store=basic "$@"

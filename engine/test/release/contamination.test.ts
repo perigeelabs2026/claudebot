@@ -14,7 +14,7 @@ const ROOT = path.resolve(import.meta.dirname, '..', '..', '..');
 const PRODUCTION_SURFACES = ['engine/src', 'engine/ui', 'install', 'bin', 'shell/Sources', 'shell/Resources'];
 const SOURCE_MARKERS = [...FIXTURE_MARKERS, 'Acme', 'lorem ipsum', 'sample objective', 'demo company', 'fake count', 'placeholder data'];
 
-function walk(dir: string, out: string[] = []): string[] { for (const e of fs.readdirSync(dir, { withFileTypes: true })) { const p = path.join(dir, e.name); if (e.isDirectory()) { if (e.name === 'node_modules') continue; walk(p, out); } else out.push(p); } return out; }
+function walk(dir: string, out: string[] = []): string[] { for (const e of fs.readdirSync(dir, { withFileTypes: true })) { const p = path.join(dir, e.name); if (e.isDirectory()) { if (e.name === 'node_modules' || p.endsWith(path.join('ui', 'vendor'))) continue;   /* vendored third-party code (unmodified, see VENDORED.md) */ walk(p, out); } else out.push(p); } return out; }
 
 test('production surfaces contain no fixture markers', () => {
   const hits: string[] = [];

@@ -28,3 +28,16 @@ export function makeRuntime(cfg: EngineConfig, db: DB, log: ConstructorParameter
   const gateway = new GatewayClient({ url: cfg.gatewayUrl, tokenFile: cfg.gatewayTokenFile, log });
   return { runtime: new ClaudeAcpRuntime({ gateway, log, claudeExecutable: cfg.claudeExecutable, claudeConfigDir: cfg.claudeConfigDir }), gateway, location: 'mac' };
 }
+
+/** In computer mode the managed browser lives in the VM: the OpenClaw CLI runs there (bin/openclaw-computer) and the engine reaches
+ *  its DevTools through a local proxy to computerd (127.0.0.1:48324). Mutates cfg once at startup; returns whether it applied. */
+export function applyComputerBrowser(cfg: EngineConfig, db: DB): boolean {
+  if (runtimeLocation(db) !== 'computer') return false;
+  (cfg as { openclawBin: string }).openclawBin = path.resolve(import.meta.dirname, '..', '..', '..', 'bin', 'openclaw-computer');
+  (cfg as { openclawProfile: string }).openclawProfile = 'computer';
+  (cfg as { browserCdpPort: number }).browserCdpPort = COMPUTER_CDP_PROXY_PORT;
+  (cfg as { browserInComputer?: boolean }).browserInComputer = true;
+  return true;
+}
+export const COMPUTER_CDP_PROXY_PORT = 48324;
+export const VM_CDP_PORT = 48323;

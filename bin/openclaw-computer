@@ -1,0 +1,6 @@
+#!/bin/bash
+# OpenClaw's CLI inside the assistants' computer (browser commands from ClaudeBot on the Mac). Arguments are passed through quoted.
+set -euo pipefail
+NAME="${CLAUDEBOT_COMPUTER_NAME:-claudebot-computer}"
+q=""; for a in "$@"; do q+=" $(printf '%q' "$a")"; done
+exec ssh -F "$HOME/.lima/$NAME/ssh.config" -o BatchMode=yes "lima-$NAME" "OPENCLAW_STATE_DIR=/mnt/lima-claudebot-computer-data/openclaw OPENCLAW_HIDE_BANNER=1 OPENCLAW_SUPPRESS_NOTES=1 PATH=/opt/node/bin:\$PATH openclaw$q"

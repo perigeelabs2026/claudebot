@@ -12,6 +12,7 @@ import { ChatStore, ChatRuleError } from '../chat/store.ts';
 import { Assistants, ownerAsked, CHAT_CREATE_DAILY_LIMIT } from '../chat/assistants.ts';
 import { setPriority, saveReport } from '../cos/report.ts';
 import { readArtifact, artifactFile } from './artifact-access.ts';
+import { toComputer, fromComputer } from '../runtime/computer.ts';
 import { searchScoped } from '../search/index.ts';
 import { delegationBudget, waitForChildren, childStatus } from '../coord/delegation.ts';
 import { runCheck, allowedRepo, type CheckProfile } from '../worker/project-check.ts';
@@ -440,6 +441,7 @@ export class BrokerApi {
         if (!f.ok) return { ok: false, text: `Not attached: ${f.reason}.` };
         const stage = path.join('/tmp/openclaw/uploads', cap.job_id.replace(/[^a-z0-9-]/gi, '')); fs.mkdirSync(stage, { recursive: true, mode: 0o700 });
         const staged = path.join(stage, path.basename(f.path)); fs.writeFileSync(staged, f.buf, { mode: 0o600 });
+        if ((this.cfg as { browserInComputer?: boolean }).browserInComputer) { const cp = await toComputer(staged, f.buf); if (!cp.ok) return { ok: false, text: `Not attached: could not hand the file to the assistants' computer (${cp.error}).` }; }
         r = await this.browserRunner(['upload', staged, ...(a.file_input ? ['--input-ref', req.ref!] : ['--ref', req.ref!]), '--timeout-ms', '30000', ...tgt], 'browser.upload', 60_000);
         extra = { artifact_id: String(a.artifact_id), file: path.basename(f.path), sha256: f.sha256 }; break;
       }
@@ -447,7 +449,9 @@ export class BrokerApi {
         const name = (String(a.filename ?? 'download.bin').replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '') || 'download.bin').slice(0, 120);
         const dir = path.join(path.resolve(cap.workspace), 'downloads'); fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
         const dest = path.join(dir, name); if (fs.existsSync(dest)) return { ok: false, text: `downloads/${name} already exists; choose another filename` };
-        r = await this.browserRunner(['download', req.ref!, dest, ...tgt, '--timeout-ms', '60000'], 'browser.download', 90_000);
+        const inVm = (this.cfg as { browserInComputer?: boolean }).browserInComputer; const vmDest = `/tmp/openclaw/downloads/${cap.job_id.replace(/[^a-z0-9-]/gi, '')}/${name}`;
+        r = await this.browserRunner(['download', req.ref!, inVm ? vmDest : dest, ...tgt, '--timeout-ms', '60000'], 'browser.download', 90_000);
+        if (inVm && r.ok) { const back = await fromComputer(vmDest, dest); if (!back.ok) return { ok: false, text: `the download finished in the assistants' computer but could not be copied back (${back.error})` }; }
         if (r.ok && fs.existsSync(dest)) {
           const size = fs.statSync(dest).size; if (size > 50 * 1024 * 1024) { fs.rmSync(dest); return { ok: false, text: 'the download was larger than 50 MB and was removed' }; }
           const sha = crypto.createHash('sha256').update(fs.readFileSync(dest)).digest('hex'); const id = newId('art');

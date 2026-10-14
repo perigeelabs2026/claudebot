@@ -14,7 +14,9 @@ import { JobStore } from '../jobs/store.ts';
 import { ApprovalStore } from '../approvals/store.ts';
 import { ActionStore } from '../actions/store.ts';
 import { GatewayClient } from '../gateway/client.ts';
-import { makeRuntime } from '../runtime/select.ts';
+import { makeRuntime, applyComputerBrowser, COMPUTER_CDP_PROXY_PORT, VM_CDP_PORT } from '../runtime/select.ts';
+import { startCdpProxy } from '../computer/cdp-proxy.ts';
+import { ComputerToken } from '../computer/host.ts';
 import { SimulatedRuntime } from '../runtime/simulated.ts';
 import { anthropicApiStub, bedrockStub, vertexStub, claudeWorkStub } from '../runtime/stubs.ts';
 import { Dispatcher } from './dispatcher.ts';
@@ -51,6 +53,7 @@ const definitions = new Definitions(db); const settings = new Settings(db); cons
 definitions.seedSystemDefaults();
 if (!fs.existsSync(cfg.uiTokenFile)) { fs.writeFileSync(cfg.uiTokenFile, (await import('node:crypto')).randomBytes(27).toString('base64url') + '\n', { mode: 0o600 }); }
 
+if (applyComputerBrowser(cfg, db)) { startCdpProxy({ listenPort: COMPUTER_CDP_PROXY_PORT, computerdPort: 47777, vmCdpPort: VM_CDP_PORT, token: () => new ComputerToken(cfg.secretsDir).get(), log }); log.info('browser lives in the assistants\' computer', { cdp: COMPUTER_CDP_PROXY_PORT }); }
 const picked = makeRuntime(cfg, db, log); const gateway = picked.gateway; log.info('runtime location', { location: picked.location });
 const simulated = process.env.CLAUDEBOT_RUNTIME === 'simulated';
 const runtime: ModelRuntime = simulated ? Object.assign(new SimulatedRuntime(), { authed: process.env.CLAUDEBOT_SIM_AUTHED !== '0' }) : picked.runtime;

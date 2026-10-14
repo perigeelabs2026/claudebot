@@ -1054,8 +1054,9 @@ const views = {
     return h('div', { class: 'stack' }, h('div', { class: 'section-title' }, `Waiting for you (${pending.length})`), pending.length ? pending.map(card) : empty('Nothing needs your decision', 'When an assistant wants to send, publish, buy or delete something, it asks here first.'), h('div', { class: 'section-title' }, `Decided (${rest.length})`), rest.length ? rest.map(card) : empty('No decisions yet'));
   },
   async browser() {
-    const b = await api('/api/browser'); const l = b.live || {}; const comp = await computerCard();
+    const b = await api('/api/browser'); const l = b.live || {}; const comp = await computerCard(); const screen = comp && comp.dataset.location === 'computer' ? screenCard(1, l.takeover) : null;
     const pages = (l.tabs || []).filter((t) => !/^(chrome|about|devtools):/.test(String(t.url || '')));
+    if (screen) return h('div', { class: 'stack' }, comp, screen);   // the browser lives in the assistants' computer: its real screen, live
     if (!pages.length && !b.active_jobs.length) return h('div', { class: 'stack' }, comp, h('div', { class: 'card browser-empty-page' }, h('h3', {}, 'No page open'), h('p', { class: 'hint' }, 'When an assistant uses the browser, the page shows here live, and you can take over to sign in yourself.')));   /* one calm empty state */
     const pane = h('div', { id: 'browser-pane', class: 'browser-pane standalone' });
     setTimeout(() => { browserPaneOpen = true; connectBrowserStream(); refreshLiveStatus(); }, 0);
@@ -1148,6 +1149,23 @@ async function workspaceDetail(id) {
     addObj,
     h('div', { class: 'card' }, h('h3', {}, `Schedules (${w.schedules.length})`), w.schedules.length ? h('ul', { class: 'list' }, w.schedules.map((s) => h('div', { class: 'item' }, h('div', {}, h('div', { class: 't' }, s.name), h('div', { class: 's' }, `${s.kind} · ${s.cron ?? 'every ' + s.every_seconds + 's'}`)), h('span', { class: `tag ${s.enabled ? 'ok' : ''}` }, s.enabled ? 'on' : 'paused')))) : empty('No schedules in this project')));
 }
+// A live screen of the assistants' computer (noVNC over the engine; view-only until the owner takes over that one screen).
+function screenCard(n, takeover) {
+  const host = h('div', { class: 'vnc-host', 'aria-label': `Screen ${n} of the assistants' computer` }); const status = h('span', { class: 'hint' }, 'Connecting…');
+  let rfb = null; let mine = !!(takeover && takeover.active && takeover.note === `screen ${n}`);
+  const btn = h('button', { class: `btn2 ${mine ? 'primary' : ''}` }, mine ? 'Hand back' : 'Take over');
+  const banner = h('div', { class: 'blocker warn', hidden: !mine }, 'You have control of this screen. The assistants\' browser is paused until you hand back. Passwords and codes you type here are never seen by the assistants.');
+  btn.onclick = async () => { const on = !mine; const r = await api('/api/computer/takeover', { method: 'POST', body: { screen: n, active: on } }).catch((e) => ({ error: e.message })); if (r.error) { notify(r.error, true); return; } mine = on; if (rfb) rfb.viewOnly = !on; btn.textContent = on ? 'Hand back' : 'Take over'; btn.classList.toggle('primary', on); banner.hidden = !on; notify(on ? 'You have control. Hand back when you are done.' : 'Handed back: the assistants can continue.'); setTimeout(() => { try { rfb?.disconnect(); } catch {} connect(); }, 1500); };
+  const connect = async () => {
+    try { const { default: RFB } = await import('/vendor/novnc/core/rfb.js'); host.replaceChildren(); rfb = new RFB(host, `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/computer/screen/${n}`, { wsProtocols: ['binary'] });
+      rfb.viewOnly = !mine; rfb.scaleViewport = true; rfb.resizeSession = false; rfb.background = 'transparent';
+      rfb.addEventListener('connect', () => { status.textContent = mine ? 'Live · you have control' : 'Live · view only'; });
+      rfb.addEventListener('disconnect', () => { status.textContent = 'Disconnected'; });
+    } catch (e) { status.textContent = `Could not show the screen: ${e.message}`; }
+  };
+  setTimeout(connect, 0);
+  return h('div', { class: 'card' }, h('div', { class: 'row spread' }, h('h3', {}, `Screen ${n}`), h('div', { class: 'row', style: 'gap:8px;align-items:center' }, status, btn)), banner, host);
+}
 // The assistants' computer (a private Linux VM on this Mac): real status from computerd, Update and Reset to snapshot; Recover only on error.
 async function computerCard() {
   const c = await api('/api/computer').catch((e) => ({ state: 'error', detail: e.message, snapshots: [] }));
@@ -1155,7 +1173,7 @@ async function computerCard() {
   const word = { running: ['ok', 'Running'], starting: ['warn', 'Starting'], stopped: ['', 'Stopped'], error: ['bad', 'Needs attention'] }[c.state] || ['', c.state];
   const act = (what, confirmText) => async () => { if (confirmText && !confirmBox(confirmText)) return; const r = await api(`/api/computer/${what}`, { method: 'POST', body: {} }).catch((e) => ({ error: e.message })); if (r.error) notify(r.error, true); else { notify(what === 'update' ? 'Updating the computer: a snapshot is taken first.' : what === 'reset' ? 'Restoring the last snapshot…' : 'Starting the computer…'); setTimeout(route, 1500); } };
   const last = c.snapshots && c.snapshots[0];
-  return h('div', { class: 'card', id: 'computer' }, h('div', { class: 'row spread' }, h('h3', {}, 'Computer'), h('span', { class: `tag ${word[0]}` }, c.busy ? `Busy: ${c.busy}` : word[1])),
+  return h('div', { class: 'card', id: 'computer', 'data-location': c.location || 'mac' }, h('div', { class: 'row spread' }, h('h3', {}, 'Computer'), h('span', { class: `tag ${word[0]}` }, c.busy ? `Busy: ${c.busy}` : word[1])),
     h('p', { class: 'hint' }, 'A private Linux computer on this Mac where the assistants work. Nothing on your Mac is shared into it.'),
     h('dl', { class: 'kv' },
       c.vm ? [h('dt', {}, 'Size'), h('dd', {}, `${c.vm.cpus} cores · ${c.vm.memory_gb} GB memory`)] : null,

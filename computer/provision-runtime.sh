@@ -13,12 +13,12 @@ export PATH=/opt/node/bin:$PATH
 OC=$(jq -r .runtime.openclaw $V); [ "$(openclaw --version 2>/dev/null | grep -o '[0-9.]*' | head -1)" = "$OC" ] || npm install -g --no-fund --no-audit --prefix /opt/node "openclaw@$OC"
 install -d -m 755 /opt/claudebot/bin /opt/claudebot/acp
 [ "$(jq -r .version /opt/claudebot/acp/node_modules/@agentclientprotocol/claude-agent-acp/package.json 2>/dev/null)" = "$(jq -r .runtime.claude_agent_acp $V)" ] || npm install --prefix /opt/claudebot/acp --no-fund --no-audit "@agentclientprotocol/claude-agent-acp@$(jq -r .runtime.claude_agent_acp $V)"
-install -m 755 /etc/claudebot/claude-acp /opt/claudebot/bin/claude-acp; install -m 644 /etc/claudebot/broker-bridge.mjs /opt/claudebot/broker-bridge.mjs
+install -m 755 /etc/claudebot/claude-acp /opt/claudebot/bin/claude-acp; install -m 755 /etc/claudebot/chromium-wayland /opt/claudebot/bin/chromium-wayland; install -m 644 /etc/claudebot/broker-bridge.mjs /opt/claudebot/broker-bridge.mjs
 CC=$(jq -r .runtime.claude_code $V); [ "$(sudo -u "$U" "$HOME_U/.local/bin/claude" --version 2>/dev/null | cut -d' ' -f1)" = "$CC" ] || sudo -u "$U" bash -c "curl -fsSL https://claude.ai/install.sh -o /tmp/claude-install.sh && bash /tmp/claude-install.sh $CC"
 install -d -o "$U" -m 700 "$D/claude" "$D/openclaw" "$D/secrets" "$D/logs" "$D/workspace" "$D/workspace/_control"
 [ -s "$D/secrets/gateway.token" ] || (umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$D/secrets/gateway.token"); chown "$U" "$D/secrets/gateway.token"
 sudo -u "$U" env OPENCLAW_STATE_DIR="$D/openclaw" PATH=$PATH bash -c "[ -d '$D/openclaw/npm/projects' ] && ls '$D/openclaw/npm/projects' | grep -q acpx || openclaw --profile computer plugins install $(jq -r .runtime.acpx_plugin $V)"
 install -o "$U" -m 600 /etc/claudebot/openclaw.json "$D/openclaw/openclaw.json"
-sed "s/__USER__/$U/" /etc/claudebot/openclaw-gateway.service > /etc/systemd/system/openclaw-gateway.service
+sed "s/__USER__/$U/; s/__UID__/$(id -u "$U")/" /etc/claudebot/openclaw-gateway.service > /etc/systemd/system/openclaw-gateway.service
 systemctl daemon-reload; systemctl enable openclaw-gateway; systemctl restart openclaw-gateway
 echo runtime-provisioned > /etc/claudebot/runtime-provisioned

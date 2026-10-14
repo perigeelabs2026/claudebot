@@ -73,6 +73,7 @@ export class BrowserLive {
   /** DevTools port of the managed profile, from the OpenClaw profile config (no process spawned). */
   cdpPort(): number {
     const env = Number(process.env.CLAUDEBOT_BROWSER_CDP_PORT); if (Number.isFinite(env) && env > 0) return env;
+    if ((this.cfg as { browserInComputer?: boolean }).browserInComputer) return this.cfg.browserCdpPort;   // the browser lives in the assistants' computer (local DevTools proxy)
     try { const j = JSON.parse(fs.readFileSync(path.join(os.homedir(), `.openclaw-${this.cfg.openclawProfile}`, 'openclaw.json'), 'utf8')) as { browser?: { profiles?: Record<string, { cdpPort?: number }> } }; const p = j.browser?.profiles?.claudebot?.cdpPort; if (p) return p; } catch { /* default */ }
     return 48323;
   }

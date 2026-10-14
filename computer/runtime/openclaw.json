@@ -80,7 +80,16 @@
     }
   },
   "browser": {
-    "enabled": false
+    "enabled": true,
+    "headless": false,
+    "allowSystemProfileImport": false,
+    "executablePath": "/opt/claudebot/bin/chromium-wayland",
+    "defaultProfile": "claudebot",
+    "profiles": {
+      "claudebot": {
+        "cdpPort": 48323
+      }
+    }
   },
   "agents": {
     "defaults": {

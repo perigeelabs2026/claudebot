@@ -36,6 +36,15 @@ export async function computerAuthStatus(): Promise<string> {
   catch (e) { const out = (e as { stdout?: string }).stdout; if (out && out.trim().startsWith('{')) return out; throw e; }
 }
 
+/** Put one file at the same path inside the computer (OpenClaw's uploads folder), and fetch one back. Content goes over ssh stdin/stdout. */
+export async function toComputer(dest: string, buf: Buffer): Promise<{ ok: boolean; error?: string }> {
+  return new Promise((resolve) => { const c = execFile('ssh', ['-F', SSH_CONFIG, '-o', 'BatchMode=yes', SSH_HOST, `mkdir -p '${path.posix.dirname(dest)}' && umask 077 && cat > '${dest}'`], { timeout: 60_000 }, (e) => resolve(e ? { ok: false, error: e.message.slice(0, 160) } : { ok: true })); c.stdin?.end(buf); });
+}
+export async function fromComputer(src: string, dest: string): Promise<{ ok: boolean; error?: string }> {
+  try { const r = await new Promise<Buffer>((resolve, reject) => execFile('ssh', ['-F', SSH_CONFIG, '-o', 'BatchMode=yes', SSH_HOST, `cat '${src}' && rm -f '${src}'`], { encoding: 'buffer', maxBuffer: 60 * 1024 * 1024, timeout: 120_000 }, (e, out) => e ? reject(e) : resolve(out as Buffer))); fs.mkdirSync(path.dirname(dest), { recursive: true }); fs.writeFileSync(dest, r, { mode: 0o600 }); return { ok: true }; }
+  catch (e) { return { ok: false, error: (e as Error).message.slice(0, 160) }; }
+}
+
 export class ComputerRuntime implements ModelRuntime {
   readonly id = 'claude-acp' as const;
   private inner: ModelRuntime; private o: { hostWorkspaces: string; runDir: string; enginePort: number; log: { info: (m: string, d?: Record<string, unknown>) => void; warn: (m: string, d?: Record<string, unknown>) => void }; exec?: (cmd: string, args: string[], input?: string) => Promise<string> };

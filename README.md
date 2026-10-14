@@ -98,7 +98,7 @@ claudebot computer up
 
 It shares no folders with your Mac and is reachable only from your Mac (127.0.0.1), guarded by a token kept in your Keychain. Manage it in **More › Browser › Computer** or with `claudebot computer status | snapshot | reset | update | down`. A snapshot is taken every night when idle and before every update (the last 3 are kept). It uses about 6 GB of memory while running; `claudebot computer down` stops it.
 
-Assistants keep working on your Mac by default. To run their Claude turns inside the private computer, press **Run assistants here** on the Computer card; **Run on my Mac instead** switches back.
+Assistants keep working on your Mac by default. To run their Claude turns inside the private computer, press **Run assistants here** on the Computer card; **Run on my Mac instead** switches back. While they run there, their browser runs inside it too, and the Computer card shows its screens live: press **Take over** to use the mouse and keyboard yourself, then **Hand back**.
 
 ## Privacy and safety
 
@@ -146,4 +146,4 @@ ClaudeBot is built in the open and we want it to be yours too. Bug reports, idea
 
 ## License
 
-[MIT](LICENSE). ClaudeBot is an independent project and is not affiliated with Anthropic or OpenClaw. Claude and Claude Code are trademarks of Anthropic.
+[MIT](LICENSE). ClaudeBot is an independent project and is not affiliated with Anthropic or OpenClaw. Claude and Claude Code are trademarks of Anthropic. The live view bundles [noVNC](https://github.com/novnc/noVNC) 1.5.0 (MPL-2.0, unmodified, in `engine/ui/vendor/novnc`).

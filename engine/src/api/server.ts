@@ -5,7 +5,8 @@ import { searchScoped } from '../search/index.ts';
 import http from 'node:http';
 import fs from 'node:fs';
 import { Vault } from '../memory/vault.ts';
-import { LimaHost } from '../computer/host.ts';
+import { LimaHost, ComputerToken } from '../computer/host.ts';
+import net from 'node:net';
 import { runtimeLocation } from '../runtime/select.ts';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
@@ -70,6 +71,16 @@ export class ApiServer {
   constructor(d: ApiDeps) {
     this.d = d; this.uiToken = fs.readFileSync(d.cfg.uiTokenFile, 'utf8').trim(); this.uiDir = path.join(d.cfg.sourceRoot, 'engine', 'ui');
     this.server = http.createServer((req, res) => { this.handle(req, res).catch((e) => { d.log.error('request failed', { url: req.url, err: (e as Error).message }); if (!res.headersSent) this.json(res, 500, { error: (e as Error).message }); }); });
+    // Live screens of the assistants' computer for the app (noVNC): the app's own session authenticates here, and the engine adds
+    // the per-install token on the way to computerd. The browser page never sees that token.
+    this.server.on('upgrade', (req, socket) => {
+      const url = new URL(req.url ?? '/', 'http://x'); const m = /^\/api\/computer\/screen\/(\d+)$/.exec(url.pathname);
+      if (!m || !this.authed(req as Req, url)) { socket.end('HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n'); return; }
+      const tok = new ComputerToken(d.cfg.secretsDir).get(); const up = net.connect(47777, '127.0.0.1');
+      up.once('error', () => socket.destroy());
+      up.once('connect', () => { const hdrs = Object.entries(req.headers).filter(([k]) => !['host', 'authorization', 'cookie'].includes(k)).map(([k, v]) => `${k}: ${v}`).join('\r\n'); up.write(`GET /screen/${m[1]} HTTP/1.1\r\nHost: 127.0.0.1:47777\r\nAuthorization: Bearer ${tok ?? ''}\r\n${hdrs}\r\n\r\n`); up.pipe(socket); socket.pipe(up); });
+      const end = () => { up.destroy(); socket.destroy(); }; socket.on('error', end); socket.on('close', end); up.on('close', end);
+    });
   }
   listen(): Promise<number> { return new Promise((r) => this.server.listen(this.d.cfg.enginePort, '127.0.0.1', () => r((this.server.address() as { port: number }).port))); }
   close(): void { for (const s of this.sse) s.end(); void this.d.live.close(); this.server.close(); }
@@ -338,6 +349,14 @@ export class ApiServer {
 
     // ---- the assistants' computer (Lima VM): status, and the owner's Update / Reset to snapshot / Recover ----
     if (p === '/api/computer' && m === 'GET') return this.json(res, 200, { ...(await this.computer().status()), busy: this.computerBusy, location: runtimeLocation(db) });
+    if (p === '/api/computer/takeover' && m === 'POST') {   // owner takes over one screen: input on there only, assistants' browser paused
+      if (req.headers['x-claudebot-token']) return this.json(res, 403, { error: 'taken over from the app only' });
+      const b = await this.body(req); const n = Math.max(1, Number(b.screen ?? 1)); const on = !!b.active; const tok = new ComputerToken(cfg.secretsDir).get();
+      const r = await fetch(`http://127.0.0.1:47777/input/${n}?on=${on ? 1 : 0}`, { method: 'POST', headers: { authorization: `Bearer ${tok ?? ''}` } }).catch((e) => ({ ok: false, status: 0, text: async () => String(e) }));
+      if (!r.ok) return this.json(res, 502, { error: 'the assistants\' computer did not switch input' });
+      this.d.live.setTakeover(on, on ? `screen ${n}` : null, b.site ? String(b.site) : null, 'owner'); store.event(null, 'owner', on ? 'computer.takeover_started' : 'computer.takeover_ended', { screen: n });
+      this.broadcast('browser', { takeover: on }); return this.json(res, 200, { takeover: on, screen: n });
+    }
     if (p === '/api/computer/location' && m === 'POST') {   // where assistants' Claude turns run; switching back to the Mac is the rollback
       if (req.headers['x-claudebot-token']) return this.json(res, 403, { error: 'changed from the app only' });
       const b = await this.body(req); const loc = b.location === 'computer' ? 'computer' : 'mac';

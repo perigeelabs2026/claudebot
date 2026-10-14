@@ -53,7 +53,9 @@ Requires=sway.service
 [Service]
 Environment=WAYLAND_DISPLAY=wayland-1
 ExecStartPre=/bin/sleep 2
-ExecStart=/bin/sh -c 'exec /usr/bin/wayvnc -o HEADLESS-%i -S /run/user/%U/wayvnc-%i.sock 127.0.0.1 $((5899+%i))'
+EnvironmentFile=-/run/user/%U/wayvnc-%i.env
+ExecStartPre=/bin/sh -c '[ -f /run/user/%U/wayvnc-%i.env ] || echo WAYVNC_FLAGS=--disable-input > /run/user/%U/wayvnc-%i.env'
+ExecStart=/bin/sh -c 'exec /usr/bin/wayvnc $WAYVNC_FLAGS -o HEADLESS-%i -S /run/user/%U/wayvnc-%i.sock 127.0.0.1 $((5899+%i))'
 Restart=always
 [Install]
 WantedBy=default.target
@@ -62,5 +64,5 @@ chown -R $U:$U "$UD"
 systemctl daemon-reload; systemctl enable --now computerd; systemctl restart computerd
 sudo -u $U XDG_RUNTIME_DIR=/run/user/$UID_ systemctl --user daemon-reload
 sudo -u $U XDG_RUNTIME_DIR=/run/user/$UID_ systemctl --user enable --now sway.service
-for i in $(seq 1 $N); do sudo -u $U XDG_RUNTIME_DIR=/run/user/$UID_ systemctl --user enable --now "wayvnc@$i.service"; done
+for i in $(seq 1 $N); do sudo -u $U XDG_RUNTIME_DIR=/run/user/$UID_ systemctl --user enable "wayvnc@$i.service"; sudo -u $U XDG_RUNTIME_DIR=/run/user/$UID_ systemctl --user restart "wayvnc@$i.service"; done
 echo provisioned > /etc/claudebot/provisioned
