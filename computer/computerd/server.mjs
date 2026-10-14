@@ -4,6 +4,7 @@
 //   GET  /screen/<n>    websocket → that screen's VNC (wayvnc on guest loopback 5900+n-1)
 //   *    /cdp/...       the managed browser's DevTools (HTTP and websocket), for ClaudeBot on the Mac
 //   POST /input/<n>?on=1|0  owner takeover: enable remote input on screen n only (every other screen goes view-only)
+//   POST /place?screen=<n>  move the browser window that just opened (the newest) to screen n (one window per assistant)
 import http from 'node:http';
 import net from 'node:net';
 import fs from 'node:fs';
@@ -37,6 +38,19 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/health') {
     const screens = []; for (let i = 1; i <= SCREENS; i++) screens.push({ n: i, streaming: await listening(VNC_BASE + i - 1) });
     return send(200, { ok: true, computerd: { started, now: new Date().toISOString(), uptime_s: Math.round(os.uptime()) }, memory: memory(), disk: { root: disk('/'), data: disk(DATA) }, screens });
+  }
+  if (req.method === 'POST' && url.pathname === '/place') {
+    const n = Number(url.searchParams.get('screen')); if (!(n >= 1 && n <= SCREENS)) return send(400, { error: 'no such screen' });
+    const env = { ...process.env, XDG_RUNTIME_DIR: `/run/user/${process.getuid()}` };
+    try {
+      const sock = fs.readdirSync(env.XDG_RUNTIME_DIR).find((f) => /^sway-ipc\..*\.sock$/.test(f)); if (!sock) return send(503, { error: 'the desktop is not running' }); env.SWAYSOCK = `${env.XDG_RUNTIME_DIR}/${sock}`;
+      const tree = JSON.parse(execFileSync('swaymsg', ['-t', 'get_tree'], { env, encoding: 'utf8' }));
+      // the newest browser window (sway ids only grow); the engine opens one window at a time, so that is the one just opened
+      const all = []; const walk = (node) => { if (node.app_id && /chrom/i.test(String(node.app_id))) all.push(node); for (const c of (node.nodes || []).concat(node.floating_nodes || [])) walk(c); }; walk(tree);
+      const win = all.sort((a, b) => b.id - a.id)[0]; if (!win) return send(409, { error: 'no browser window is open' });
+      execFileSync('swaymsg', [`[con_id=${win.id}] move container to workspace number ${n}`], { env });
+      return send(200, { ok: true, window: win.id, title: win.name, screen: n });
+    } catch (e) { return send(500, { error: e.message }); }
   }
   const inp = /^\/input\/(\d+)$/.exec(url.pathname);
   if (req.method === 'POST' && inp) {

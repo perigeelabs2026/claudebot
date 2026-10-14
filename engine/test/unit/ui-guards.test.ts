@@ -159,6 +159,8 @@ test('a file an assistant saved renders as a file card, not as a text bubble (ow
 
 test('when the browser lives in the assistants\' computer, the browser pane shows its live screen with Take over, never the Mac-window buttons (owner: "your open window button doesn\'t work")', () => {
   const app = ui('app.js');
-  assert.match(app, /if \(loc === 'computer'\) \{ const st = await api\('\/api\/browser'\)[^\n]*screenCard\(1, st\.live\?\.takeover\)/);
+  assert.match(app, /if \(loc === 'computer'\) \{ const st = await api\('\/api\/browser'\)[^\n]*screenCard\(agentId \? screenForAgent\(agentId\) : 1, st\.live\?\.takeover\)/);
+  // each assistant has its own window on its own screen; the Browser page shows them all (one shared profile)
+  assert.match(app, /const SCREEN_OF = \{ researcher: 1, browser_operator: 2 \}/); assert.match(app, /allScreens\(Number\(comp\.dataset\.screens/);
   assert.match(app, /computerLocation === 'computer' \? null : h\('button', \{ class: 'btn2', onclick: openBrowserWindow \}, 'Open window'\)/);
 });

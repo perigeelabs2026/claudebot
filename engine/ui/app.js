@@ -603,10 +603,10 @@ function standardContext(key) {
 // the Mac-window controls (Open window / Place beside had nothing to open there).
 let computerLocation = null;
 async function whereBrowser() { if (computerLocation === null) { try { computerLocation = (await api('/api/computer')).location || 'mac'; } catch { computerLocation = 'mac'; } setTimeout(() => { computerLocation = null; }, 30_000); } return computerLocation; }
-function browserInto(body) {
+function browserInto(body, d) {
   const holder = h('div', { class: 'ctx-section' }); body.append(holder);
   whereBrowser().then(async (loc) => {
-    if (loc === 'computer') { const st = await api('/api/browser').catch(() => ({ live: {} })); holder.replaceChildren(screenCard(1, st.live?.takeover)); return; }
+    if (loc === 'computer') { const st = await api('/api/browser').catch(() => ({ live: {} })); const agentId = d && d.conversation && d.conversation.type === 'direct' ? d.members[0]?.agent_id : null; holder.replaceChildren(screenCard(agentId ? screenForAgent(agentId) : 1, st.live?.takeover)); return; }
     const pane = h('aside', { id: 'browser-pane', class: 'browser-pane', style: 'display:flex' }); holder.replaceWith(pane); browserPaneOpen = true; connectBrowserStream(); refreshLiveStatus();
   });
 }
@@ -719,7 +719,7 @@ async function chatView(arg, opts = {}) {
   chatPane.append(pill, menu, thread);
   const hasPending = !!d && d.messages.some((x) => x.kind === 'decision' && x.approval?.status === 'pending');
   const ctxTabs = isGroup ? ['office', 'members', 'files'] : hasPending ? ['review', 'office', 'files'] : ['task', 'office', 'browser', 'files'];
-  const ctx = contextPane(ctxTabs, (t, body) => { if (t === 'office') officeInto(body); else if (t === 'browser') browserInto(body); else if (t === 'task') { if (d) taskInto(body, d); else body.append(h('div', { class: 'ctx-section' }, h('div', { class: 'section-h' }, 'Task'), h('p', { class: 'empty-line' }, 'No task in this chat yet.'))); } else if (t === 'files') filesInto(body, d); else if (t === 'review') reviewInto(body, d); else if (d) membersInto(body, d); else body.append(h('div', { class: 'ctx-section' }, h('div', { class: 'section-h' }, 'Assistant'), h('div', { class: 'member-row' }, avatar(agentId, 'sm'), h('b', {}, agent.name), h('span', { class: 'now' }, agent.purpose)))); });
+  const ctx = contextPane(ctxTabs, (t, body) => { if (t === 'office') officeInto(body); else if (t === 'browser') browserInto(body, d); else if (t === 'task') { if (d) taskInto(body, d); else body.append(h('div', { class: 'ctx-section' }, h('div', { class: 'section-h' }, 'Task'), h('p', { class: 'empty-line' }, 'No task in this chat yet.'))); } else if (t === 'files') filesInto(body, d); else if (t === 'review') reviewInto(body, d); else if (d) membersInto(body, d); else body.append(h('div', { class: 'ctx-section' }, h('div', { class: 'section-h' }, 'Assistant'), h('div', { class: 'member-row' }, avatar(agentId, 'sm'), h('b', {}, agent.name), h('span', { class: 'now' }, agent.purpose)))); });
   root.append(chatPane, splitterEl(root), ctx);
   // Truthful status line: who is working on what right now (live lease + fresh heartbeat only)
   const waitingN = d ? d.messages.filter((x) => x.kind === 'decision' && x.approval?.status === 'pending').length : 0;
@@ -1064,7 +1064,7 @@ const views = {
     return h('div', { class: 'stack' }, h('div', { class: 'section-title' }, `Waiting for you (${pending.length})`), pending.length ? pending.map(card) : empty('Nothing needs your decision', 'When an assistant wants to send, publish, buy or delete something, it asks here first.'), h('div', { class: 'section-title' }, `Decided (${rest.length})`), rest.length ? rest.map(card) : empty('No decisions yet'));
   },
   async browser() {
-    const b = await api('/api/browser'); const l = b.live || {}; const comp = await computerCard(); const screen = comp && comp.dataset.location === 'computer' ? screenCard(1, l.takeover) : null;
+    const b = await api('/api/browser'); const l = b.live || {}; const comp = await computerCard(); const screen = comp && comp.dataset.location === 'computer' ? allScreens(Number(comp.dataset.screens || 1), l.takeover) : null;
     const pages = (l.tabs || []).filter((t) => !/^(chrome|about|devtools):/.test(String(t.url || '')));
     if (screen) return h('div', { class: 'stack' }, comp, screen);   // the browser lives in the assistants' computer: its real screen, live
     if (!pages.length && !b.active_jobs.length) return h('div', { class: 'stack' }, comp, h('div', { class: 'card browser-empty-page' }, h('h3', {}, 'No page open'), h('p', { class: 'hint' }, 'When an assistant uses the browser, the page shows here live, and you can take over to sign in yourself.')));   /* one calm empty state */
@@ -1159,6 +1159,12 @@ async function workspaceDetail(id) {
     addObj,
     h('div', { class: 'card' }, h('h3', {}, `Schedules (${w.schedules.length})`), w.schedules.length ? h('ul', { class: 'list' }, w.schedules.map((s) => h('div', { class: 'item' }, h('div', {}, h('div', { class: 't' }, s.name), h('div', { class: 's' }, `${s.kind} · ${s.cron ?? 'every ' + s.every_seconds + 's'}`)), h('span', { class: `tag ${s.enabled ? 'ok' : ''}` }, s.enabled ? 'on' : 'paused')))) : empty('No schedules in this project')));
 }
+// Every assistant works in its own window on its own screen (one shared browser profile, one sign-in for all).
+const SCREEN_OF = { researcher: 1, browser_operator: 2 }; const screenForAgent = (id) => SCREEN_OF[id] ?? 3;
+function allScreens(n, takeover) {
+  const who = (k) => agentsCache.filter((a) => a.enabled !== false && screenForAgent(a.id) === k && a.id !== 'coordinator').map((a) => a.name.split(/[\s(]+/)[0]).join(', ');
+  return h('div', { class: 'stack' }, h('div', { class: 'section-h', style: 'margin:4px 0' }, 'All screens'), h('div', { class: 'screen-grid' }, ...Array.from({ length: n }, (_, i) => { const card = screenCard(i + 1, takeover); const label = who(i + 1); if (label) card.querySelector('h3').textContent = `Screen ${i + 1} · ${label}`; return card; })));
+}
 // A live screen of the assistants' computer (noVNC over the engine; view-only until the owner takes over that one screen).
 function screenCard(n, takeover) {
   const host = h('div', { class: 'vnc-host', 'aria-label': `Screen ${n} of the assistants' computer` }); const status = h('span', { class: 'hint' }, 'Connecting…');
@@ -1183,7 +1189,7 @@ async function computerCard() {
   const word = { running: ['ok', 'Running'], starting: ['warn', 'Starting'], stopped: ['', 'Stopped'], error: ['bad', 'Needs attention'] }[c.state] || ['', c.state];
   const act = (what, confirmText) => async () => { if (confirmText && !confirmBox(confirmText)) return; const r = await api(`/api/computer/${what}`, { method: 'POST', body: {} }).catch((e) => ({ error: e.message })); if (r.error) notify(r.error, true); else { notify(what === 'update' ? 'Updating the computer: a snapshot is taken first.' : what === 'reset' ? 'Restoring the last snapshot…' : 'Starting the computer…'); setTimeout(route, 1500); } };
   const last = c.snapshots && c.snapshots[0];
-  return h('div', { class: 'card', id: 'computer', 'data-location': c.location || 'mac' }, h('div', { class: 'row spread' }, h('h3', {}, 'Computer'), h('span', { class: `tag ${word[0]}` }, c.busy ? `Busy: ${c.busy}` : word[1])),
+  return h('div', { class: 'card', id: 'computer', 'data-location': c.location || 'mac', 'data-screens': String((c.screens || []).length || 1) }, h('div', { class: 'row spread' }, h('h3', {}, 'Computer'), h('span', { class: `tag ${word[0]}` }, c.busy ? `Busy: ${c.busy}` : word[1])),
     h('p', { class: 'hint' }, 'A private Linux computer on this Mac where the assistants work. Nothing on your Mac is shared into it.'),
     h('dl', { class: 'kv' },
       c.vm ? [h('dt', {}, 'Size'), h('dd', {}, `${c.vm.cpus} cores · ${c.vm.memory_gb} GB memory`)] : null,

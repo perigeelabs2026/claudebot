@@ -512,3 +512,4 @@ details.advanced { margin-top: 12px; } details.advanced summary { cursor: pointe
 .pdf-view { width: 100%; height: 78vh; border: 1px solid var(--line); border-radius: var(--r-md, 8px); background: #fff; } .img-view { max-width: 100%; border-radius: var(--r-md, 8px); }
 .composer2.drop-on .box { outline: 2px solid var(--accent, #7aa2ff); outline-offset: 2px; } .att-thumb img { display: block; max-width: 260px; max-height: 200px; border-radius: var(--r-md, 8px); margin-bottom: 6px; border: 1px solid var(--line); }
 .vnc-host { width: 100%; aspect-ratio: 16 / 10; background: #000; border-radius: var(--r-md, 8px); overflow: hidden; margin-top: 8px; } .vnc-host canvas { outline: none; }
+.screen-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 12px; }

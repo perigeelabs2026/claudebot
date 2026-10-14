@@ -12,7 +12,8 @@ import { ChatStore, ChatRuleError } from '../chat/store.ts';
 import { Assistants, ownerAsked, CHAT_CREATE_DAILY_LIMIT } from '../chat/assistants.ts';
 import { setPriority, saveReport } from '../cos/report.ts';
 import { readArtifact, artifactFile } from './artifact-access.ts';
-import { toComputer, fromComputer, computerTmpRoot } from '../runtime/computer.ts';
+import { toComputer, fromComputer, computerTmpRoot, openOnScreen, screenFor } from '../runtime/computer.ts';
+import { ComputerToken } from '../computer/host.ts';
 import { searchScoped } from '../search/index.ts';
 import { delegationBudget, waitForChildren, childStatus } from '../coord/delegation.ts';
 import { runCheck, allowedRepo, type CheckProfile } from '../worker/project-check.ts';
@@ -359,19 +360,29 @@ export class BrokerApi {
         const cdp = `http://127.0.0.1:${this.cfg.browserCdpPort}`;
         const targets = async () => { try { const r = await fetch(`${cdp}/json`, { signal: AbortSignal.timeout(1500) }); return ((await r.json()) as Array<{ id: string; type: string }>).filter((t) => t.type === 'page'); } catch { return [] as Array<{ id: string; type: string }>; } };
         const existing = taskTab(db, cap.job_id) ?? this.resumedTab(cap.job_id); const before = await targets(); const reuse = !!existing && before.some((t) => t.id === existing);
-        if (reuse) { const focus = await runProbe(this.cfg.openclawBin, [...args, 'focus', existing!], { timeoutMs: 20_000, label: 'browser.focus', env, registryDir: path.join(this.cfg.runDir, 'probes') }); if (!focus.ok) this.store.event(cap.job_id, actor, 'browser.tab', { note: 'could not focus the task tab; opening a new one', detail: (focus.stderr || focus.stdout).slice(0, 120) }); }
-        const opened = await runProbe(this.cfg.openclawBin, [...args, reuse ? 'navigate' : 'open', url], { timeoutMs: 60_000, label: reuse ? 'browser.navigate' : 'browser.open', env, registryDir: path.join(this.cfg.runDir, 'probes') });
+        // (The task's own tab is navigated by its id below; focusing first is unnecessary and could act on another tab.)
+        // In the assistants' computer a new task gets its own window on its assistant's screen (one shared profile, so one sign-in covers all).
+        let opened: { ok: boolean; stdout: string; stderr: string };
+        if (!reuse && (this.cfg as { browserInComputer?: boolean }).browserInComputer) {
+          const me = this.store.get(cap.job_id); const tok = new ComputerToken(this.cfg.secretsDir).get(); const scr = screenFor(me?.agent_role ?? cap.role);
+          let w = await openOnScreen(this.cfg.browserCdpPort, url, scr, tok);
+          // the browser starts on demand (after a computer restart nothing is running yet): start it, then open the window again
+          if (!w.ok) { await runProbe(this.cfg.openclawBin, [...args, 'start'], { timeoutMs: 90_000, label: 'browser.start', env, registryDir: path.join(this.cfg.runDir, 'probes') }).catch(() => null); w = await openOnScreen(this.cfg.browserCdpPort, url, scr, tok); }
+          opened = w.ok ? { ok: true, stdout: JSON.stringify({ targetId: w.targetId }), stderr: '' } : await runProbe(this.cfg.openclawBin, [...args, 'open', url], { timeoutMs: 60_000, label: 'browser.open', env, registryDir: path.join(this.cfg.runDir, 'probes') });
+          if (w.ok) this.store.event(cap.job_id, actor, 'browser.window', { screen: screenFor(me?.agent_role ?? cap.role), target: w.targetId });
+        } else opened = await runProbe(this.cfg.openclawBin, [...args, reuse ? 'navigate' : 'open', url, ...(reuse ? ['--target-id', existing!] : [])], { timeoutMs: 60_000, label: reuse ? 'browser.navigate' : 'browser.open', env, registryDir: path.join(this.cfg.runDir, 'probes') });   // navigate exactly the task's own tab
         if (!opened.ok) { mark('failed'); return { ok: false, text: `could not open the page: ${(opened.stderr || opened.stdout).replace(/\s+/g, ' ').slice(0, 200)}` }; }
+        let taskTabId: string | null = reuse ? existing! : null;
         if (!reuse) {
           // The tab OpenClaw opened (its --json answer names it; it may reuse a blank tab, so a before/after diff can miss it).
           let id: string | null = null; try { const j = JSON.parse(opened.stdout) as { targetId?: string; id?: string }; id = j.targetId ?? j.id ?? null; } catch { /* older output */ }
           if (!id) { const after = await targets(); id = newTabId(before, after); }
-          if (id) { recordTaskTab(db, cap.job_id, id); this.store.event(cap.job_id, actor, 'browser.tab', { opened: id, url }); }
+          if (id) { taskTabId = id; recordTaskTab(db, cap.job_id, id); this.store.event(cap.job_id, actor, 'browser.tab', { opened: id, url }); }
           else this.store.event(cap.job_id, actor, 'browser.tab', { note: 'could not tell which tab was opened', url });
         }
         await new Promise((r) => setTimeout(r, Number(process.env.CLAUDEBOT_BROWSER_SETTLE_MS ?? 2500)));
         mark('reading');
-        const snap = await runProbe(this.cfg.openclawBin, [...args, 'snapshot', '--format', 'aria'], { timeoutMs: 60_000, label: 'browser.snapshot', env, maxBuffer: 8 * 1024 * 1024, registryDir: path.join(this.cfg.runDir, 'probes') });
+        const snap = await runProbe(this.cfg.openclawBin, [...args, 'snapshot', '--format', 'aria', ...(taskTabId ? ['--target-id', taskTabId] : [])], { timeoutMs: 60_000, label: 'browser.snapshot', env, maxBuffer: 8 * 1024 * 1024, registryDir: path.join(this.cfg.runDir, 'probes') });
         mark('done');
         if (!snap.ok) return { ok: false, text: `could not read the page: ${(snap.stderr || snap.stdout).replace(/\s+/g, ' ').slice(0, 200)}` };
         this.store.event(cap.job_id, actor, 'browser.read', { url });

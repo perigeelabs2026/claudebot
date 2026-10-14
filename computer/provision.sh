@@ -35,6 +35,7 @@ UD=/home/$U.linux/.config/systemd/user; [ -d /home/$U.linux ] || UD=/home/$U/.co
 N=$(cat /etc/claudebot/screens); CONF="$(dirname "$UD")/sway/config"; : > "$CONF"
 for i in $(seq 1 $N); do echo "output HEADLESS-$i resolution 1280x800 position $(( (i-1)*1280 )) 0" >> "$CONF"; echo "workspace $i output HEADLESS-$i" >> "$CONF"; done
 echo "default_border none" >> "$CONF"; chown $U:$U "$CONF"
+SWAY_BEFORE=$(cat "$UD/sway.service" 2>/dev/null | sha256sum)
 cat > "$UD/sway.service" <<UNIT
 [Unit]
 Description=Headless sway for the assistants' screens
@@ -64,5 +65,7 @@ chown -R $U:$U "$UD"
 systemctl daemon-reload; systemctl enable --now computerd; systemctl restart computerd
 sudo -u $U XDG_RUNTIME_DIR=/run/user/$UID_ systemctl --user daemon-reload
 sudo -u $U XDG_RUNTIME_DIR=/run/user/$UID_ systemctl --user enable --now sway.service
+# A changed screen count only takes effect when sway restarts (it may already be running from boot with the old unit).
+[ "$SWAY_BEFORE" = "$(sha256sum < "$UD/sway.service")" ] || sudo -u $U XDG_RUNTIME_DIR=/run/user/$UID_ systemctl --user restart sway.service
 for i in $(seq 1 $N); do sudo -u $U XDG_RUNTIME_DIR=/run/user/$UID_ systemctl --user enable "wayvnc@$i.service"; sudo -u $U XDG_RUNTIME_DIR=/run/user/$UID_ systemctl --user restart "wayvnc@$i.service"; done
 echo provisioned > /etc/claudebot/provisioned

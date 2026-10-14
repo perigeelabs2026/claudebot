@@ -11,7 +11,7 @@
     "disk": "20GiB",
     "data_disk": "30GiB",
     "zram_mb": 2048,
-    "screens": 2
+    "screens": 3
   },
   "packages": [
     "sway",

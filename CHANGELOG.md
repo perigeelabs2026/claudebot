@@ -11,6 +11,7 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Existing installs: run `claudebot update` to pick up these settings.
 
 ### Added
+- In the private computer each assistant works in its own browser window on its own screen (3 screens, one shared sign-in). The Browser page shows All screens; a chat's browser pane shows that assistant's screen.
 - Dry-run projects: set the project policy `dry_run` and assistants fill in and attach everything but never press the final submit, whatever permission is on. Off by default.
 - The lead can make a task that has not started wait for other tasks (for example, applications wait for the tailored resumes). Background browser tasks can record verified applications too.
 - Telegram quiet hours: notices are held while `telegram.quiet_until` is set, and projects with Telegram turned off in their policies never send.
@@ -37,6 +38,8 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Assistants can open zip and tar archives you give them: files are extracted into a new folder inside the task. Links, paths that escape the folder, and oversized archives are refused. Documents and PDFs also get text copies the assistants can read.
 
 ### Fixed
+- Assistants' replies no longer start with their mid-turn notes.
+- Windows land on the right screen when two assistants open one at once, and the first browse after a computer restart opens the assistant's own window.
 - A file that attached correctly is no longer reported as failed when the form re-renders and shows it by name (Greenhouse).
 - No false "signed out" alarms from the private computer: a sign-in failure is re-checked against Claude's real sign-in there and retried if you are still signed in.
 - The honesty check flags only real submission claims ("I submitted…") and accepts honest negatives ("nothing was applied for") and a teammate's verified submit.

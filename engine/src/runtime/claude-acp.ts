@@ -265,7 +265,10 @@ function extractText(content: unknown): string {
     const blocks = content as Array<unknown>; let lastTool = -1;
     blocks.forEach((b, i) => { if (b && typeof b === 'object' && 'type' in b && /tool/.test(String((b as { type: unknown }).type))) lastTool = i; });
     const texts = (from: number) => blocks.slice(from).map((b) => (typeof b === 'string' ? b : (b && typeof b === 'object' && 'text' in b ? String((b as { text: unknown }).text) : ''))).filter((t) => t.trim().length);
-    const after = texts(lastTool + 1); const parts = after.length ? after : texts(0);
+    let parts = texts(lastTool + 1); if (!parts.length) parts = texts(0);
+    // The gateway's final message drops the tool calls but keeps each text block, so mid-turn notes ("Truncated JSON; use regex.") arrive as
+    // separate blocks ahead of the answer. Each block was written after a tool call: keep the last, or from the longest one when the last is a short sign-off.
+    if (lastTool < 0 && parts.length > 1) { const longest = parts.reduce((bi, p, i) => (p.length >= parts[bi].length ? i : bi), 0); const last = parts.length - 1; parts = parts.slice(parts[last].length >= 300 || longest === last ? last : longest); }
     return splitRunOn(parts.reduce((acc, t) => (!acc ? t : /\s$/.test(acc) || /^\s/.test(t) ? acc + t : `${acc}\n\n${t}`), ''));
   }
   return '';
@@ -276,3 +279,4 @@ function extractText(content: unknown): string {
 export function splitRunOn(text: string): string {
   return text.replace(/(\b[a-z]{2,}[.!?])([A-Z](?:[a-z]+\b|\s))/g, '$1\n\n$2');
 }
+export const extractTextForTest = extractText;

@@ -38,6 +38,29 @@ export async function computerAuthStatus(): Promise<string> {
   catch (e) { const out = (e as { stdout?: string }).stdout; if (out && out.trim().startsWith('{')) return out; throw e; }
 }
 
+/** One window per assistant (one shared profile: every window sees the same sign-ins). Which screen each assistant uses. */
+export function screenFor(agentRole: string, screens = 3): number { const fixed: Record<string, number> = { researcher: 1, browser_operator: 2 }; return Math.min(screens, fixed[agentRole] ?? 3); }
+/** Open a page in a NEW window of the shared browser (DevTools via the local proxy) and move that window to the assistant's screen. */
+// One window opens at a time: computerd places the newest browser window, so two assistants opening at once must not interleave.
+let placing: Promise<unknown> = Promise.resolve();
+export function openOnScreen(cdpPort: number, url: string, screen: number, token: string | null): Promise<{ ok: true; targetId: string } | { ok: false; error: string }> {
+  const run = placing.then(() => openOnScreenNow(cdpPort, url, screen, token)); placing = run.catch(() => null); return run;
+}
+async function openOnScreenNow(cdpPort: number, url: string, screen: number, token: string | null): Promise<{ ok: true; targetId: string } | { ok: false; error: string }> {
+  try {
+    const v = await (await fetch(`http://127.0.0.1:${cdpPort}/json/version`, { signal: AbortSignal.timeout(5000) })).json() as { webSocketDebuggerUrl: string };
+    const ws = new WebSocket(v.webSocketDebuggerUrl);
+    const targetId = await new Promise<string>((resolve, reject) => { const tm = setTimeout(() => { reject(new Error('the browser did not answer')); }, 15_000);
+      ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url, newWindow: true } }));
+      ws.onmessage = (e) => { const d = JSON.parse(String(e.data)); if (d.id === 1) { clearTimeout(tm); if (d.result?.targetId) resolve(d.result.targetId); else reject(new Error(d.error?.message ?? 'no window')); } };
+      ws.onerror = () => { clearTimeout(tm); reject(new Error('could not reach the browser')); }; });
+    ws.close();
+    await new Promise((r) => setTimeout(r, 600));   // let the window manager map the new window
+    await fetch(`http://127.0.0.1:47777/place?screen=${screen}`, { method: 'POST', headers: { authorization: `Bearer ${token ?? ''}` }, signal: AbortSignal.timeout(10_000) }).catch(() => null);
+    return { ok: true, targetId };
+  } catch (e) { return { ok: false, error: (e as Error).message }; }
+}
+
 /** OpenClaw's temp root inside the computer (TMPDIR on the data disk, readable by the snap Chromium): uploads/ and downloads/ live here. */
 let tmpRootCache: string | null = null;
 export async function computerTmpRoot(): Promise<string> {

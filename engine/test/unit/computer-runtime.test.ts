@@ -40,3 +40,16 @@ test('a fresh install runs assistants on the Mac: the private computer is opt-in
   const { setupBroker } = await import('./helpers-broker.ts'); const { runtimeLocation } = await import('../../src/runtime/select.ts');
   assert.equal(runtimeLocation(setupBroker().db), 'mac');
 });
+
+test('each assistant gets its own screen, and windows open one at a time so each lands on the right screen', async () => {
+  const { screenFor, openOnScreen } = await import('../../src/runtime/computer.ts');
+  assert.equal(screenFor('researcher'), 1); assert.equal(screenFor('browser_operator'), 2); assert.equal(screenFor('resume-tailor'), 3); assert.equal(screenFor('browser_operator', 1), 1);
+  const order: string[] = []; const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (u: string) => { order.push(String(u)); throw new Error('offline'); }) as typeof fetch;
+  try {
+    const [a, b] = await Promise.all([openOnScreen(1, 'https://a.example', 2, null), openOnScreen(1, 'https://b.example', 1, null)]);
+    assert.equal(a.ok, false); assert.equal(b.ok, false); assert.equal(order.length, 2);   // both ran, neither hung, one after the other
+  } finally { globalThis.fetch = realFetch; }
+  const src = fs.readFileSync(new URL('../../../computer/computerd/server.mjs', import.meta.url), 'utf8');
+  assert.match(src, /sort\(\(a, b\) => b\.id - a\.id\)\[0\]/);   // computerd places the newest browser window, not whatever has focus
+});
