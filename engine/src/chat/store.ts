@@ -369,6 +369,16 @@ export class ChatStore {
     return r.job;
   }
 
+  /** ClaudeBot starts one assistant's turn in a conversation with a visible, labelled engine message (not the owner's words). Idempotent per key. */
+  engineTurn(conversationId: string, agentId: string, content: string, key: string, defs: Definitions): Job | null {
+    const conv = this.get(conversationId); if (!conv || conv.status !== 'active' || !this.member(conversationId, agentId)) return null;
+    const k = `engine:${key}`; const prior = this.db.prepare('SELECT id FROM jobs WHERE idempotency_key = ?').get(k) as { id: string } | undefined; if (prior) return this.store.get(prior.id) ?? null;
+    const wf = defs.getWorkflow(CHAT_WORKFLOW); if (!wf) return null;
+    const msg = this.add({ conversation_id: conversationId, role: 'system', kind: 'wake', content, meta: { automatic: true, engine: true, reporter: agentId } });
+    const r = this.createTurn({ idempotency_key: k, kind: CHAT_WORKFLOW, objective: content.slice(0, 2000), success_contract: wf.contract, agent_role: agentId, workspace_id: conv.workspace_id, priority: 2, inputs: { conversation_id: conversationId, message_id: msg.id, chain_root: msg.id, automatic: true } }, 'engine', conversationId, msg.id);
+    this.db.prepare('UPDATE messages SET job_id = ? WHERE id = ?').run(r.job.id, msg.id); return r.job;
+  }
+
   /** The owner message submitted with this client id, if any (idempotent submission). */
   byClientId(conversationId: string, clientId: string): Message | null { const r = this.db.prepare("SELECT id FROM messages WHERE conversation_id = ? AND role = 'owner' AND json_extract(meta, '$.client_id') = ? ORDER BY seq LIMIT 1").get(conversationId, clientId) as { id: string } | undefined; return r ? (this.message(r.id) ?? null) : null; }
 

@@ -28,6 +28,9 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Assistants can open zip and tar archives you give them: files are extracted into a new folder inside the task. Links, paths that escape the folder, and oversized archives are refused. Documents and PDFs also get text copies the assistants can read.
 
 ### Fixed
+- Allowing a browser step no longer gets lost when the page reopens blank: the assistant carries on in the same tab, on the same filled form.
+- Assistants know which standing permissions are already on, so they stop asking you to switch on one that is.
+- In a chat's Browser tab, when assistants work in the private computer, you see its live screen with Take over / Hand back instead of window buttons that had nothing to open.
 - Files saved by assistants now show as file cards in the chat instead of plain lines.
 - Avatar initials follow the assistant's current name everywhere and update live.
 - Long messages are never cut off for assistants: they can read the rest on demand.

@@ -196,8 +196,8 @@ function renderBrowserPane() {
   const site = waiting[0]?.site || s.takeover?.site || null;
   const actions = h('div', { class: 'row' },
     takeover ? h('button', { class: 'btn2 primary', onclick: async () => { try { const r = await api('/api/browser/takeover', { method: 'POST', body: { active: false, site } }); if (r.login) notify(r.login.signed_in ? `Signed in to ${r.login.site}. ${r.login.resumed.length ? 'Paused work resumes now.' : ''}` : `${r.login.site} still looks signed out: ${r.login.evidence}`, !r.login.signed_in); } catch (e) { notify(e.message, true); } refreshLiveStatus(); } }, "I'm done") : h('button', { class: 'btn2', onclick: async () => { try { await api('/api/browser/takeover', { method: 'POST', body: { active: true, site, note: 'owner is using the browser' } }); await openBrowserWindow(); } catch (e) { notify(e.message, true); } refreshLiveStatus(); } }, 'Take over'),
-    h('button', { class: 'btn2', onclick: openBrowserWindow }, 'Open window'),
-    h('button', { class: 'btn2', onclick: placeBeside }, 'Place beside'),
+    computerLocation === 'computer' ? null : h('button', { class: 'btn2', onclick: openBrowserWindow }, 'Open window'),
+    computerLocation === 'computer' ? null : h('button', { class: 'btn2', onclick: placeBeside }, 'Place beside'),
     null);
   const tabSel = s.tabs && s.tabs.length > 1 ? h('div', { class: 'browser-tabs row' }, h('span', { class: 'hint' }, 'Tab:'), h('select', { onchange: async (e) => { try { await api('/api/browser/follow', { method: 'POST', body: { id: e.target.value } }); } catch (err) { notify(err.message, true); } } }, s.tabs.map((t) => h('option', { value: t.id, selected: s.current && t.id === s.current.id }, (t.title || t.url).slice(0, 60))))) : null;
   const header = h('div', { class: 'browser-head' }, h('div', { class: 'row spread' }, h('div', { class: 'section-h', style: 'margin:0' }, 'Live view'), actions), h('div', { id: 'browser-meta', class: 'row' }), tabSel, who);
@@ -599,7 +599,17 @@ function filesInto(body, d) {
 function standardContext(key) {
   return contextPane(['office', 'browser', 'files'], (t, body) => { if (t === 'office') officeInto(body); else if (t === 'browser') browserInto(body); else api('/api/home' + wsq()).then((d) => body.append(h('div', { class: 'ctx-section' }, h('div', { class: 'section-h' }, 'Recent results'), ...(d.finished.length ? d.finished.slice(0, 12).map((f) => h('a', { class: 'office-row', href: `#office/task/${f.id}` }, h('b', {}, f.agent), h('span', { class: 'now' }, f.title))) : [h('p', { class: 'empty-line' }, 'No results in the last 24 hours.')])))).catch(() => {}); }, key);
 }
-function browserInto(body) { const pane = h('aside', { id: 'browser-pane', class: 'browser-pane', style: 'display:flex' }); body.append(pane); browserPaneOpen = true; connectBrowserStream(); refreshLiveStatus(); }
+// When the browser lives in the assistants' computer, the context pane shows its real screen (live, Take over / Hand back) instead of
+// the Mac-window controls (Open window / Place beside had nothing to open there).
+let computerLocation = null;
+async function whereBrowser() { if (computerLocation === null) { try { computerLocation = (await api('/api/computer')).location || 'mac'; } catch { computerLocation = 'mac'; } setTimeout(() => { computerLocation = null; }, 30_000); } return computerLocation; }
+function browserInto(body) {
+  const holder = h('div', { class: 'ctx-section' }); body.append(holder);
+  whereBrowser().then(async (loc) => {
+    if (loc === 'computer') { const st = await api('/api/browser').catch(() => ({ live: {} })); holder.replaceChildren(screenCard(1, st.live?.takeover)); return; }
+    const pane = h('aside', { id: 'browser-pane', class: 'browser-pane', style: 'display:flex' }); holder.replaceWith(pane); browserPaneOpen = true; connectBrowserStream(); refreshLiveStatus();
+  });
+}
 function membersInto(body, d) {
   const sec = h('div', { class: 'ctx-section' }, h('div', { class: 'section-h' }, `${d.members.length} assistant${d.members.length > 1 ? 's' : ''} in this ${d.conversation.type === 'group' ? 'group' : 'chat'}`),
     ...d.members.map((mm) => { const t = mm.turn; const [w, cls] = t ? (TURN_WORD[t.turn_state] || [t.plain_state, '']) : ['idle', '']; return h('div', { class: 'member-row' }, avatar(mm.agent_id, 'sm'), h('b', {}, mm.name), h('span', { class: 'now' }, mm.role || mm.purpose), h('span', { class: `tag ${cls === 'acc' ? 'accent' : cls === 'warn' ? 'warn' : cls === 'bad' ? 'bad' : cls === 'ok' ? 'ok' : ''}` }, w), d.conversation.type === 'group' && d.members.length > 2 ? h('button', { class: 'btn2 ghost small', 'aria-label': `Remove ${mm.name} from this group`, title: 'Remove from this group', onclick: async () => { const r = await api(`/api/conversations/${d.conversation.id}/members`, { method: 'DELETE', body: { agent_id: mm.agent_id } }).catch((e) => ({ error: e.message })); if (r.error) notify(r.error, true); else { notify(`${mm.name} left the group.`); route(); } } }, 'Remove') : null); }));

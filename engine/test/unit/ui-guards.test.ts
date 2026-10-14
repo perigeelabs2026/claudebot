@@ -156,3 +156,9 @@ test('a file an assistant saved renders as a file card, not as a text bubble (ow
   const app = ui('app.js'); assert.match(app, /if \(m\.role === 'assistant' && !\(m\.kind === 'result' && m\.artifact\)\) \{/);
   assert.ok(app.indexOf("if (m.role === 'assistant' && !(m.kind === 'result' && m.artifact))") < app.indexOf("if (m.kind === 'result' && m.artifact) {   // a saved file"));
 });
+
+test('when the browser lives in the assistants\' computer, the browser pane shows its live screen with Take over, never the Mac-window buttons (owner: "your open window button doesn\'t work")', () => {
+  const app = ui('app.js');
+  assert.match(app, /if \(loc === 'computer'\) \{ const st = await api\('\/api\/browser'\)[^\n]*screenCard\(1, st\.live\?\.takeover\)/);
+  assert.match(app, /computerLocation === 'computer' \? null : h\('button', \{ class: 'btn2', onclick: openBrowserWindow \}, 'Open window'\)/);
+});

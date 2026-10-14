@@ -291,7 +291,7 @@ export class BrokerApi {
         // Bounded tabs: a task reuses the tab it already opened (navigate) instead of opening another; the tab is recorded so it can be closed when the task ends.
         const cdp = `http://127.0.0.1:${this.cfg.browserCdpPort}`;
         const targets = async () => { try { const r = await fetch(`${cdp}/json`, { signal: AbortSignal.timeout(1500) }); return ((await r.json()) as Array<{ id: string; type: string }>).filter((t) => t.type === 'page'); } catch { return [] as Array<{ id: string; type: string }>; } };
-        const existing = taskTab(db, cap.job_id); const before = await targets(); const reuse = !!existing && before.some((t) => t.id === existing);
+        const existing = taskTab(db, cap.job_id) ?? this.resumedTab(cap.job_id); const before = await targets(); const reuse = !!existing && before.some((t) => t.id === existing);
         if (reuse) { const focus = await runProbe(this.cfg.openclawBin, [...args, 'focus', existing!], { timeoutMs: 20_000, label: 'browser.focus', env, registryDir: path.join(this.cfg.runDir, 'probes') }); if (!focus.ok) this.store.event(cap.job_id, actor, 'browser.tab', { note: 'could not focus the task tab; opening a new one', detail: (focus.stderr || focus.stdout).slice(0, 120) }); }
         const opened = await runProbe(this.cfg.openclawBin, [...args, reuse ? 'navigate' : 'open', url], { timeoutMs: 60_000, label: reuse ? 'browser.navigate' : 'browser.open', env, registryDir: path.join(this.cfg.runDir, 'probes') });
         if (!opened.ok) { mark('failed'); return { ok: false, text: `could not open the page: ${(opened.stderr || opened.stdout).replace(/\s+/g, ' ').slice(0, 200)}` }; }
@@ -356,6 +356,11 @@ export class BrokerApi {
       default: return { ok: false, text: `unknown tool ${tool}` };
     }
   }
+  /** A turn started to carry out an approval works in the tab of the task that asked for it (same page, same filled form). */
+  private resumedTab(jobId: string): string | null {
+    try { const inp = JSON.parse(this.store.get(jobId)?.inputs || '{}') as { resume_approval?: string }; if (!inp.resume_approval) return null;
+      const origin = (this.db.prepare('SELECT job_id FROM approvals WHERE id = ?').get(inp.resume_approval) as { job_id: string | null } | undefined)?.job_id; return origin ? taskTab(this.db, origin) : null; } catch { return null; }
+  }
   /** Runs `openclaw browser …` (replaceable in tests). */
   browserRunner = (args: string[], label: string, timeoutMs = 60_000) => runProbe(this.cfg.openclawBin, ['--profile', this.cfg.openclawProfile, 'browser', '--browser-profile', 'claudebot', ...args], { timeoutMs, label, env: { ...process.env, OPENCLAW_HIDE_BANNER: '1', OPENCLAW_SUPPRESS_NOTES: '1' }, maxBuffer: 8 * 1024 * 1024, registryDir: path.join(this.cfg.runDir, 'probes') });
 
@@ -368,7 +373,7 @@ export class BrokerApi {
     const db = this.db;
     const takeover = db.prepare("SELECT value FROM runtime_state WHERE key = 'browser.takeover'").get() as { value: string } | undefined;
     if (takeover && (JSON.parse(takeover.value) as { active?: boolean }).active) return { ok: false, text: 'The owner has taken over the browser. Do not act now; say that you are waiting for the owner.' };
-    const tab = taskTab(db, cap.job_id);
+    const tab = taskTab(db, cap.job_id) ?? this.resumedTab(cap.job_id);
     if (!tab) return { ok: false, text: 'This task has no browser tab yet. Open the page with browser_read first; browser_act works only in that tab.' };
     const req: ActRequest = { action: String(a.action) as ActRequest['action'], ref: a.ref ? String(a.ref) : undefined, text: a.text !== undefined ? String(a.text) : undefined, key: a.key ? String(a.key) : undefined, values: Array.isArray(a.values) ? a.values.map(String) : undefined, submit: a.submit === true, fields: Array.isArray(a.fields) ? (a.fields as Array<{ ref: string; value: string }>).map((f) => ({ ref: String(f.ref), value: String(f.value) })) : undefined };
     const tgt = ['--target-id', tab];

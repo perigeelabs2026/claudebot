@@ -244,6 +244,10 @@ How to work:
 Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-…) to the owner.`;
       const parts = [isLead ? leadFrame : memberFrame];
       if (isGroup) { const gp = (deps.db.prepare('SELECT title, purpose FROM conversations WHERE id = ?').get(conv.id) as { title: string; purpose: string } | undefined); if (gp?.purpose) parts.push(`This group ("${gp.title || 'Group'}") exists for: ${gp.purpose}`); }
+      { // Standing permissions the owner switched on, so no assistant asks the owner to switch on something that is already on.
+        const perms = deps.db.prepare("SELECT action_kind, scope_text, expires_at FROM standing_permissions WHERE status = 'active' AND expires_at > ?").all(new Date().toISOString()) as Array<{ action_kind: string; scope_text: string; expires_at: string }>;
+        if (perms.length) parts.push(`The owner's standing permissions (already on; never ask the owner to turn these on):\n${perms.map((p) => `- ${p.scope_text.split(':')[0]}${p.action_kind === 'job_application' ? ' — on job sites, apply/next/submit is done at once and recorded; just do it and post the receipt' : ''} (until ${p.expires_at.slice(0, 10)})`).join('\n')}`);
+      }
       { let mem = ''; try { mem = new Vault().context(agent); } catch (e) { deps.log.warn('memory vault unreadable', { err: (e as Error).message }); } if (mem) parts.push(mem); }
       if (isLead) {   // what is waiting on the owner across every conversation, from the ledger, so the lead never says "nothing" while a decision waits
         const pend = deps.db.prepare("SELECT ap.action_kind, ap.target, ap.created_at, j.agent_role, c.title, c.type FROM approvals ap LEFT JOIN jobs j ON j.id = ap.job_id LEFT JOIN conversations c ON c.id = j.conversation_id WHERE ap.status = 'pending' ORDER BY ap.created_at").all() as Array<{ action_kind: string; target: string; created_at: string; agent_role: string | null; title: string | null; type: string | null }>;
