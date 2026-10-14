@@ -177,3 +177,20 @@ test('1: the refusal cache is per assistant and model: a new session of the same
   assert.equal(sent.filter((m) => m.includes('claude-mystery-9')).length, 1);
   await rt.ensureModel('s3', 'claude-mystery-9', 'claude-opus-5-5', 'builder'); assert.equal(sent.filter((m) => m.includes('claude-mystery-9')).length, 2, 'another assistant asks for itself');
 });
+
+test('1: the harvested list expires after an hour, and a save naming a model the cached list lacks probes again before refusing', async () => {
+  const { MODEL_LIST_TTL_MS } = await import('../../src/runtime/claude-acp.ts');
+  const rt = new ClaudeAcpRuntime({ gateway: {} as never, log, claudeExecutable: '/bin/false', claudeConfigDir: '/tmp/none' }) as unknown as { command: (m: string) => Promise<string>; advertisedModels: (o?: { probe?: boolean; fresh?: boolean }) => Promise<{ models: string[]; at: string } | null>; verified: { models: string[]; reply: string; at: string } | null };
+  let list = 'default, opus, sonnet, haiku'; let probes = 0;
+  rt.command = async () => { probes++; return `ACP error: unknown model. Available models: ${list}`; };
+  assert.deepEqual((await rt.advertisedModels())?.models, ['default', 'opus', 'sonnet', 'haiku']); await rt.advertisedModels(); assert.equal(probes, 1, 'cached while young');
+  rt.verified!.at = new Date(Date.now() - MODEL_LIST_TTL_MS - 1000).toISOString(); list = 'default, opus, fable, sonnet, haiku';
+  assert.deepEqual((await rt.advertisedModels())?.models, ['default', 'opus', 'fable', 'sonnet', 'haiku'], 'an hour-old list is probed again'); assert.equal(probes, 2);
+  rt.command = async () => { probes++; return 'Usage: /acp model <model-id>'; }; rt.verified!.at = new Date(0).toISOString();
+  assert.ok((await rt.advertisedModels())?.models.includes('fable'), 'a probe that lists nothing keeps the older list');
+  // Save: the cached list lacks fable; a fresh probe lists it, so the save passes; when the fresh probe still lacks it, it is refused.
+  const calls: Array<boolean> = []; let fresh = ['default', 'opus', 'fable', 'sonnet', 'haiku'];
+  const gw = { advertisedModels: async (o?: { fresh?: boolean }) => { calls.push(!!o?.fresh); return o?.fresh ? { models: fresh, reply: `Available models: ${fresh.join(', ')}` } : { models: ['default', 'opus', 'sonnet', 'haiku'], reply: 'Available models: default, opus, sonnet, haiku' }; } };
+  assert.deepEqual(await validateModel(gw, 'claude-fable-5-1'), { ok: true }); assert.deepEqual(calls, [false, true]);
+  fresh = ['default', 'opus', 'sonnet', 'haiku']; const v = await validateModel(gw, 'claude-fable-5-1'); assert.equal(v.ok, false, 'refused only when the fresh probe still lacks it');
+});

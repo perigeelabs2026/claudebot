@@ -68,6 +68,8 @@ function nextOccurrence(h: number, m: number, tz: string | undefined, now: Date)
 /** Claude Code's ACP agent advertises its models by alias (default, opus, sonnet, haiku, or a full id such as claude-fable-5-1[1m]).
  *  ClaudeBot stores full model ids; these map to the alias the agent advertises. Anything else passes through unchanged. */
 export const ACP_MODEL_ALIAS: Record<string, string> = { 'claude-opus-5-5': 'opus', 'claude-sonnet-5-5': 'sonnet', 'claude-haiku-5-5': 'haiku', 'claude-fable-5-1': 'fable' };
+/** How long a harvested model list is trusted before it is probed again. */
+export const MODEL_LIST_TTL_MS = 3600_000;
 export const acpModel = (id: string) => ACP_MODEL_ALIAS[id] ?? id;
 
 export class ClaudeAcpRuntime implements ModelRuntime {
@@ -179,11 +181,15 @@ export class ClaudeAcpRuntime implements ModelRuntime {
     if (!models.length) return false;
     this.verified = { models, reply: `Available models: ${models.join(', ')}`, at: new Date().toISOString() }; return true;
   }
-  async advertisedModels(opts: { probe?: boolean } = {}): Promise<{ models: string[]; reply: string; at: string } | null> {
-    if (this.verified) return this.verified;
-    if (opts.probe === false) return null;
+  /** The cached list while it is under an hour old; otherwise (or with fresh: true) probe again. A probe that lists nothing keeps the
+   *  older list rather than forgetting it. */
+  async advertisedModels(opts: { probe?: boolean; fresh?: boolean } = {}): Promise<{ models: string[]; reply: string; at: string } | null> {
+    const young = this.verified && Date.now() - Date.parse(this.verified.at) < MODEL_LIST_TTL_MS;
+    if (this.verified && young && !opts.fresh) return this.verified;
+    if (opts.probe === false) return this.verified;
     const reply = await this.command(`/acp model claudebot-model-probe ${this.controlKey}`, 20_000).catch(() => '');
-    return this.harvestModels(reply) ? this.verified : null;   // a usage-only or empty reply stays unverified
+    this.harvestModels(reply);   // a usage-only or empty reply leaves the list as it was (unverified when there was none)
+    return this.verified;
   }
   private async ensureModel(sessionKey: string, model: string | undefined, fallback?: string, role = ''): Promise<ModelFallback | null> {
     if (!model || this.models.get(sessionKey) === model) return null;

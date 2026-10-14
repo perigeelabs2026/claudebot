@@ -16,16 +16,18 @@ export const ADVERTISED_MODELS = ['default', 'opus', 'sonnet', 'haiku'] as const
 export const resolves = (model: string, advertised: readonly string[] = ADVERTISED_MODELS): boolean => advertised.map((a) => a.toLowerCase()).includes(acpModel(model).toLowerCase());
 
 /** The connection's own list, or the fallback list when it names none. */
-export async function advertised(runtime: Pick<ModelRuntime, 'advertisedModels'> | null | undefined): Promise<{ models: readonly string[]; reply: string | null; verified: boolean }> {
-  try { const r = await runtime?.advertisedModels?.(); if (r && r.models.length) return { models: r.models, reply: r.reply, verified: true }; } catch { /* the fallback list */ }
+export async function advertised(runtime: Pick<ModelRuntime, 'advertisedModels'> | null | undefined, opts: { fresh?: boolean } = {}): Promise<{ models: readonly string[]; reply: string | null; verified: boolean }> {
+  try { const r = await runtime?.advertisedModels?.(opts.fresh ? { fresh: true } : undefined); if (r && r.models.length) return { models: r.models, reply: r.reply, verified: true }; } catch { /* the fallback list */ }
   return { models: ADVERTISED_MODELS, reply: null, verified: false };
 }
 
 /** Whether a model may be saved on an assistant. Blocked only when the connection's own list (harvested from a refusal) lacks it;
  *  when the list is not known yet, it passes with a note ("could not verify"), never an alarm. */
 export async function validateModel(runtime: Pick<ModelRuntime, 'advertisedModels'> | null | undefined, model: string): Promise<{ ok: true; note?: string } | { ok: false; reason: string }> {
-  const a = await advertised(runtime);
+  let a = await advertised(runtime);
   if (resolves(model, a.models)) return { ok: true };
+  // The cached list lacks it: ask the connection again before refusing (its list may have changed since it was cached).
+  if (a.verified) { a = await advertised(runtime, { fresh: true }); if (resolves(model, a.models)) return { ok: true }; }
   if (!a.verified) return { ok: true, note: `Could not verify "${model}" yet: the Claude connection has not listed its models. If it refuses it, this assistant falls back to its previous model and you are told.` };
   return { ok: false, reason: `The Claude connection does not offer "${model}" (it is sent as "${acpModel(model)}"). ${a.reply ? `It says: ${a.reply}` : `It offers: ${a.models.join(', ')}.`}` };
 }
