@@ -51,6 +51,25 @@ export function isApplicationControl(name: string): boolean {
   if (/\b(message|inmail|connect|follow|invite|email|share|post|pay|payment|buy|purchase|order|donate|delete|remove|withdraw|unsubscribe)\b/i.test(n)) return false;
   return /\b(apply|application|submit|next|continue|review|send application|easy apply|i'?m interested)\b/i.test(n);
 }
+/** "Send emails without asking" (owner, in their own words 2026-10-14: "Emails don't need my approval. Add a standing permission so the
+ *  team sends emails without asking"): an email the team writes is sent without a card; each one is recorded and shown in the team group. */
+export const EMAILS = 'email_send';
+export const EMAILS_SCOPE = 'Send emails without asking: assistants may send the emails they write (follow-ups and outreach to hiring managers and recruiters) without asking. Each email is recorded and shown in the team chat. Spending, public posts and deletes still ask.';
+export function emailPermission(db: DB, at = now()): StandingPermission | null {
+  const p = db.prepare("SELECT * FROM standing_permissions WHERE status = 'active' AND action_kind = ? ORDER BY created_at DESC LIMIT 1").get(EMAILS) as unknown as StandingPermission | undefined;
+  if (!p) return null;
+  if (p.expires_at <= at) { db.prepare("UPDATE standing_permissions SET status = 'expired' WHERE id = ?").run(p.id); ev(db, 'system', 'permission.expired', { id: p.id }); return null; }
+  return usesToday(db, p.id, at) < p.max_per_day ? p : null;
+}
+export function grantEmails(db: DB, by: string, opts: { max_per_day?: number; days?: number; reason?: string } = {}): StandingPermission {
+  const live = emailPermission(db); if (live) return live;
+  const t = now(); const max = Math.max(1, Math.min(200, Math.round(Number(opts.max_per_day ?? 50)))); const days = Math.max(1, Math.min(365, Math.round(Number(opts.days ?? 90))));
+  const id = newId('perm'); const expires = new Date(Date.parse(t) + days * 86400_000).toISOString();
+  db.prepare("INSERT INTO standing_permissions(id, agent_id, action_kind, target, max_per_day, expires_at, reason, scope_text, scope_hash, status, from_approval, created_by, created_at, activated_at) VALUES (?,?,?,?,?,?,?,?,?,'active',NULL,?,?,?)")
+    .run(id, '*', EMAILS, 'emails the team writes', max, expires, String(opts.reason ?? '').slice(0, 300), EMAILS_SCOPE, sha256(EMAILS_SCOPE), by, t, t);
+  ev(db, by, 'permission.created', { id, agent: '*', kind: EMAILS, max_per_day: max, expires_at: expires, reason: opts.reason ?? null });
+  return getPermission(db, id)!;
+}
 /** The live "Submit job applications without asking" permission, if on and not expired or over today's limit. */
 export function jobApplicationPermission(db: DB, at = now()): StandingPermission | null {
   const p = db.prepare("SELECT * FROM standing_permissions WHERE status = 'active' AND action_kind = ? ORDER BY created_at DESC LIMIT 1").get(JOB_APPLICATIONS) as unknown as StandingPermission | undefined;

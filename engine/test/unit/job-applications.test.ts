@@ -144,3 +144,38 @@ test('blocked needs two alternatives tried first (one unverifiable contact is no
   const q = await s.call(turn, 'lookup_answer', { question: 'What is your % of quota attainment for each of the last 4 years?' }); assert.equal(q.ok, true); assert.match(q.text, /70% across all quarters/);
   const none = await s.call(turn, 'lookup_answer', { question: 'How did you hear about us?' }); assert.match(none.text, /nothing for this question/);
 });
+
+test('"Send emails without asking": with the owner\'s standing permission an email request is approved without a card and shown in the team group; without it, it still asks', async () => {
+  const s = setupBroker(); const c = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'reviewer'] });
+  const turn = s.chat.send(c.id, '@coordinator follow up with the hiring manager', s.defs).job;
+  const email = { kind: 'send', target: 'email to pat.rivera@initech.example', content: 'To: pat.rivera@initech.example\nSubject: Following up on my application\n\nHi Pat, …' };
+  const before = await s.call(turn, 'request_approval', email); assert.match(before.text, /approval|owner/i);
+  assert.ok(s.db.prepare("SELECT 1 FROM approvals WHERE status = 'pending'").get(), 'without the permission an email still asks');
+  const { grantEmails } = await import('../../src/approvals/permissions.ts'); grantEmails(s.db, 'owner');
+  const turn2 = s.chat.send(c.id, '@coordinator send the next follow-up', s.defs).job;
+  const after = await s.call(turn2, 'request_approval', { ...email, content: email.content.replace('Following up', 'Checking in') });
+  assert.equal(after.ok, true, after.text); assert.match(after.text, /standing permission/);
+  assert.equal((s.db.prepare("SELECT count(*) AS n FROM approvals WHERE status = 'pending'").get() as { n: number }).n, 1, 'no new card');
+  assert.ok(s.chat.messages(c.id).some((m) => /Email to pat\.rivera@initech\.example, "Checking in on my application": approved by your standing permission/.test(m.content)), 'shown in the team group');
+});
+
+test('emails permission (Fable checks): off by default; set_permission "emails" on the owner\'s words with a daily cap; any recipient, any assistant, and delegated work (lead hands off to the outreach assistant)', async () => {
+  const s = setupBroker(); const { emailPermission } = await import('../../src/approvals/permissions.ts');
+  assert.equal(emailPermission(s.db), null, 'the public default is off');
+  const c = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] });
+  const asked = s.chat.send(c.id, '@coordinator Emails don\'t need my approval, send them without asking', s.defs).job;
+  const no = await s.call(asked, 'set_permission', { permission: 'emails', on: true, owner_words: 'switch on everything please' }); assert.equal(no.ok, false, 'not without the owner\'s words');
+  const on = await s.call(asked, 'set_permission', { permission: 'emails', on: true, max_per_day: 50, owner_words: 'send them without asking' }); assert.equal(on.ok, true, on.text); assert.match(on.text, /"Send emails without asking" is on/);
+  const p = emailPermission(s.db)!; assert.equal(p.agent_id, '*', 'team-wide'); assert.equal(p.max_per_day, 50);
+  // Delegated work: the lead hands off to another assistant, whose own task (not an owner-reply turn) sends to a recipient nobody named before.
+  const ho = await s.call(asked, 'hand_off', { to: 'researcher', request: 'Email the recruiter at Globex about the account executive role.' }); assert.equal(ho.ok, true, ho.text);
+  const member = s.db.prepare("SELECT id, agent_role FROM jobs WHERE agent_role = 'researcher' ORDER BY created_at DESC LIMIT 1").get() as { id: string; agent_role: string };
+  const r = await s.call(member, 'request_approval', { kind: 'send', target: 'email to jo@globex.example', content: 'To: jo@globex.example\nSubject: Account executive role\n\nHi Jo, …' });
+  assert.equal(r.ok, true, r.text); assert.match(r.text, /standing permission/); assert.doesNotMatch(r.text, /the owner must approve/);
+  const task = s.store.create({ idempotency_key: 'outreach-1', kind: 'research.report', objective: 'Outreach', success_contract: {}, agent_role: 'researcher', workspace_id: s.ws.id }, 'owner').job;
+  const r2 = await s.call(task, 'request_approval', { kind: 'send', target: 'email to sam@initech.example', content: 'To: sam@initech.example\nSubject: Hello\n\nHi Sam.' });
+  assert.match(r2.text, /standing permission/, 'a scheduled task, not a chat turn, is covered too');
+  // Spending, posts and deletes still ask.
+  const buy = await s.call(task, 'request_approval', { kind: 'purchase', target: 'Premium plan', content: '$30' }); assert.match(buy.text, /the owner must approve/);
+  const off = await s.call(asked, 'set_permission', { permission: 'emails', on: false, owner_words: 'send them without asking' }); assert.equal(off.ok, true); assert.equal(emailPermission(s.db), null);
+});

@@ -286,3 +286,24 @@ test('step 0: /rules lists the owner\'s standing rules word for word (or says th
     f.close();
   } finally { if (prev === undefined) delete process.env.CLAUDEBOT_MEMORY_DIR; else process.env.CLAUDEBOT_MEMORY_DIR = prev; }
 });
+
+test('emails permission: an email card on Telegram offers Always allow emails, which switches on the team-wide permission and allows this one; other cards do not offer it', async () => {
+  const f = await fakeTelegram(); const s = setup(f.base); saveToken(s.secrets, TOKEN); const { code } = newPairingCode(s.db);
+  f.push(msg(30, 777, `/start ${code}`)); await s.bridge.cycle(0);
+  const c = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] }); const sent = s.chat.send(c.id, 'follow up with Pat', s.defs);
+  const ap = s.approvals.request({ job_id: sent.job.id, action_kind: 'send', target: 'email to pat@initech.example', content: 'To: pat@initech.example\nSubject: Follow-up\n\nHi Pat.' });
+  s.chat.add({ conversation_id: c.id, role: 'system', kind: 'decision', content: 'decision', job_id: sent.job.id, approval_id: ap.id, meta: {} });
+  const buy = s.approvals.request({ job_id: sent.job.id, action_kind: 'purchase', target: 'Premium plan', content: '$30 a month' });
+  s.chat.add({ conversation_id: c.id, role: 'system', kind: 'decision', content: 'decision', job_id: sent.job.id, approval_id: buy.id, meta: {} });
+  f.calls.length = 0; await s.bridge.flush();
+  const cards = f.calls.filter((x) => x.method === 'sendMessage' && x.body.reply_markup).map((x) => (x.body.reply_markup as { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> }).inline_keyboard[0]);
+  const emailKb = cards.find((k) => k.some((b) => b.callback_data.includes(ap.id)))!; const buyKb = cards.find((k) => k.some((b) => b.callback_data.includes(buy.id)))!;
+  assert.deepEqual(emailKb.map((b) => b.text), ['Allow once', 'Always allow emails', 'Deny']); assert.deepEqual(buyKb.map((b) => b.text), ['Allow once', 'Deny'], 'spending never gets Always allow on Telegram');
+  const { emailPermission } = await import('../../src/approvals/permissions.ts'); assert.equal(emailPermission(s.db), null);
+  f.calls.length = 0; f.push({ update_id: 31, callback_query: { id: 'q1', data: emailKb[1].callback_data, from: { id: 777 }, message: { chat: { id: 777 } } } }); await s.bridge.cycle(0);
+  assert.equal(s.approvals.get(ap.id)!.status, 'approved'); const p = emailPermission(s.db); assert.ok(p, 'the permission is on'); assert.equal(p!.agent_id, '*');
+  assert.ok(f.calls.some((x) => x.method === 'answerCallbackQuery' && /Emails now go out without asking/.test(String(x.body.text))));
+  const forged = buyKb[0].callback_data.replace(/:allow$/, ':always'); f.push({ update_id: 32, callback_query: { id: 'q2', data: forged, from: { id: 777 }, message: { chat: { id: 777 } } } }); await s.bridge.cycle(0);
+  assert.equal(s.approvals.get(buy.id)!.status, 'pending', 'Always allow on a non-email card does nothing');
+  f.close();
+});

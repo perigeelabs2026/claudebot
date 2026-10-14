@@ -1,6 +1,6 @@
 import { lookupAnswer } from '../memory/answer-bank.ts';
 import { safeExtract, sourceAllowed } from './archive.ts';
-import { matchPermission, jobApplicationPermission, isJobSite, isApplicationControl, isApplicationFormControl, contentRecipients, grantJobApplications, revokePermission, JOB_APPLICATIONS } from '../approvals/permissions.ts';
+import { matchPermission, jobApplicationPermission, emailPermission, grantEmails, EMAILS, isJobSite, isApplicationControl, isApplicationFormControl, contentRecipients, grantJobApplications, revokePermission, JOB_APPLICATIONS } from '../approvals/permissions.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { runProbe } from '../infra/probe.ts';
@@ -349,8 +349,12 @@ export class BrokerApi {
           if (on) { const p2 = grantJobApplications(db, 'owner:chat', { reason: `owner asked in chat (${asked.source})` }); return { ok: true, text: `"Submit job applications without asking" is on (until ${p2.expires_at.slice(0, 10)}). Applications on job sites go ahead without a card; each is recorded.` }; }
           const live = db.prepare("SELECT id FROM standing_permissions WHERE status = 'active' AND action_kind = ?").all(JOB_APPLICATIONS) as Array<{ id: string }>; for (const x of live) revokePermission(db, x.id, 'owner:chat'); return { ok: true, text: live.length ? 'Switched off: every application asks the owner again.' : 'It was already off.' };
         }
+        if (which === 'emails') {
+          if (on) { const p2 = grantEmails(db, 'owner:chat', { reason: `owner asked in chat (${asked.source})`, ...(a.max_per_day !== undefined ? { max_per_day: Number(a.max_per_day) } : {}) }); return { ok: true, text: `"Send emails without asking" is on (until ${p2.expires_at.slice(0, 10)}). Emails the team writes go out without a card, up to ${p2.max_per_day} a day; each is recorded and shown in the team chat.` }; }
+          const live = db.prepare("SELECT id FROM standing_permissions WHERE status = 'active' AND action_kind = ?").all(EMAILS) as Array<{ id: string }>; for (const x of live) revokePermission(db, x.id, 'owner:chat'); return { ok: true, text: live.length ? 'Switched off: every email asks the owner again.' : 'It was already off.' };
+        }
         if (!on && a.id) { return revokePermission(db, String(a.id), 'owner:chat') ? { ok: true, text: 'permission revoked' } : { ok: false, text: 'no active permission with that id' }; }
-        return { ok: false, text: 'permission must be "job_applications" (or give id with on=false to revoke another one); email permissions are created from the email\'s own card in the app' };
+        return { ok: false, text: 'permission must be "job_applications" or "emails" (or give id with on=false to revoke another one)' };
       }
       case 'add_dependency': {   // the lead makes a waiting task also wait for another one (e.g. applications wait for the tailored resumes)
         const me = this.store.get(cap.job_id); const target = this.store.get(String(a.task_id ?? ''));
@@ -397,6 +401,11 @@ export class BrokerApi {
         const perm = ownerReply ? matchPermission(this.db, { agent_id: cap.role, action_kind: kind, target: String(a.target), content: String(a.content) }) : null;
         // A request to submit job applications (no email recipients in it) is covered by "Submit job applications without asking".
         if (!perm && kind === 'send' && /\bapplication/i.test(`${a.target} ${String(a.content).slice(0, 400)}`) && !/@/.test(String(a.target)) && (contentRecipients(String(a.content)) ?? ['x']).length === 0) { const jp = jobApplicationPermission(this.db); if (jp) { this.approvals.decide(ap.id, 'approved', `permission:${jp.id}`, 'covered by "Submit job applications without asking"'); this.store.event(cap.job_id, actor, 'permission.used', { permission: jp.id, approval: ap.id, kind: 'job_application' }); return { ok: true, text: `Allowed by the owner's standing permission "Submit job applications without asking" (${ap.id}). Go ahead and submit the applications in your browser tab; each submit is recorded. Post a receipt for each.`, data: { id: ap.id } }; } }
+        // An email the team wrote is covered by "Send emails without asking"; it is shown in the team group.
+        if (!perm && kind === 'send' && (contentRecipients(String(a.content)) ?? []).length > 0) { const ep = emailPermission(this.db); if (ep) {
+          this.approvals.decide(ap.id, 'approved', `permission:${ep.id}`, 'covered by "Send emails without asking"'); this.store.event(cap.job_id, actor, 'permission.used', { permission: ep.id, approval: ap.id });
+          try { const chat = new ChatStore(db, this.store); const team = chat.teamConversation(); const subj = (String(a.content).match(/^\s*Subject:\s*(.+)$/im) || [])[1] ?? ''; if (team) chat.add({ conversation_id: team, role: 'system', kind: 'activity', content: `Email to ${(contentRecipients(String(a.content)) ?? []).join(', ')}${subj ? `, "${subj.slice(0, 120)}"` : ''}: approved by your standing permission and sent once.`, job_id: cap.job_id, meta: { mirror_of: `email:${ap.id}`, email: ap.id } }); } catch { /* recorded on the task */ }
+          return { ok: true, text: `Allowed by the owner's standing permission (${ep.scope_text}). It is approved as ${ap.id}; send it once now.`, data: { approval_id: ap.id, permission: ep.id } }; } }
         if (perm) { this.approvals.decide(ap.id, 'approved', `permission:${perm.id}`, 'covered by the owner\'s standing permission'); this.store.event(cap.job_id, actor, 'permission.used', { permission: perm.id, approval: ap.id }); return { ok: true, text: `Allowed by the owner's standing permission (${perm.scope_text}). It will be ${kind === 'send' ? 'sent' : 'done'} once; tell the owner it was covered by their standing permission.`, data: { id: ap.id, permission: perm.id } }; }
         return { ok: true, text: `approval ${ap.id} requested; the owner must approve before anything is ${kind === 'send' ? 'sent' : 'done'}. Content hash ${ap.content_hash.slice(0, 12)}…`, data: { id: ap.id } }; }
       case 'report_outcome': {
@@ -562,6 +571,12 @@ export class BrokerApi {
       if (!approvalId && verdict.action_kind === 'send' && isJobSite(urlNow) && (isApplicationControl(ctl) || isApplicationFormControl(ctl))) {
         const perm = jobApplicationPermission(db);
         if (perm) { const ap = this.approvals.request({ job_id: cap.job_id, action_kind: verdict.action_kind, target, content, evidence: [{ shown_to_owner: shown }] }); this.approvals.decide(ap.id, 'approved', `permission:${perm.id}`, 'covered by "Submit job applications without asking"'); this.store.event(cap.job_id, actor, 'permission.used', { permission: perm.id, approval: ap.id, kind: 'job_application', url: urlNow, control: ctl }); approvalId = ap.id; }
+      }
+      // Gmail's Send in the team browser is covered by "Send emails without asking" (recorded like an approval, shown in the team group).
+      if (!approvalId && verdict.action_kind === 'send' && /(^|\.)mail\.google\.com$/.test((() => { try { return new URL(urlNow).hostname; } catch { return ''; } })()) && /^send\b/i.test(ctl)) {
+        const ep = emailPermission(db);
+        if (ep) { const ap = this.approvals.request({ job_id: cap.job_id, action_kind: verdict.action_kind, target, content, evidence: [{ shown_to_owner: shown }] }); this.approvals.decide(ap.id, 'approved', `permission:${ep.id}`, 'covered by "Send emails without asking"'); this.store.event(cap.job_id, actor, 'permission.used', { permission: ep.id, approval: ap.id }); approvalId = ap.id;
+          try { const chat = new ChatStore(db, this.store); const team = chat.teamConversation(); if (team) chat.add({ conversation_id: team, role: 'system', kind: 'activity', content: 'Email sent from Gmail under your standing permission (the page and text are recorded on the task).', job_id: cap.job_id, meta: { mirror_of: `email:${ap.id}`, email: ap.id } }); } catch { /* recorded */ } }
       }
       const v = approvalId ? this.approvals.verify(approvalId, { kind: verdict.action_kind, target, content }) : null;
       if (!v || !v.ok) {

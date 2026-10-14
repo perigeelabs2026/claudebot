@@ -1,4 +1,5 @@
 import { Vault, type Rule } from '../memory/vault.ts';
+import { grantEmails } from '../approvals/permissions.ts';
 import { classifyBlocked } from '../cos/owner-needs.ts';
 import { requeueBankKnownBlockers, requeueKey } from '../cos/requeue.ts';
 import { allowlistEntry } from '../approvals/allowlist.ts';
@@ -101,16 +102,21 @@ export class TelegramBridge {
     if (cb) {
       const chatId = String(cb.message?.chat.id ?? cb.from?.id ?? '');
       if (!b || chatId !== b.chat_id) { ev(db, 'telegram.refused', { reason: 'button from an unbound chat' }); await this.api('answerCallbackQuery', { callback_query_id: cb.id, text: 'Not allowed.' }).catch(() => {}); return 'refused:unbound'; }
-      const m = /^ap:([A-Za-z0-9_-]+):([0-9a-f]{12}):(allow|deny)$/.exec(String(cb.data ?? ''));
+      const m = /^ap:([A-Za-z0-9_-]+):([0-9a-f]{12}):(allow|always|deny)$/.exec(String(cb.data ?? ''));
       if (!m) { await this.api('answerCallbackQuery', { callback_query_id: cb.id, text: 'Unknown button.' }).catch(() => {}); return 'ignored:button'; }
       const ap = this.d.approvals.get(m[1]); let text: string;
       if (!ap || ap.status !== 'pending') text = ap ? `Already ${ap.status}.` : 'Not found.';
       else if (!ap.content_hash.startsWith(m[2])) text = 'The draft changed since this message; open it in the app.';
+      else if (m[3] === 'always' && !describeApproval(ap).email) text = 'Always allow is offered only for emails; open it in the app.';
       else {
-        this.d.approvals.decide(ap.id, m[3] === 'allow' ? 'approved' : 'rejected', 'owner', m[3] === 'allow' ? 'allowed from the bound Telegram chat' : 'denied from the bound Telegram chat');
+        // "Always allow emails": the owner's tap switches on the team-wide "Send emails without asking" permission (any recipient, every
+        // assistant, delegated work too) and allows this one.
+        let always = '';
+        if (m[3] === 'always') { const p = grantEmails(db, 'owner:telegram', { reason: 'Always allow emails, tapped on Telegram' }); always = ` Emails now go out without asking until ${p.expires_at.slice(0, 10)} (up to ${p.max_per_day} a day); each one shows in the team chat. Tell your Chief of Staff to switch it off any time.`; m[3] = 'allow'; }
+        this.d.approvals.decide(ap.id, m[3] === 'allow' ? 'approved' : 'rejected', 'owner', m[3] === 'allow' ? (always ? 'allowed from the bound Telegram chat with Always allow emails' : 'allowed from the bound Telegram chat') : 'denied from the bound Telegram chat');
         if (ap.job_id) { const j = this.d.store.get(ap.job_id); if (j && j.state === 'waiting_for_approval') this.d.store.transition(j.id, 'queued', 'owner', { waiting_on: null, blocker_code: null, operator_action: null, next_action: 'resume after owner decision' }, { approval: ap.id, via: 'telegram' }); }
         if (m[3] === 'allow') this.d.chat.resumeForApproval(ap.id, this.d.defs);
-        ev(db, 'telegram.decided', { approval: ap.id, decision: m[3] }); text = m[3] === 'allow' ? 'Allowed once.' : 'Denied.';
+        ev(db, 'telegram.decided', { approval: ap.id, decision: always ? 'always' : m[3] }); text = always ? `Allowed.${always}` : m[3] === 'allow' ? 'Allowed once.' : 'Denied.';
         const conv = ap.job_id ? (db.prepare('SELECT conversation_id FROM jobs WHERE id = ?').get(ap.job_id) as { conversation_id: string | null } | undefined)?.conversation_id : null; if (conv) this.d.onChange?.(conv);
       }
       await this.api('answerCallbackQuery', { callback_query_id: cb.id, text }).catch(() => {});
@@ -249,7 +255,8 @@ export class TelegramBridge {
         // One plain sentence about what will happen, and the email itself when it is an email; no ids, fingerprints, expiry or raw links.
         const askerName = (asker ? this.d.defs.getAgent(asker)?.name : null)?.replace(/\s*\(.*\)$/, '') ?? 'An assistant';
         const text = v.email ? `${askerName} wants to send this email. Allow it?\n\n${v.text.slice(0, 3400)}` : v.browser ? `${askerName} wants to ${v.text}. Allow it?` : `${askerName} wants to ${allowlistEntry(ap.action_kind)?.verb ?? v.label.toLowerCase()}: ${String(ap.target).replace(/https?:\/\/\S+/g, '').trim().slice(0, 300)}. Allow it?`;
-        const keys = v.missingBody ? [{ text: 'Deny', callback_data: `ap:${ap.id}:${ap.content_hash.slice(0, 12)}:deny` }] : [{ text: 'Allow once', callback_data: `ap:${ap.id}:${ap.content_hash.slice(0, 12)}:allow` }, { text: 'Deny', callback_data: `ap:${ap.id}:${ap.content_hash.slice(0, 12)}:deny` }];
+        const k = (label: string, act: string) => ({ text: label, callback_data: `ap:${ap.id}:${ap.content_hash.slice(0, 12)}:${act}` });
+        const keys = v.missingBody ? [k('Deny', 'deny')] : v.email ? [k('Allow once', 'allow'), k('Always allow emails', 'always'), k('Deny', 'deny')] : [k('Allow once', 'allow'), k('Deny', 'deny')];
         body = { chat_id: b.chat_id, text, reply_markup: { inline_keyboard: [keys] } };
       } else if (r.kind === 'result') {
         const a = db.prepare('SELECT path, title FROM artifacts a JOIN messages m ON m.artifact_id = a.id WHERE m.id = ?').get(r.id) as { path: string | null; title: string } | undefined;

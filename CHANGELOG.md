@@ -11,6 +11,7 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Existing installs: run `claudebot update` to pick up these settings.
 
 ### Added
+- **Send emails without asking** (off by default). Tell your Chief of Staff in your own words, or tap **Always allow emails** on an email card on Telegram. Emails any assistant writes then go out without a card, including work the Chief of Staff handed to another assistant, up to a daily cap (50 by default). Each email is recorded and shown in the team chat. Spending, public posts and deletes still ask.
 - **Standing rules.** Tell your Chief of Staff a rule in your own words ("from now on, emails need no approval") and it is saved word for word in `Owner/Rules.md` in your memory vault, with the date and the message it came from. Every assistant reads the rules first, at the start of every turn, and they survive restarts. Only your own message adds or removes a rule; any other attempt is refused and recorded. Send `/rules` on Telegram to see them. New installs start with no rules.
 - Assistants keep a daily Work log in their memory note, rebuilt every night from what they actually did (no model call). The last 3 days are in every prompt.
 - `node engine/src/ops/certify-cli.ts` gives a read-only go/no-go based on the last hours of real, non-test work.
