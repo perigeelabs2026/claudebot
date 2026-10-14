@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="ClaudeBot" width="320">
+</p>
+
 # ClaudeBot
 
 **Your own AI team, running on your Mac and your Claude subscription.**
