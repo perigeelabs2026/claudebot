@@ -9,7 +9,7 @@ import http from 'node:http';
 import net from 'node:net';
 import { execFileSync } from 'node:child_process';
 import { openDatabase } from '../../src/db/open.ts';
-import { localShell, ensureClone, prepareWorktree, commitBuild, exportBuild, stageBundle, buildRepo, runBuildCheck } from '../../src/build/repo.ts';
+import { localShell, ensureClone, prepareWorktree, commitBuild, exportBuild, stageBundle, buildRepo, runBuildCheck, worktreeGitDir } from '../../src/build/repo.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..', '..', '..');
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.test', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.test' } }).trim();
@@ -59,13 +59,16 @@ test('checks install without install scripts unless the repository opts in', asy
   const sh = localShell(path.join(tmp, 'repos'), {} as NodeJS.ProcessEnv); const repo = { app: 'demo', url: src };
   assert.ok((await ensureClone(sh, repo)).ok); const w = await prepareWorktree(sh, repo, 'job-i1', 'c') as { dir: string };
   const r = await runBuildCheck(sh, w.dir, 'test'); assert.equal(r.ok, true, r.output); assert.ok(!fs.existsSync(path.join(w.dir, 'PRE_RAN')), 'install scripts did not run');
+  assert.match(r.output, /^# npm ci --ignore-scripts$/m, 'npm ci is in the check output'); assert.equal(r.label, 'npm test', 'the label is still the check');
+  fs.rmSync(path.join(w.dir, 'node_modules'), { recursive: true, force: true }); const lock = fs.readFileSync(path.join(w.dir, 'package-lock.json'), 'utf8'); fs.writeFileSync(path.join(w.dir, 'package-lock.json'), '{ not json');
+  const bad = await runBuildCheck(sh, w.dir, 'test'); assert.match(bad.output, /npm ci failed; checks run without a fresh install/); assert.match(bad.output, /npm (ERR|error)/i, 'npm\'s own error is kept'); fs.writeFileSync(path.join(w.dir, 'package-lock.json'), lock);
   fs.rmSync(path.join(w.dir, 'node_modules'), { recursive: true, force: true });
   await runBuildCheck(sh, w.dir, 'test', undefined, { installScripts: true }); assert.ok(fs.existsSync(path.join(w.dir, 'PRE_RAN')), 'opted in: they run');
 });
 
 test('hand-over helper: only a worktree directly under repos/<app>-worktrees, only to the builder or the engine user; check mode keeps .git and .claudebot', { skip: process.getuid?.() !== 0 && 'needs root (chown)' }, () => {
   const D = fs.mkdtempSync(path.join(os.tmpdir(), 'ho-')); const wt = path.join(D, 'repos', 'demo-worktrees', 'job-1'); fs.mkdirSync(path.join(wt, '.claudebot'), { recursive: true }); fs.mkdirSync(path.join(wt, 'src'));
-  fs.writeFileSync(path.join(wt, '.git'), 'gitdir: x'); fs.writeFileSync(path.join(wt, 'src', 'a.js'), ''); fs.writeFileSync(path.join(wt, '.claudebot', 'capability.json'), '{}');
+  fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${D}/repos/demo/.git/worktrees/job-1\n`); fs.writeFileSync(path.join(wt, 'src', 'a.js'), ''); fs.writeFileSync(path.join(wt, '.claudebot', 'capability.json'), '{}');
   const helper = path.join(ROOT, 'computer', 'runtime', 'claudebot-handover'); const env = { ...process.env, CLAUDEBOT_HANDOVER_DATA: D }; delete (env as Record<string, string | undefined>).SUDO_USER;
   const run = (...a: string[]) => execFileSync('bash', [helper, ...a], { env, encoding: 'utf8', stdio: 'pipe' });
   let nobody = 65534; try { nobody = Number(execFileSync('id', ['-u', 'nobody'], { encoding: 'utf8' }).trim()); } catch { /* default */ }
@@ -74,21 +77,56 @@ test('hand-over helper: only a worktree directly under repos/<app>-worktrees, on
   assert.throws(() => run('/etc', 'root', 'check'), /not a build worktree/);
   assert.throws(() => run(wt, 'nobody', 'check'), /refused: user nobody/);
   assert.throws(() => run(wt, 'root', 'everything'), /refused: mode/);
-  execFileSync('chown', ['-R', String(nobody), wt]);   // as if the builder had it: hand it back to the engine user (owner of repos)
-  run(wt, 'root', 'check'); assert.equal(fs.statSync(path.join(wt, 'src', 'a.js')).uid, 0); assert.equal(fs.statSync(path.join(wt, '.claudebot', 'capability.json')).uid, nobody, 'check mode leaves .claudebot alone'); assert.equal(fs.lstatSync(path.join(wt, '.git')).uid, nobody);
+  for (const f of [wt, path.join(wt, 'src'), path.join(wt, 'src', 'a.js'), path.join(wt, '.claudebot', 'capability.json')]) fs.chownSync(f, nobody, nobody);   // as if the builder had it (not .git or .claudebot)
+  run(wt, 'root', 'check'); assert.equal(fs.statSync(path.join(wt, 'src', 'a.js')).uid, 0); assert.equal(fs.statSync(path.join(wt, '.claudebot', 'capability.json')).uid, nobody, 'check mode leaves .claudebot\'s contents alone');
+  // A check that swaps the pointer or .claudebot is refused (exit 3) and nothing is chowned.
+  const refused = (re: RegExp) => { fs.chownSync(path.join(wt, 'src', 'a.js'), nobody, nobody); try { run(wt, 'root', 'check'); assert.fail('not refused'); } catch (e) { assert.equal((e as { status: number }).status, 3); assert.match(String((e as { stderr: string }).stderr), re); } assert.equal(fs.statSync(path.join(wt, 'src', 'a.js')).uid, nobody, 'nothing handed over'); };
+  const ptr = fs.readFileSync(path.join(wt, '.git'), 'utf8');
+  fs.writeFileSync(path.join(wt, '.git'), 'gitdir: /tmp/evil\n'); refused(/worktree pointer/);
+  fs.writeFileSync(path.join(wt, '.git'), ptr); fs.chownSync(path.join(wt, '.git'), nobody, nobody); refused(/worktree pointer/);   // right text, written by the builder
+  fs.rmSync(path.join(wt, '.git')); fs.symlinkSync(path.join(D, 'repos', 'demo', 'ptr'), path.join(wt, '.git')); fs.writeFileSync(path.join(D, 'repos', 'demo', 'ptr'), ptr); refused(/worktree pointer/);
+  fs.rmSync(path.join(wt, '.git')); fs.writeFileSync(path.join(wt, '.git'), ptr);
+  fs.renameSync(path.join(wt, '.claudebot'), path.join(wt, 'cb-old')); fs.symlinkSync('/etc', path.join(wt, '.claudebot')); refused(/\.claudebot was replaced/);
+  fs.rmSync(path.join(wt, '.claudebot')); fs.mkdirSync(path.join(wt, '.claudebot')); fs.chownSync(path.join(wt, '.claudebot'), nobody, nobody); refused(/\.claudebot was replaced/);
+  fs.rmSync(path.join(wt, '.claudebot'), { recursive: true }); run(wt, 'root', 'check'); assert.equal(fs.statSync(path.join(wt, 'src', 'a.js')).uid, 0, 'no .claudebot at all is fine');
 });
 
-test('egress proxy: HTTPS tunnels only to Anthropic, GitHub and npm; any other host and plain HTTP are refused and logged', async () => {
+test('commit and export name the worktree\'s git dir explicitly, with hooks and signing off: a rewritten .git pointer or hooks path is not followed', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gd-')); const src = origin(root); const sh = localShell(path.join(root, 'repos'), {} as NodeJS.ProcessEnv); const repo = { app: 'demo', url: src };
+  assert.equal(worktreeGitDir('/d/repos/app-worktrees/job-9'), '/d/repos/app/.git/worktrees/job-9');
+  assert.ok((await ensureClone(sh, repo)).ok); const w = await prepareWorktree(sh, repo, 'job-gd', 'c') as { dir: string; branch: string; base_commit: string };
+  // What a turn or check could leave behind: a pointer to its own repository, a hook, a hooks path and signing in the worktree config.
+  const evil = path.join(root, 'evil'); execFileSync('git', ['init', '-q', '-b', 'main', evil]); const evilHead = () => execFileSync('git', ['-C', evil, 'rev-list', '--all']).toString().trim();
+  fs.writeFileSync(path.join(w.dir, '.git'), `gitdir: ${evil}/.git\n`);
+  const hooks = path.join(root, 'hooks'); fs.mkdirSync(hooks); fs.writeFileSync(path.join(hooks, 'pre-commit'), `#!/bin/sh\ntouch ${root}/HOOK_RAN\n`, { mode: 0o755 });
+  execFileSync('git', ['--git-dir', worktreeGitDir(w.dir), 'config', 'core.hooksPath', hooks]); execFileSync('git', ['--git-dir', worktreeGitDir(w.dir), 'config', 'commit.gpgsign', 'true']);
+  fs.writeFileSync(path.join(w.dir, 'new.txt'), 'x');
+  const c = await commitBuild(sh, w.dir, w.branch, 'msg'); assert.equal(c.ok, true, JSON.stringify(c));
+  assert.ok(!fs.existsSync(path.join(root, 'HOOK_RAN')), 'hooks off'); assert.equal(evilHead(), '', 'the planted repository got nothing');
+  assert.match(git(src, 'log', '--oneline', '-1', 'main'), /init/, 'main untouched'); assert.match(execFileSync('git', ['--git-dir', worktreeGitDir(w.dir), 'show', '--stat', '--format=%s', 'HEAD']).toString(), /new\.txt/);
+  const x = await exportBuild(sh, w.dir, w.base_commit, w.branch); assert.equal(x.ok, true); assert.match((x as { patch: string }).patch, /new\.txt/);
+});
+
+test('egress proxy: HTTPS tunnels only to GitHub and npm; any other host and plain HTTP are refused and logged', async () => {
   const { allowed, createProxy } = await import(path.join(ROOT, 'computer', 'runtime', 'egress-proxy.mjs'));
-  for (const h of ['api.anthropic.com', 'github.com', 'registry.npmjs.org', 'API.ANTHROPIC.COM.']) assert.equal(allowed(h), true, h);
-  for (const h of ['example.com', 'anthropic.com.evil.test', 'evil-github.com', 'pastebin.com', '169.254.169.254']) assert.equal(allowed(h), false, h);
+  for (const h of ['github.com', 'registry.npmjs.org', 'REGISTRY.NPMJS.ORG.']) assert.equal(allowed(h), true, h);
+  for (const h of ['api.anthropic.com', 'example.com', 'anthropic.com.evil.test', 'evil-github.com', 'pastebin.com', '169.254.169.254']) assert.equal(allowed(h), false, h);
   const logs: string[] = []; const up = new net.Server(); await new Promise<void>((r) => up.listen(0, '127.0.0.1', () => r())); const upPort = (up.address() as net.AddressInfo).port;
   up.on('connection', (s) => s.end('hello from upstream'));
   const proxy = createProxy({ log: (l: string) => logs.push(l), connect: () => net.connect(upPort, '127.0.0.1') }); await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', () => r())); const port = (proxy.address() as net.AddressInfo).port;
   const tunnel = (host: string) => new Promise<string>((resolve) => { const s = net.connect(port, '127.0.0.1', () => s.write(`CONNECT ${host} HTTP/1.1\r\nHost: ${host}\r\n\r\n`)); let d = ''; s.on('data', (c) => { d += c; }); s.on('end', () => resolve(d)); s.on('close', () => resolve(d)); });
-  assert.match(await tunnel('example.com:443'), /403/); assert.match(await tunnel('api.anthropic.com:80'), /403/, 'HTTPS only');
-  const okRes = await tunnel('api.anthropic.com:443'); assert.match(okRes, /200 Connection Established/); assert.match(okRes, /hello from upstream/);
+  assert.match(await tunnel('example.com:443'), /403/); assert.match(await tunnel('api.anthropic.com:443'), /403/, 'checks never need Anthropic'); assert.match(await tunnel('registry.npmjs.org:80'), /403/, 'HTTPS only');
+  const okRes = await tunnel('registry.npmjs.org:443'); assert.match(okRes, /200 Connection Established/); assert.match(okRes, /hello from upstream/);
   const plain = await new Promise<number>((resolve) => http.get({ host: '127.0.0.1', port, path: 'http://example.com/', headers: { host: 'example.com' } }, (res) => { res.resume(); resolve(res.statusCode ?? 0); }));
   assert.equal(plain, 403); assert.ok(logs.some((l) => /refused example\.com:443/.test(l)));
   proxy.close(); up.close();
+});
+
+test('builder nftables: the host only on the engine\'s port, DNS only to the VM\'s resolver, and provisioning fills all three in', () => {
+  const nft = fs.readFileSync(path.join(ROOT, 'computer', 'runtime', 'builder-egress.nft'), 'utf8').split('\n').filter((l) => !l.trim().startsWith('#'));
+  const rules = nft.map((l) => l.trim()).filter((l) => / accept$/.test(l) && !l.startsWith('meta skuid'));
+  assert.deepEqual(rules, ['oif "lo" tcp dport 18799 accept', 'ip daddr __DNS_IP__ udp dport 53 accept', 'ip daddr __DNS_IP__ tcp dport 53 accept', 'ip daddr __HOST_IP__ tcp dport __ENGINE_PORT__ accept']);
+  const prov = fs.readFileSync(path.join(ROOT, 'computer', 'provision-runtime.sh'), 'utf8');
+  for (const k of ['__HOST_IP__', '__ENGINE_PORT__', '__DNS_IP__']) assert.match(prov, new RegExp(`s/${k}/`), k);
+  assert.match(fs.readFileSync(path.join(ROOT, 'engine', 'src', 'computer', 'host.ts'), 'utf8'), /> \/etc\/claudebot\/engine_port/);
 });

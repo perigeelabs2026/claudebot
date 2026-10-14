@@ -172,31 +172,39 @@ echo "BASE=$base"; echo "BASE_COMMIT=$(git merge-base HEAD "$base")"; echo "BRAN
 
 /** Run one check in a worktree: the project's own scripts (npm test; npm run typecheck, else tsc --noEmit). engine/ is used when the
  *  repository keeps its package there. Dependencies are installed once from the lockfile. */
-export async function runBuildCheck(sh: RepoShell, dir: string, check: BuildCheck, timeoutMs = 10 * 60_000, opts: { installScripts?: boolean } = {}): Promise<{ ok: boolean; notRun: boolean; label: string; output: string; failing: string[] }> {
+export async function runBuildCheck(sh: RepoShell, dir: string, check: BuildCheck, timeoutMs = 10 * 60_000, opts: { installScripts?: boolean } = {}): Promise<{ ok: boolean; notRun: boolean; label: string; output: string; failing: string[]; tampered?: boolean }> {
   const cmd = check === 'test' ? `if node -e 'process.exit(require("./package.json").scripts?.test?0:1)'; then echo '$ npm test'; npm test --silent; elif [ -d test ]; then echo '$ node --test'; node --test; else echo 'NOT_RUN: no test script'; exit 3; fi`
     : `if node -e 'process.exit(require("./package.json").scripts?.typecheck?0:1)'; then echo '$ npm run typecheck'; npm run typecheck --silent; elif [ -f tsconfig.json ] && [ -x node_modules/.bin/tsc ]; then echo '$ tsc --noEmit'; node_modules/.bin/tsc --noEmit -p .; else echo 'NOT_RUN: no typecheck script or TypeScript config'; exit 3; fi`;
   const inner = `cd ${q(dir)} || exit 2
 [ -f package.json ] || { [ -f engine/package.json ] && cd engine; }
 [ -f package.json ] || { echo 'NOT_RUN: no package.json'; exit 3; }
-if [ -f package-lock.json ] && [ ! -d node_modules ]; then npm ci --silent --no-audit --no-fund${opts.installScripts ? '' : ' --ignore-scripts'} >/dev/null 2>&1 || echo 'npm ci failed; checks run without a fresh install'; fi
+if [ -f package-lock.json ] && [ ! -d node_modules ]; then echo '# npm ci${opts.installScripts ? '' : ' --ignore-scripts'}'; npm ci --no-audit --no-fund --loglevel=warn${opts.installScripts ? '' : ' --ignore-scripts'} 2>&1 | tail -n 60; [ "\${PIPESTATUS[0]}" -eq 0 ] || echo 'npm ci failed; checks run without a fresh install'; fi
 export CI=1 NO_COLOR=1
 unset NODE_OPTIONS NODE_TEST_CONTEXT
 ${cmd}`;
   // As the builder: the worktree is the builder's for the length of the check (not its .git pointer or .claudebot/), then handed back.
   const script = sh.builder ? `me=$(id -un)
 own() { ${sh.handover ? `${sh.handover} ${q(dir)} "$1" check` : `${sh.sudo}find ${q(dir)} -mindepth 1 \\( -path ${q(`${dir}/.git`)} -o -path ${q(`${dir}/.claudebot`)} \\) -prune -o -exec chown -h "$1" {} + ; ${sh.sudo}chown "$1" ${q(dir)}`}; }   # the folder is 0700 and belongs to the builder in between, so the hand-back runs privileged
-own ${q(sh.builder.match(/-u (\S+)/)?.[1] ?? BUILDER)}
+own ${q(sh.builder.match(/-u (\S+)/)?.[1] ?? BUILDER)} || { echo 'HANDOVER_REFUSED: the worktree pointer or .claudebot is not intact'; exit 5; }
 ${sh.builder} bash -s <<'CLAUDEBOT_CHECK'
 ${inner}
 CLAUDEBOT_CHECK
 rc=$?
-own "$me"
+own "$me" || { echo 'HANDOVER_REFUSED: the check replaced the worktree pointer or .claudebot; the worktree was not handed back'; exit 5; }
 exit $rc` : inner;
   const r = await sh.run(script, { timeoutMs });
   const notRun = r.code === 3 && /NOT_RUN:/.test(r.out);
   const label = /^\$ (.+)$/m.exec(r.out)?.[1] ?? check;
-  return { ok: r.code === 0, notRun, label, output: r.out, failing: r.code === 0 ? [] : failingTests(r.out) };
+  return { ok: r.code === 0, notRun, label, output: r.out, failing: r.code === 0 ? [] : failingTests(r.out), ...(r.code === 5 && /HANDOVER_REFUSED/.test(r.out) ? { tampered: true } : {}) };
 }
+
+/** The worktree's own git dir in the clone (<root>/<app>/.git/worktrees/<job>). Commit and export name it explicitly, with hooks off,
+ *  so nothing the turn or a check left in the worktree (a rewritten .git pointer, a hooks path, signing config) is followed. */
+export function worktreeGitDir(dir: string): string {
+  const job = path.posix.basename(dir); const parent = path.posix.dirname(dir);
+  return path.posix.join(path.posix.dirname(parent), path.posix.basename(parent).replace(/-worktrees$/, ''), '.git', 'worktrees', job);
+}
+const safeGit = (dir: string) => `git --git-dir=${q(worktreeGitDir(dir))} --work-tree=${q(dir)} -c core.hooksPath=/dev/null -c commit.gpgsign=false -c tag.gpgsign=false -c core.fsmonitor=false`;
 
 /** Names of failing tests from node --test (spec or TAP) output. */
 export function failingTests(out: string): string[] {
@@ -215,12 +223,14 @@ export async function commitBuild(sh: RepoShell, dir: string, branch: string, me
   if (/^(main|master)$/.test(branch)) return { ok: false, error: 'refusing to commit on main' };
   const r = await sh.run(`set -e
 cd ${q(dir)}
-[ "$(git symbolic-ref --short HEAD)" = ${q(branch)} ] || { echo "WRONG_BRANCH $(git symbolic-ref --short HEAD)"; exit 4; }
-git add -A
-if git diff --cached --quiet; then echo NO_CHANGES; exit 0; fi
-git diff --cached --name-only | sed 's/^/FILE /'
-git -c user.name=${q(author.name)} -c user.email=${q(author.email)} commit --quiet -m ${q(message)}
-echo "COMMIT=$(git rev-parse HEAD)"`, { timeoutMs: 120_000 });
+g() { ${safeGit(dir)} "$@"; }
+[ -d ${q(worktreeGitDir(dir))} ] || { echo "NO_GIT_DIR"; exit 4; }
+[ "$(g symbolic-ref --short HEAD)" = ${q(branch)} ] || { echo "WRONG_BRANCH $(g symbolic-ref --short HEAD)"; exit 4; }
+g add -A
+if g diff --cached --quiet; then echo NO_CHANGES; exit 0; fi
+g diff --cached --name-only | sed 's/^/FILE /'
+g -c user.name=${q(author.name)} -c user.email=${q(author.email)} commit --quiet --no-verify -m ${q(message)}
+echo "COMMIT=$(g rev-parse HEAD)"`, { timeoutMs: 120_000 });
   if (r.code !== 0) return { ok: false, error: r.out.slice(-600) };
   return { ok: true, commit: /COMMIT=([0-9a-f]{40})/.exec(r.out)?.[1] ?? null, files: [...r.out.matchAll(/^FILE (.+)$/gm)].map((m) => m[1]) };
 }
@@ -233,9 +243,10 @@ export async function exportBuild(sh: RepoShell, dir: string, base: string, bran
   const r = await sh.run(`set -e
 cd ${q(dir)}
 t=$(mktemp)
-git bundle create "$t" ${q(`${base}..${branch}`)} >/dev/null 2>&1
+g() { ${safeGit(dir)} "$@"; }
+g bundle create "$t" ${q(`${base}..${branch}`)} >/dev/null 2>&1
 echo BUNDLE=$(base64 < "$t" | tr -d '\\n')
-echo PATCH=$(git format-patch --stdout ${q(`${base}..${branch}`)} | base64 | tr -d '\\n')
+echo PATCH=$(g format-patch --stdout ${q(`${base}..${branch}`)} | base64 | tr -d '\\n')
 rm -f "$t"`, { timeoutMs: 120_000 });
   const b = /^BUNDLE=(\S*)$/m.exec(r.out)?.[1]; const p = /^PATCH=(\S*)$/m.exec(r.out)?.[1];
   if (r.code !== 0 || !b || p === undefined) return { ok: false, error: r.out.slice(-400) };

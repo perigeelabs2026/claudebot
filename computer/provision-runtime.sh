@@ -21,11 +21,13 @@ install -d -o "$U" -m 700 "$D/claude" "$D/openclaw" "$D/secrets" "$D/logs" "$D/w
 id claudebot-builder >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/claudebot-builder --shell /bin/bash claudebot-builder
 install -d -o "$U" -m 711 "$D/repos"
 install -m 755 -o root /etc/claudebot/claudebot-handover /opt/claudebot/bin/claudebot-handover
-# Builder egress: the builder uid reaches only the egress proxy (Anthropic, GitHub, npm), DNS and the engine on the host.
+# Builder egress: the builder uid reaches only the egress proxy (GitHub, npm), the VM's resolver and the engine's port on the host.
 install -m 644 /etc/claudebot/egress-proxy.mjs /opt/claudebot/egress-proxy.mjs
 sed "s/__USER__/$U/" /etc/claudebot/claudebot-egress.service > /etc/systemd/system/claudebot-egress.service
 HOST_IP=$(getent ahostsv4 host.lima.internal | awk 'NR==1{print $1}'); [ -n "$HOST_IP" ] || HOST_IP=192.168.5.2
-sed "s/__HOST_IP__/$HOST_IP/" /etc/claudebot/builder-egress.nft > /etc/claudebot/builder-egress.applied.nft
+ENGINE_PORT=$(cat /etc/claudebot/engine_port 2>/dev/null || echo 48311); case "$ENGINE_PORT" in ''|*[!0-9]*) ENGINE_PORT=48311;; esac
+DNS_IP=$(awk '$1=="nameserver" && $2 ~ /^[0-9.]+$/ {print $2; exit}' /etc/resolv.conf); [ -n "$DNS_IP" ] || DNS_IP=127.0.0.53
+sed "s/__HOST_IP__/$HOST_IP/; s/__ENGINE_PORT__/$ENGINE_PORT/; s/__DNS_IP__/$DNS_IP/g" /etc/claudebot/builder-egress.nft > /etc/claudebot/builder-egress.applied.nft
 nft list table inet claudebot_builder >/dev/null 2>&1 && nft delete table inet claudebot_builder; nft -f /etc/claudebot/builder-egress.applied.nft
 install -m 755 /etc/claudebot/builder-live-check.sh /opt/claudebot/bin/builder-live-check
 [ -s "$D/secrets/gateway.token" ] || (umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$D/secrets/gateway.token"); chown "$U" "$D/secrets/gateway.token"

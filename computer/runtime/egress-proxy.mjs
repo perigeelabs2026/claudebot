@@ -1,11 +1,12 @@
-// Egress proxy for the builder uid (inside the assistants' computer). nftables lets claudebot-builder reach only this proxy (and DNS
-// and the engine on the host); the proxy opens tunnels (HTTPS CONNECT) only to Anthropic, GitHub and npm. Plain HTTP is refused.
+// Egress proxy for the builder uid (inside the assistants' computer). nftables lets claudebot-builder reach only this proxy (and the
+// VM's resolver and the engine's port on the host); the proxy opens tunnels (HTTPS CONNECT) only to GitHub and npm. Checks never need
+// Anthropic: the build turn's Claude process runs as the main user, outside this filter. Plain HTTP is refused.
 // Refusals are logged with the host only. Runs as the computer's main user (systemd claudebot-egress).
 import http from 'node:http';
 import net from 'node:net';
 import fs from 'node:fs';
 
-export const ALLOWED = ['api.anthropic.com', 'github.com', 'api.github.com', 'codeload.github.com', 'objects.githubusercontent.com', 'registry.npmjs.org'];
+export const ALLOWED = ['github.com', 'api.github.com', 'codeload.github.com', 'objects.githubusercontent.com', 'registry.npmjs.org'];
 export function allowed(host) { const h = String(host).toLowerCase().replace(/\.$/, ''); return ALLOWED.includes(h); }
 
 export function createProxy({ log = () => {}, connect = (port, host) => net.connect(port, host) } = {}) {

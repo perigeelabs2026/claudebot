@@ -2,6 +2,11 @@
 
 Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update` (or run the install line again).
 
+## 2026-10-14
+
+### Security
+- Build checks are fenced in tighter: the builder account reaches only GitHub and npm (no longer Anthropic), only the computer's own DNS resolver, and only the engine's port on your Mac. A check that tampers with its worktree's git pointer fails the task, and commits never follow it. Failed `npm ci` output now shows in the check result. See [docs/BUILD-TASKS.md](docs/BUILD-TASKS.md). Existing installs: run `claudebot computer update`.
+
 ## 2026-10-13
 
 ### Usage

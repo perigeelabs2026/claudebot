@@ -1,13 +1,15 @@
-# ClaudeBot: the builder uid (build checks) may reach only the egress proxy, DNS and the engine on the host.
-# __HOST_IP__ is host.lima.internal, filled in at provisioning.
+# ClaudeBot: the builder uid (build checks) may reach only the egress proxy, the VM's own resolver and the engine's port on the host.
+# Filled in at provisioning: __HOST_IP__ (host.lima.internal), __ENGINE_PORT__ (/etc/claudebot/engine_port), __DNS_IP__ (the first
+# nameserver in /etc/resolv.conf, 127.0.0.53 under systemd-resolved). Names still resolve through that resolver, so a lookup can carry
+# data out; the proxy, not DNS, is what limits where connections go.
 table inet claudebot_builder {
   chain out {
     type filter hook output priority 0; policy accept;
     meta skuid != "claudebot-builder" accept
     oif "lo" tcp dport 18799 accept
-    udp dport 53 accept
-    tcp dport 53 accept
-    ip daddr __HOST_IP__ accept
+    ip daddr __DNS_IP__ udp dport 53 accept
+    ip daddr __DNS_IP__ tcp dport 53 accept
+    ip daddr __HOST_IP__ tcp dport __ENGINE_PORT__ accept
     counter reject
   }
 }

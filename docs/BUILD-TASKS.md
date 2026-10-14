@@ -20,9 +20,9 @@ The committed work comes back to your Mac in the task folder: `<task>.bundle` (`
 The checks (installing dependencies, tests, typecheck) run as `claudebot-builder` inside the assistants' computer. That account:
 - has no sudo;
 - cannot read the secret store, a clone's `.git` or any other task's worktree;
-- reaches the network only through the egress proxy on 127.0.0.1:18799. The proxy allows Anthropic, GitHub and npm over HTTPS; nftables refuses everything else for that uid, except DNS and the engine on the host.
+- reaches the network only through the egress proxy on 127.0.0.1:18799. The proxy allows GitHub and npm over HTTPS (not Anthropic: checks never call Claude). nftables refuses everything else for that uid, except the computer's own DNS resolver and the engine's port on your Mac.
 
-The engine's own user hands one worktree to the builder and back with `/opt/claudebot/bin/claudebot-handover`.
+The engine's own user hands one worktree to the builder and back with `/opt/claudebot/bin/claudebot-handover`. It refuses, and the task fails, if a check replaced the worktree's `.git` pointer or its `.claudebot` folder. The commit names the worktree's git folder itself, with hooks and signing off, so nothing a check left behind is followed. The `npm ci` output is kept in each check's saved output.
 
 The narrow sudo rule for the engine's user, in `/etc/sudoers.d/claudebot` (check it with `visudo -cf` first):
 
@@ -33,4 +33,4 @@ The narrow sudo rule for the engine's user, in `/etc/sudoers.d/claudebot` (check
 
 The build turn itself (Claude and its shell) runs on the team's own sign-in as the computer's main user. What stops it from writing to your repository is that it holds no push credential: the bundle source has none, and a URL token that can push is refused.
 
-Live check: `limactl shell claudebot-computer /opt/claudebot/bin/builder-live-check` (every line PASS: example.com refused directly and through the proxy, npm and Anthropic reachable through it, the secret store and clones' `.git` unreadable by the builder).
+Live check: `limactl shell claudebot-computer /opt/claudebot/bin/builder-live-check` (every line PASS: example.com refused directly and through the proxy, npm reachable through it, Anthropic refused, outside DNS servers and other host ports refused, the secret store and clones' `.git` unreadable by the builder).
