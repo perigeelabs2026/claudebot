@@ -1,3 +1,4 @@
+import { Vault, type Rule } from '../memory/vault.ts';
 import { classifyBlocked } from '../cos/owner-needs.ts';
 import { requeueBankKnownBlockers, requeueKey } from '../cos/requeue.ts';
 import { allowlistEntry } from '../approvals/allowlist.ts';
@@ -150,7 +151,7 @@ export class TelegramBridge {
     const say = (t: string) => this.api('sendMessage', { chat_id: chatId, text: t.slice(0, 4000) }).catch(() => {});
     const live = () => db.prepare("SELECT id, agent_role, objective, state FROM jobs WHERE state IN ('queued','leased','running','retry_scheduled','waiting_for_approval') AND kind NOT IN ('chat.turn','owner.upload') ORDER BY created_at").all() as Array<{ id: string; agent_role: string; objective: string; state: string }>;
     const name = (id: string) => this.d.defs.getAgent(id)?.name ?? id;
-    if (cmd === '/help') { await say('Talk to your Chief of Staff in plain words: assign or redirect work, rename or create assistants, ask for files or status.\n/status: what is running and waiting\n/approvals: decisions waiting, with buttons\n/stop <number>: stop a task from /status'); return 'command:help'; }
+    if (cmd === '/help') { await say('Talk to your Chief of Staff in plain words: assign or redirect work, rename or create assistants, ask for files or status.\n/status: what is running and waiting\n/approvals: decisions waiting, with buttons\n/stop <number>: stop a task from /status\n/rules: your standing rules for the team'); return 'command:help'; }
     if (cmd === '/status') {
       const tasks = live(); const pend = (db.prepare("SELECT count(*) AS n FROM approvals WHERE status = 'pending'").get() as { n: number }).n;
       await say(tasks.length ? `${tasks.length} task${tasks.length > 1 ? 's' : ''} open, ${pend} decision${pend === 1 ? '' : 's'} waiting:\n${tasks.slice(0, 15).map((j, i) => `${i + 1}. ${name(j.agent_role)}: ${j.objective.replace(/\s+/g, ' ').slice(0, 90)} (${j.state.replace(/_/g, ' ')})`).join('\n')}\nStop one with /stop <number>.` : `Nothing running. ${pend} decision${pend === 1 ? '' : 's'} waiting.`); return 'command:status';
@@ -160,6 +161,11 @@ export class TelegramBridge {
       if (!pend.length) { await say('No decisions are waiting.'); return 'command:approvals'; }
       db.prepare(`DELETE FROM telegram_outbox WHERE chat_id = ? AND kind IN ('decision','skipped') AND message_id IN (${pend.map(() => '?').join(',')})`).run(chatId, ...pend.map((p) => p.id));   // send each again, with fresh buttons
       const n = await this.flush(50, pend.map((p) => p.id)); return `command:approvals:${n}`;
+    }
+    if (cmd === '/rules') {   // the owner's standing rules (Owner/Rules.md), word for word
+      let rs: Rule[] = []; try { rs = new Vault().rules(); } catch { /* the vault is optional */ }
+      await say(rs.length ? `Your standing rules (every assistant reads them at the start of every turn):\n${rs.map((r, i) => `${i + 1}. ${r.rule} (${r.date})`).join('\n')}\n\nTo add or drop one, tell your Chief of Staff in your own words.` : 'No standing rules yet. Tell your Chief of Staff one in your own words (for example "from now on, emails need no approval") and it is saved word for word.');
+      return 'command:rules';
     }
     if (cmd === '/stop') {
       const tasks = live(); const k = Number(arg); const j = Number.isInteger(k) && k >= 1 ? tasks[k - 1] : undefined;

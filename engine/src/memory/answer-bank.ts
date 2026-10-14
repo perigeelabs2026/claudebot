@@ -15,7 +15,7 @@ const words = (s: string) => String(s).toLowerCase().replace(/[^a-z0-9%+\-' ]+/g
 
 function facts(dir: string): Array<{ text: string; key: string; source: string }> {
   const files: string[] = []; const own = path.join(dir, 'Owner.md'); if (fs.existsSync(own)) files.push(own);
-  const sub = path.join(dir, 'Owner'); if (fs.existsSync(sub)) for (const f of fs.readdirSync(sub)) if (f.endsWith('.md') && f !== 'Accounts.md') files.push(path.join(sub, f));   // Accounts.md lists sign-ins the team created, not answers
+  const sub = path.join(dir, 'Owner'); if (fs.existsSync(sub)) for (const f of fs.readdirSync(sub)) if (f.endsWith('.md') && f !== 'Accounts.md' && f !== 'Rules.md') files.push(path.join(sub, f));   // Accounts.md lists sign-ins the team created, not answers
   const out: Array<{ text: string; key: string; source: string }> = [];
   for (const f of files) for (const raw of fs.readFileSync(f, 'utf8').split('\n')) {
     const line = raw.trim(); if (!/^[-*]\s+/.test(line)) continue; const text = line.replace(/^[-*]\s+/, '').trim(); if (text.length < 4) continue;

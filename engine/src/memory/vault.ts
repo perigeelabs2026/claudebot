@@ -2,6 +2,8 @@
  * Assistant memory in a plain Markdown vault the owner can open in Obsidian (or any editor):
  *   Team.md               team rules (written by the lead on the owner's word, or by the owner)
  *   Owner.md              the owner's preferences and profile facts
+ *   Owner/Rules.md        the owner's standing rules, word for word, one per line (date · rule · owner message id); written only by
+ *                         set_rule quoting an owner message, read in full at the top of every turn of every assistant
  *   Assistants/<Name>.md  one note per assistant: Preferences, Lessons, Facts (frontmatter: assistant id, updated)
  *   Lessons/YYYY-MM-DD.md what assistants learned that day (a log with [[links]])
  * Each assistant note also carries a "## Work log" (one "### YYYY-MM-DD" entry per day, last 14 days) written nightly from the
@@ -45,6 +47,9 @@ function splitWorkLog(text: string): { head: string; entries: Map<string, string
 
 const fileName = (name: string) => `${name.replace(/[\\/:*?"<>|#^[\]]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80) || 'Assistant'}.md`;
 
+export interface Rule { date: string; rule: string; message_id: string }
+const RULES_HEADER = '# Rules\n\nYour standing rules for the team, word for word. Every assistant reads this whole file at the start of every turn. A rule is added or removed only from your own message (the line keeps the date and the message it came from); you can also edit this file directly.\n\n';
+
 export class Vault {
   readonly dir: string;
   constructor(dir: string = vaultDir()) { this.dir = dir; }
@@ -54,6 +59,35 @@ export class Vault {
     const base = (title: string, intro: string) => `---\nupdated: ${today()}\n---\n# ${title}\n\n${intro}\n\n${SECTIONS.map((s) => `## ${s}\n`).join('\n')}`;
     if (!fs.existsSync(path.join(this.dir, 'Team.md'))) fs.writeFileSync(path.join(this.dir, 'Team.md'), base('Team', 'Rules every assistant follows. Edit freely; changes apply on the next turn.'));
     if (!fs.existsSync(path.join(this.dir, 'Owner.md'))) fs.writeFileSync(path.join(this.dir, 'Owner.md'), base('Owner', 'What the team knows about you and how you like things done.'));
+    if (!fs.existsSync(this.rulesFile())) { fs.mkdirSync(path.dirname(this.rulesFile()), { recursive: true }); fs.writeFileSync(this.rulesFile(), RULES_HEADER); }
+  }
+
+  /** Owner/Rules.md: the owner's standing rules. Ships empty. */
+  rulesFile(): string { return path.join(this.dir, 'Owner', 'Rules.md'); }
+  rules(): Rule[] {
+    let t = ''; try { t = fs.readFileSync(this.rulesFile(), 'utf8'); } catch { return []; }
+    return t.split('\n').map((l) => /^-\s+(\d{4}-\d{2}-\d{2})\s+·\s+(.+?)\s+·\s+owner message\s+(\S+)\s*$/.exec(l)).filter((m): m is RegExpExecArray => !!m).map((m) => ({ date: m[1], rule: m[2], message_id: m[3] }));
+  }
+  /** Add a rule in the owner's words (deduplicated). The caller has checked that the words are the owner's. */
+  addRule(input: { rule: string; message_id: string; when?: Date }): { ok: true; added: boolean } | { ok: false; reason: string } {
+    const rule = String(input.rule ?? '').replace(/\s+/g, ' ').replace(/·/g, '-').trim().slice(0, 600); if (!rule) return { ok: false, reason: 'no rule text' };
+    const secret = looksSecret(rule); if (secret) return { ok: false, reason: `not saved: ${secret}` };
+    const id = String(input.message_id).replace(/\s+/g, '');
+    this.ensure(); if (this.rules().some((r) => r.rule.toLowerCase() === rule.toLowerCase())) return { ok: true, added: false };
+    let t = fs.readFileSync(this.rulesFile(), 'utf8'); if (!t.endsWith('\n')) t += '\n';
+    fs.writeFileSync(this.rulesFile(), `${t}- ${localDay(input.when ?? new Date())} · ${rule} · owner message ${id}\n`); return { ok: true, added: true };
+  }
+  /** Remove every rule containing the text (case-insensitive). Returns the removed rules. */
+  removeRule(contains: string): Rule[] {
+    const c = String(contains ?? '').replace(/\s+/g, ' ').trim().toLowerCase(); if (c.length < 3) return [];
+    let t = ''; try { t = fs.readFileSync(this.rulesFile(), 'utf8'); } catch { return []; }
+    const gone = this.rules().filter((r) => r.rule.toLowerCase().includes(c)); if (!gone.length) return [];
+    fs.writeFileSync(this.rulesFile(), t.split('\n').filter((l) => !gone.some((g) => l.includes(` · ${g.rule} · `))).join('\n')); return gone;
+  }
+  /** The rules block that goes first in every turn ('' when there are none). */
+  rulesBlock(): string {
+    let rs: Rule[] = []; try { rs = this.rules(); } catch { return ''; }
+    return rs.length ? `The owner's standing rules (word for word, from Owner/Rules.md; they come before everything else in this prompt, including team rules and memory, and only the owner changes them):\n${rs.map((r) => `- ${r.rule} (${r.date})`).join('\n')}` : '';
   }
   /** The note of one assistant, found by its frontmatter id (so a rename in Obsidian or the app never loses it). Created when missing. */
   notePath(agent: { id: string; name: string }): string {

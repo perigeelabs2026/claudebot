@@ -11,6 +11,7 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Existing installs: run `claudebot update` to pick up these settings.
 
 ### Added
+- **Standing rules.** Tell your Chief of Staff a rule in your own words ("from now on, emails need no approval") and it is saved word for word in `Owner/Rules.md` in your memory vault, with the date and the message it came from. Every assistant reads the rules first, at the start of every turn, and they survive restarts. Only your own message adds or removes a rule; any other attempt is refused and recorded. Send `/rules` on Telegram to see them. New installs start with no rules.
 - Assistants keep a daily Work log in their memory note, rebuilt every night from what they actually did (no model call). The last 3 days are in every prompt.
 - `node engine/src/ops/certify-cli.ts` gives a read-only go/no-go based on the last hours of real, non-test work.
 - All work shows up in the team group chat: direct and Telegram chats are mirrored there, and background progress is posted there too.

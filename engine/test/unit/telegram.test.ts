@@ -271,3 +271,18 @@ test('owner alerts (a refused model, a failure streak, a lapsed limit, a waiting
   assert.equal((s.db.prepare("SELECT kind FROM telegram_outbox WHERE message_id LIKE 'alert:%' ORDER BY rowid DESC LIMIT 1").get() as { kind: string }).kind, 'held-quiet');
   f.close();
 });
+
+test('step 0: /rules lists the owner\'s standing rules word for word (or says there are none)', async () => {
+  const prev = process.env.CLAUDEBOT_MEMORY_DIR; process.env.CLAUDEBOT_MEMORY_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'tg-rules-'));
+  try {
+    const f = await fakeTelegram(); const s = setup(f.base); saveToken(s.secrets, TOKEN);
+    const { code } = newPairingCode(s.db); f.push(msg(1, 777, `/start ${code}`)); await s.bridge.cycle(0);
+    f.calls.length = 0; f.push(msg(2, 777, '/rules')); await s.bridge.cycle(0);
+    assert.ok(f.calls.some((x) => x.method === 'sendMessage' && /^No standing rules yet/.test(String(x.body.text))));
+    const { Vault } = await import('../../src/memory/vault.ts'); new Vault().addRule({ rule: 'never wake me before 8am', message_id: 'msg-1' });
+    f.calls.length = 0; f.push(msg(3, 777, '/rules')); await s.bridge.cycle(0);
+    const t = f.calls.filter((x) => x.method === 'sendMessage').map((x) => String(x.body.text)).join('\n');
+    assert.match(t, /Your standing rules[^\n]*\n1\. never wake me before 8am \(\d{4}-\d{2}-\d{2}\)/); assert.ok(!/msg-1/.test(t), 'no ids on Telegram');
+    f.close();
+  } finally { if (prev === undefined) delete process.env.CLAUDEBOT_MEMORY_DIR; else process.env.CLAUDEBOT_MEMORY_DIR = prev; }
+});

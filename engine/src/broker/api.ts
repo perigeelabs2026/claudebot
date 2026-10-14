@@ -318,6 +318,30 @@ export class BrokerApi {
         return { ok: true, text: `shared "${f.title}"` };
       }
       // ---- the lead's team tools: each acts only on the owner's own words in the message being answered ----
+      case 'set_rule': {   // the owner's standing rules (Owner/Rules.md): written only from an owner message in this conversation, quoted by id
+        const refuse = (reason: string) => { this.store.event(cap.job_id, actor, 'rule.refused', { action: String(a.action ?? ''), owner_message_id: String(a.owner_message_id ?? '').slice(0, 80), rule: String(a.rule ?? a.contains ?? '').slice(0, 300), reason }); return { ok: false, text: `Not changed: ${reason}. Only the owner's own words change the rules; you may suggest the rule to the owner instead.` }; };
+        if (cap.role !== 'coordinator') return refuse('only the lead can change the owner\'s rules');
+        const me = this.store.get(cap.job_id); const mid = String(a.owner_message_id ?? '').trim();
+        if (!mid) return refuse('owner_message_id is missing: quote the id of the owner\'s message that states the rule');
+        const m = db.prepare('SELECT id, conversation_id, role, content FROM messages WHERE id = ?').get(mid) as { id: string; conversation_id: string; role: string; content: string } | undefined;
+        if (!m || m.role !== 'owner') return refuse('that id is not a message from the owner');
+        if (!me?.conversation_id || m.conversation_id !== me.conversation_id) return refuse('that owner message is not in this conversation');
+        const norm = (x: string) => x.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"').replace(/\s+/g, ' ').trim();
+        const vault = new Vault();
+        if (a.action === 'remove') {
+          const c = String(a.contains ?? a.rule ?? '').trim(); if (c.length < 3) return refuse('contains must name the rule to remove');
+          const gone = vault.removeRule(c); if (!gone.length) return { ok: false, text: 'No rule contains that text. The rules are listed at the top of your prompt.' };
+          this.store.event(cap.job_id, actor, 'rule.removed', { owner_message_id: mid, rules: gone.map((g) => g.rule) });
+          return { ok: true, text: `Removed ${gone.length} rule${gone.length > 1 ? 's' : ''}: ${gone.map((g) => `"${g.rule}"`).join('; ')}. Every assistant stops following it from its next turn.` };
+        }
+        if (a.action !== 'add') return refuse('action must be add or remove');
+        const rule = String(a.rule ?? '').replace(/\s+/g, ' ').trim();
+        if (rule.split(' ').length < 3) return refuse('rule must be the owner\'s words, at least three words');
+        if (!norm(m.content).includes(norm(rule))) return refuse('rule is not in that owner message word for word; quote the owner exactly');
+        const r = vault.addRule({ rule, message_id: mid }); if (!r.ok) return refuse(r.reason);
+        this.store.event(cap.job_id, actor, 'rule.added', { owner_message_id: mid, rule, added: r.added });
+        return { ok: true, text: r.added ? `Rule saved word for word: "${rule}". Every assistant reads it at the start of every turn, from now on and after restarts.` : 'That rule is already saved.' };
+      }
       case 'set_permission': {   // the lead switches a standing permission on or off because the owner said so in the message being answered
         const asked = ownerAsked(db, cap.job_id, a.owner_words); if (!asked.ok) return { ok: false, text: `Not changed: ${asked.reason}.` };
         const which = String(a.permission ?? ''); const on = a.on !== false;
