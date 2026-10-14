@@ -19,6 +19,7 @@ install -d -o "$U" -m 700 "$D/claude" "$D/openclaw" "$D/secrets" "$D/logs" "$D/w
 [ -s "$D/secrets/gateway.token" ] || (umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$D/secrets/gateway.token"); chown "$U" "$D/secrets/gateway.token"
 sudo -u "$U" env OPENCLAW_STATE_DIR="$D/openclaw" PATH=$PATH bash -c "[ -d '$D/openclaw/npm/projects' ] && ls '$D/openclaw/npm/projects' | grep -q acpx || openclaw --profile computer plugins install $(jq -r .runtime.acpx_plugin $V)"
 install -o "$U" -m 600 /etc/claudebot/openclaw.json "$D/openclaw/openclaw.json"
+install -d -o "$U" -m 700 "$D/tmp"; echo "d /tmp/openclaw 0755 root root -" > /etc/tmpfiles.d/claudebot-openclaw.conf; systemd-tmpfiles --create /etc/tmpfiles.d/claudebot-openclaw.conf; [ "$(stat -c %U /tmp/openclaw)" = root ] || { rm -rf /tmp/openclaw; install -d -o root -m 755 /tmp/openclaw; }
 sed "s/__USER__/$U/; s/__UID__/$(id -u "$U")/" /etc/claudebot/openclaw-gateway.service > /etc/systemd/system/openclaw-gateway.service
 systemctl daemon-reload; systemctl enable openclaw-gateway; systemctl restart openclaw-gateway
 echo runtime-provisioned > /etc/claudebot/runtime-provisioned

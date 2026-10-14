@@ -38,6 +38,14 @@ export async function computerAuthStatus(): Promise<string> {
   catch (e) { const out = (e as { stdout?: string }).stdout; if (out && out.trim().startsWith('{')) return out; throw e; }
 }
 
+/** OpenClaw's temp root inside the computer (TMPDIR on the data disk, readable by the snap Chromium): uploads/ and downloads/ live here. */
+let tmpRootCache: string | null = null;
+export async function computerTmpRoot(): Promise<string> {
+  if (tmpRootCache) return tmpRootCache;
+  const uid = (await run('ssh', ['-F', SSH_CONFIG, '-o', 'BatchMode=yes', SSH_HOST, 'id -u'], { timeout: 20_000 })).stdout.trim();
+  tmpRootCache = `${VM_DATA}/tmp/openclaw-${uid}`; return tmpRootCache;
+}
+
 /** Put one file at the same path inside the computer (OpenClaw's uploads folder), and fetch one back. Content goes over ssh stdin/stdout. */
 export async function toComputer(dest: string, buf: Buffer): Promise<{ ok: boolean; error?: string }> {
   return new Promise((resolve) => { const c = execFile('ssh', ['-F', SSH_CONFIG, '-o', 'BatchMode=yes', SSH_HOST, `mkdir -p '${path.posix.dirname(dest)}' && umask 077 && cat > '${dest}'`], { timeout: 60_000 }, (e) => resolve(e ? { ok: false, error: e.message.slice(0, 160) } : { ok: true })); c.stdin?.end(buf); });

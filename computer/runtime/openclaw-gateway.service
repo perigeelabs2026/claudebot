@@ -7,6 +7,9 @@ Environment=OPENCLAW_STATE_DIR=/mnt/lima-claudebot-computer-data/openclaw
 Environment=OPENCLAW_HIDE_BANNER=1
 Environment=XDG_RUNTIME_DIR=/run/user/__UID__
 Environment=WAYLAND_DISPLAY=wayland-1
+# OpenClaw's temp root (uploads, downloads, screenshots) on the data disk: the snap Chromium has a private /tmp and could not
+# read files staged there; /tmp/openclaw is kept root-owned so OpenClaw uses $TMPDIR/openclaw-<uid> instead.
+Environment=TMPDIR=/mnt/lima-claudebot-computer-data/tmp
 Environment=PATH=/opt/node/bin:/usr/bin:/bin
 ExecStart=/opt/node/bin/node --max-old-space-size=2048 /opt/node/lib/node_modules/openclaw/dist/index.js --profile computer gateway --port 18789
 Restart=always

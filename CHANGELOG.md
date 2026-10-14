@@ -11,6 +11,7 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Existing installs: run `claudebot update` to pick up these settings.
 
 ### Added
+- Assistants can know your name (Settings key `owner_name`, unset by default): work is made for you, and "Chief, …" reads as you talking to the Chief of Staff.
 - **Assistants keep going until the goal is done.** An assistant can schedule its next round on the same goal (up to 6 per request). After a failed round it must try a different approach, and it checks its own result before stopping.
 - **Team skills.** Assistants save what they learn about a site to `Skills/<site>.md` in the memory vault, and every turn reads the skills for the sites in play.
 - **Verified job applications.** An application counts as submitted only when the site's confirmation page shows it: ClaudeBot saves a receipt screenshot and a verified record, and anything else is reported as "NOT submitted". A reply that claims a submission without one is flagged.
@@ -33,6 +34,9 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Assistants can open zip and tar archives you give them: files are extracted into a new folder inside the task. Links, paths that escape the folder, and oversized archives are refused. Documents and PDFs also get text copies the assistants can read.
 
 ### Fixed
+- The honesty check flags only real submission claims ("I submitted…") and accepts honest negatives ("nothing was applied for") and a teammate's verified submit.
+- In the private computer, uploads reach the site (the browser's private /tmp could not read staged files), and the browser keeps track of the task's own tab.
+- Upload results say plainly that the page holds the file.
 - Work goes to the assistant you named: the lead hands each part to exactly that assistant (by name or first name), and an unknown or switched-off assistant is refused instead of the work silently going to someone else.
 - File uploads really attach: ClaudeBot sets the file field directly, falls back to the file chooser, and only reports success when the page holds the file.
 - Pages that time out the page reader fall back to the accessibility tree.

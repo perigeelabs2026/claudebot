@@ -12,7 +12,7 @@ import { ChatStore, ChatRuleError } from '../chat/store.ts';
 import { Assistants, ownerAsked, CHAT_CREATE_DAILY_LIMIT } from '../chat/assistants.ts';
 import { setPriority, saveReport } from '../cos/report.ts';
 import { readArtifact, artifactFile } from './artifact-access.ts';
-import { toComputer, fromComputer } from '../runtime/computer.ts';
+import { toComputer, fromComputer, computerTmpRoot } from '../runtime/computer.ts';
 import { searchScoped } from '../search/index.ts';
 import { delegationBudget, waitForChildren, childStatus } from '../coord/delegation.ts';
 import { runCheck, allowedRepo, type CheckProfile } from '../worker/project-check.ts';
@@ -352,7 +352,13 @@ export class BrokerApi {
         if (reuse) { const focus = await runProbe(this.cfg.openclawBin, [...args, 'focus', existing!], { timeoutMs: 20_000, label: 'browser.focus', env, registryDir: path.join(this.cfg.runDir, 'probes') }); if (!focus.ok) this.store.event(cap.job_id, actor, 'browser.tab', { note: 'could not focus the task tab; opening a new one', detail: (focus.stderr || focus.stdout).slice(0, 120) }); }
         const opened = await runProbe(this.cfg.openclawBin, [...args, reuse ? 'navigate' : 'open', url], { timeoutMs: 60_000, label: reuse ? 'browser.navigate' : 'browser.open', env, registryDir: path.join(this.cfg.runDir, 'probes') });
         if (!opened.ok) { mark('failed'); return { ok: false, text: `could not open the page: ${(opened.stderr || opened.stdout).replace(/\s+/g, ' ').slice(0, 200)}` }; }
-        if (!reuse) { const after = await targets(); const id = newTabId(before, after); if (id) { recordTaskTab(db, cap.job_id, id); this.store.event(cap.job_id, actor, 'browser.tab', { opened: id, url }); } }
+        if (!reuse) {
+          // The tab OpenClaw opened (its --json answer names it; it may reuse a blank tab, so a before/after diff can miss it).
+          let id: string | null = null; try { const j = JSON.parse(opened.stdout) as { targetId?: string; id?: string }; id = j.targetId ?? j.id ?? null; } catch { /* older output */ }
+          if (!id) { const after = await targets(); id = newTabId(before, after); }
+          if (id) { recordTaskTab(db, cap.job_id, id); this.store.event(cap.job_id, actor, 'browser.tab', { opened: id, url }); }
+          else this.store.event(cap.job_id, actor, 'browser.tab', { note: 'could not tell which tab was opened', url });
+        }
         await new Promise((r) => setTimeout(r, Number(process.env.CLAUDEBOT_BROWSER_SETTLE_MS ?? 2500)));
         mark('reading');
         const snap = await runProbe(this.cfg.openclawBin, [...args, 'snapshot', '--format', 'aria'], { timeoutMs: 60_000, label: 'browser.snapshot', env, maxBuffer: 8 * 1024 * 1024, registryDir: path.join(this.cfg.runDir, 'probes') });
@@ -502,9 +508,10 @@ export class BrokerApi {
         // uploads folder (the only place its browser accepts files from), per task, then attached to the file field or chooser at ref.
         const f = artifactFile(db, cap.job_id, String(a.artifact_id ?? ''));
         if (!f.ok) return { ok: false, text: `Not attached: ${f.reason}.` };
-        const stage = path.join('/tmp/openclaw/uploads', cap.job_id.replace(/[^a-z0-9-]/gi, '')); fs.mkdirSync(stage, { recursive: true, mode: 0o700 });
-        const staged = path.join(stage, path.basename(f.path)); fs.writeFileSync(staged, f.buf, { mode: 0o600 });
-        if ((this.cfg as { browserInComputer?: boolean }).browserInComputer) { const cp = await toComputer(staged, f.buf); if (!cp.ok) return { ok: false, text: `Not attached: could not hand the file to the assistants' computer (${cp.error}).` }; }
+        const inVmU = (this.cfg as { browserInComputer?: boolean }).browserInComputer; const jobDir = cap.job_id.replace(/[^a-z0-9-]/gi, '');
+        let staged: string;
+        if (inVmU) { staged = path.posix.join(await computerTmpRoot(), 'uploads', jobDir, path.basename(f.path)); const cp = await toComputer(staged, f.buf); if (!cp.ok) return { ok: false, text: `Not attached: could not hand the file to the assistants' computer (${cp.error}).` }; }
+        else { const stage = path.join('/tmp/openclaw/uploads', jobDir); fs.mkdirSync(stage, { recursive: true, mode: 0o700 }); staged = path.join(stage, path.basename(f.path)); fs.writeFileSync(staged, f.buf, { mode: 0o600 }); }
         // Set the file input directly first (works for hidden inputs behind "Attach" buttons); fall back to clicking the chooser.
         // Then check the page really holds the file, so "attached" is never claimed for a stuck upload.
         const fname = path.basename(staged);
@@ -519,7 +526,7 @@ export class BrokerApi {
         const name = (String(a.filename ?? 'download.bin').replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '') || 'download.bin').slice(0, 120);
         const dir = path.join(path.resolve(cap.workspace), 'downloads'); fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
         const dest = path.join(dir, name); if (fs.existsSync(dest)) return { ok: false, text: `downloads/${name} already exists; choose another filename` };
-        const inVm = (this.cfg as { browserInComputer?: boolean }).browserInComputer; const vmDest = `/tmp/openclaw/downloads/${cap.job_id.replace(/[^a-z0-9-]/gi, '')}/${name}`;
+        const inVm = (this.cfg as { browserInComputer?: boolean }).browserInComputer; const vmDest = inVm ? path.posix.join(await computerTmpRoot(), 'downloads', cap.job_id.replace(/[^a-z0-9-]/gi, ''), name) : '';
         r = await this.browserRunner(['download', req.ref!, inVm ? vmDest : dest, ...tgt, '--timeout-ms', '60000'], 'browser.download', 90_000);
         if (inVm && r.ok) { const back = await fromComputer(vmDest, dest); if (!back.ok) return { ok: false, text: `the download finished in the assistants' computer but could not be copied back (${back.error})` }; }
         if (r.ok && fs.existsSync(dest)) {
@@ -535,7 +542,7 @@ export class BrokerApi {
     }
     this.store.event(cap.job_id, actor, r.ok ? 'browser.act' : 'browser.act_failed', { action: req.action, ...elementLog, url: urlNow, why: verdict.reason, ...extra });
     if (!r.ok) return { ok: false, text: `the browser could not ${req.action}: ${(r.stderr || r.stdout).replace(/\s+/g, ' ').slice(0, 200)}` };
-    return { ok: true, text: `${req.action} done (${verdict.reason}).${extra.artifact_id ? ` Saved as artifact ${extra.artifact_id} (${extra.bytes} bytes).` : ''} Take a snapshot to see the page now.`, data: extra };
+    return { ok: true, text: `${req.action} done (${verdict.reason}).${req.action === 'download' && extra.artifact_id ? ` Saved as artifact ${extra.artifact_id} (${extra.bytes} bytes).` : ''}${req.action === 'upload' ? ` The page now holds ${String(extra.file)}; click the form's own submit/upload button next.` : ''} Take a snapshot to see the page now.`, data: extra };
   }
 
   private async tabUrl(tab: string): Promise<string> { try { const r = await fetch(`http://127.0.0.1:${this.cfg.browserCdpPort}/json`, { signal: AbortSignal.timeout(1500) }); const t = ((await r.json()) as Array<{ id: string; url: string }>).find((x) => x.id === tab); return t?.url ?? 'unknown page'; } catch { return 'unknown page'; } }

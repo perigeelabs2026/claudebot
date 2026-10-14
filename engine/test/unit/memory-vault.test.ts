@@ -57,7 +57,7 @@ test('team skills: a saved method is shown to whoever works on that site next; t
   const v = fresh();
   assert.equal(v.saveSkill({ topic: 'https://job-boards.greenhouse.io', title: 'Greenhouse apply', steps: '1. Fill fields\n2. Attach via the hidden file input', by: 'researcher' }).ok, true);
   assert.match(v.skillsFor('open https://job-boards.greenhouse.io/britive/jobs/1 and apply'), /hidden file input/);
-  assert.match(v.skillsFor('apply on Greenhouse for Britive'), /hidden file input/, 'the site name alone matches');
+  assert.match(v.skillsFor('apply on Greenhouse for Northwind'), /hidden file input/, 'the site name alone matches');
   assert.equal(v.skillsFor('write a cover letter'), '');
   v.saveSkill({ topic: 'job-boards.greenhouse.io', title: 'Greenhouse apply v2', steps: '1. Country first\n2. Attach via input', by: 'researcher' });
   assert.match(v.skillsFor('greenhouse'), /Country first/); assert.ok(!v.skillsFor('greenhouse').includes('Fill fields'), 'only the newest version is shown');

@@ -483,13 +483,15 @@ test('groups: the lead creates and renames groups on the owner\'s words; purpose
 });
 
 test('honesty check: a reply that says an application was submitted, without a verified confirmation, gets a plain note under it; "not submitted" does not', async () => {
-  const s = setup([{ kind: 'ok', text: 'Done! I submitted the Britive application.' }, { kind: 'ok', text: 'Britive is not submitted yet: the upload failed.' }]);
+  const s = setup([{ kind: 'ok', text: 'Done! I submitted the Northwind application.' }, { kind: 'ok', text: 'Northwind is not submitted yet: the upload failed.' }, { kind: 'ok', text: 'Research only: three roles listed, and nothing was applied for.' }, { kind: 'ok', text: 'Three roles found, with links, and applied to none.' }]);
   const c = s.chat.create({ workspace_id: s.ws.id });
-  const t1 = s.chat.send(c.id, 'apply to Britive', s.defs).job; await run(s, t1.id);
+  const t1 = s.chat.send(c.id, 'apply to Northwind', s.defs).job; await run(s, t1.id);
   const notes = () => s.chat.messages(c.id).filter((m) => (m.meta as { honesty_check?: boolean }).honesty_check);
   assert.equal(notes().length, 1); assert.match(notes()[0].content, /not yet submitted/);
   const t2 = s.chat.send(c.id, 'status?', s.defs).job; await run(s, t2.id);
   assert.equal(notes().length, 1, 'an honest "not submitted" gets no note');
+  const t3 = s.chat.send(c.id, 'and the practice run?', s.defs).job; await run(s, t3.id); assert.equal(notes().length, 1, '"nothing was applied for" is honest too (rehearsal 2 false alarm)');
+  const t4 = s.chat.send(c.id, 'and now?', s.defs).job; await run(s, t4.id); assert.equal(notes().length, 1, '"applied to none" is honest (rehearsal 5)');
 });
 
 test('the lead switches an assistant off and back on, only on the owner\'s words (morning restart after a pause)', async () => {
@@ -509,4 +511,10 @@ test('delegation goes to the assistant the lead names (by first name), and a swi
   s.defs.setAgentEnabled('builder', false, 'owner');
   const off = await s.broker.call(cap(t1, ['create_job']), 'create_job', { kind: 'document.create', objective: 'Another doc' }); assert.equal(off.ok, false); assert.match(off.text, /switched off/);
   const nobody = await s.broker.call(cap(t1, ['create_job']), 'create_job', { kind: 'document.create', objective: 'x', agent_role: 'Zed' }); assert.equal(nobody.ok, false); assert.match(nobody.text, /no assistant called "Zed"/);
+});
+
+test('every turn knows the owner by name, so "Abdul, make a resume" is for the owner, not for Abdul (rehearsal 4 finding)', async () => {
+  const s = setup([{ kind: 'ok', text: 'On it.' }]); new Settings(s.db).set('owner_name', "Sam Rivera", 'test');
+  const c = s.chat.create({ workspace_id: s.ws.id }); const t1 = s.chat.send(c.id, 'Abdul, make me a resume', s.defs).job; await run(s, t1.id);
+  assert.match(s.runtime.history[0].prompt, /The owner is Sam Rivera; when the owner writes "Chief, …" they are talking to you|The owner is Sam Rivera; when the owner writes "[^"]+, …" they are talking to you/);
 });

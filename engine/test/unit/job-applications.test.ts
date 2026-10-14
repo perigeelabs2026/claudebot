@@ -71,12 +71,12 @@ test('record_application: only a page that confirms the submission is recorded (
 
 test('goal loop: continue_working schedules the next round with the goal; after a failure it needs a different approach; never the same twice; capped at 6', async () => {
   const s = setupBroker(); const c = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] });
-  const t1 = s.chat.send(c.id, '@researcher submit the Britive application', s.defs).job;
+  const t1 = s.chat.send(c.id, '@researcher submit the Northwind application', s.defs).job;
   const r1 = await s.call(t1, 'continue_working', { next_step: 'retry the upload', last_attempt_failed: true });
   assert.equal(r1.ok, false); assert.match(r1.text, /what you will do differently/);
   const r2 = await s.call(t1, 'continue_working', { next_step: 'attach the PDF', what_changed: 'use the hidden file input directly instead of the Attach button', last_attempt_failed: true });
   assert.equal(r2.ok, true, r2.text); const j2 = s.store.get((r2.data as { job_id: string }).job_id)!;
-  assert.equal(j2.agent_role, 'researcher'); assert.match(s.chat.messages(c.id).find((m) => m.job_id === j2.id && m.kind === 'wake')!.content, /Goal: @researcher submit the Britive application[\s\S]*hidden file input/);
+  assert.equal(j2.agent_role, 'researcher'); assert.match(s.chat.messages(c.id).find((m) => m.job_id === j2.id && m.kind === 'wake')!.content, /Goal: @researcher submit the Northwind application[\s\S]*hidden file input/);
   const r3 = await s.call(j2, 'continue_working', { next_step: 'attach again', what_changed: 'Use the hidden file input directly instead of the Attach button!', last_attempt_failed: true });
   assert.equal(r3.ok, false); assert.match(r3.text, /already tried exactly that/);
   let cur = j2; for (let i = 2; i <= 6; i++) { const r = await s.call(cur, 'continue_working', { next_step: `step ${i}`, what_changed: `approach number ${i}`, last_attempt_failed: true }); assert.equal(r.ok, true, r.text); cur = s.store.get((r.data as { job_id: string }).job_id)!; }
