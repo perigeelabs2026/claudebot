@@ -27,14 +27,14 @@ export function conversationTitle(firstMessage: string): string {
 export function progressWording(note: string): string {
   const n = String(note ?? '');
   if (/^acp session/.test(n)) return 'Connecting to Claude';
-  if (n === 'run admitted') return 'Claude has started this step';
-  if (/^waiting \(/.test(n)) return 'Claude is working on this step';
-  if (n === 'assistant text' || /^agent (assistant|stream|item)/.test(n)) return 'Claude is writing';
-  if (/^agent tool/.test(n)) return 'Claude is using a tool';
-  if (/^agent plan/.test(n)) return 'Claude is planning';
-  if (/^agent compaction/.test(n)) return 'Claude is tidying its context';
-  if (/^agent (lifecycle|run_status|usage)/.test(n)) return 'Claude is working on this step';
-  if (/^agent /.test(n)) return 'Claude is working on this step';
+  if (n === 'run admitted') return 'Started this step';
+  if (/^waiting \(/.test(n)) return 'Working on this step';
+  if (n === 'assistant text' || /^agent (assistant|stream|item)/.test(n)) return 'Writing';
+  if (/^agent tool/.test(n)) return 'Using a tool';
+  if (/^agent plan/.test(n)) return 'Planning';
+  if (/^agent compaction/.test(n)) return 'Tidying up its notes';
+  if (/^agent (lifecycle|run_status|usage)/.test(n)) return 'Working on this step';
+  if (/^agent /.test(n)) return 'Working on this step';
   if (n === 'simulated turn started') return 'Simulated step started';
   if (/^running stage /.test(n)) return `Starting step "${n.slice(14)}"`;
   if (/^resume/.test(n)) return 'Resuming from saved progress';
@@ -45,7 +45,7 @@ export function progressWording(note: string): string {
 export function eventWording(type: string, detail: Record<string, unknown>): string | null {
   const d = detail ?? {};
   switch (type) {
-    case 'tool.called': return ({ write_artifact: 'Saving a result', browser_read: 'Reading a web page', create_job: 'Assigning specialist work', request_approval: 'Asking for your decision', read_artifact: 'Reading saved work', list_jobs: 'Checking task progress', add_evidence: 'Recording a source', report_progress: 'Reporting progress', search_evidence: 'Searching saved evidence', read_memory_rules: 'Reading your rules', read_records: 'Reading records', upsert_record: 'Updating a record', propose_memory_change: 'Proposing a rule change', run_allowlisted: 'Running an allowed command' } as Record<string, string>)[String(d.tool)] ?? `Using ${String(d.tool ?? 'a tool').replaceAll('_', ' ')}`;
+    case 'tool.called': return ({ write_artifact: 'Saving a result', browser_read: 'Reading a web page', create_job: 'Assigning specialist work', request_approval: 'Asking for your decision', read_artifact: 'Reading saved work', list_jobs: 'Checking task progress', add_evidence: 'Recording a source', report_progress: 'Reporting progress', search_evidence: 'Searching saved evidence', read_memory_rules: 'Reading your rules', read_records: 'Reading records', upsert_record: 'Updating a record', propose_memory_change: 'Proposing a rule change', run_allowlisted: 'Running an allowed command', browser_act: 'Using the browser', record_application: 'Recording an application', render_document: 'Making a document', continue_working: 'Checking the work and continuing', save_skill: 'Saving a method that worked', post_update: 'Posting an update', read_conversation: 'Reading the chat record', read_message: 'Reading a message', hand_off: 'Handing off to a teammate', remember: 'Saving a lesson' } as Record<string, string>)[String(d.tool)] ?? `Using ${String(d.tool ?? 'a tool').replaceAll('_', ' ')}`;
     case 'tool.refused': return `A tool was refused (${String(d.reason ?? d.tool ?? '')})`;
     case 'tool.failed': return 'A tool could not run';
     case 'agent.progress': return String(d.note ?? 'Progress note');
@@ -55,7 +55,7 @@ export function eventWording(type: string, detail: Record<string, unknown>): str
     case 'job.resumed': return 'Resumed from saved progress';
     case 'lease.acquired': return 'Picked up by a worker';
     case 'lease.reclaimed': return 'Recovered after a worker stopped';
-    case 'session.closed': return 'Released the Claude session (saved work kept)';
+    case 'session.closed': return 'Finished this session (work saved)';
     case 'browser.read': return `Read ${String(d.url ?? 'a page')}`;
     case 'approval.requested': return `Asked for your decision (${String(d.action_kind)})`;
     case 'approval.approved': return 'You approved';

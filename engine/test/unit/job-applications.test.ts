@@ -112,3 +112,12 @@ test('dry-run projects never submit: the final click is stopped even with the jo
   (s.broker as unknown as { tabUrl: () => Promise<string> }).tabUrl = async () => 'https://job-boards.greenhouse.io/x/jobs/1';
   const r = await s.call(turn, 'browser_act', { action: 'click', ref: 'e9' }); assert.equal(r.ok, false); assert.match(r.text, /Dry run: stopped before "Submit application"/); assert.equal(clicks.length, 0);
 });
+
+test('record_application reads a thank-you shown inside an embedded application frame (Northwind Labs: "Thank you Sam! Your application has been submitted")', async () => {
+  const s = setupBroker(); const c = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] });
+  const turn = s.chat.send(c.id, '@researcher apply to Northwind Labs', s.defs).job;
+  const { recordTaskTab } = await import('../../src/browser/tabs.ts'); recordTaskTab(s.db, turn.id, 'tab-2');
+  (s.broker as unknown as { browserRunner: (a: string[]) => Promise<{ ok: boolean; stdout: string; stderr: string }> }).browserRunner = async (args) => ({ ok: true, stdout: args[0] === 'evaluate' ? 'Careers | Northwind Labs\nOpen roles' : args[0] === 'snapshot' ? '- iframe:\n  - heading "Thank you Sam! Your application has been submitted."' : '', stderr: '' });
+  const ok = await s.call(turn, 'record_application', { company: 'Northwind Labs', role: 'Channel Account Manager' });
+  assert.equal(ok.ok, true, ok.text); assert.match(ok.text, /Recorded and verified: Northwind Labs/);
+});

@@ -556,3 +556,17 @@ test('a note sent to an assistant that is turned off waits and is delivered when
   const texts = s.chat.messages(d.id).map((m) => m.content).join('\n');
   assert.match(texts, /On it: finishing the Priority A applications/); assert.ok(!/could not reply|agent scout/.test(texts));
 });
+
+test('read_conversation: an assistant reads the whole record of a chat it belongs to (decisions included) instead of asking the owner to export it; non-members are refused', async () => {
+  const s = setup(); addAssistant(s, 'scout', 'Scout', 'Job boards'); addAssistant(s, 'ben', 'Ben', 'Writer');
+  const g = s.chat.create({ workspace_id: s.ws.id, type: 'group', title: 'All right, everybody', members: ['coordinator', 'scout'] });
+  const turn = s.chat.send(g.id, '@Scout apply to Northwind', s.defs).job;
+  s.chat.add({ conversation_id: g.id, role: 'assistant', sender: 'scout', content: 'Northwind: Submit clicked, checking the confirmation.' });
+  const ap = new ApprovalStore(s.db).request({ job_id: turn.id, action_kind: 'submit', target: 'Northwind application', content: 'Submit the Northwind form' });
+  s.chat.add({ conversation_id: g.id, role: 'system', kind: 'decision', content: 'decision', approval_id: ap.id, job_id: turn.id });
+  const d = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['scout'] }); const mine = s.chat.send(d.id, 'Make the Oct 13 transcript', s.defs).job;
+  const r = await s.broker.call(cap(mine, ['read_conversation']), 'read_conversation', { conversation: 'All right, everybody' });
+  assert.equal(r.ok, true); assert.match(r.text, /Owner: @Scout apply to Northwind/); assert.match(r.text, /Scout: Northwind: Submit clicked/); assert.match(r.text, /decision: submit Northwind application → pending/); assert.match(r.text, /\[end of conversation\]/);
+  const dBen = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['ben'] }); const benJob = s.chat.send(dBen.id, 'read it', s.defs).job;
+  const no = await s.broker.call(cap(benJob, ['read_conversation']), 'read_conversation', { conversation: g.id }); assert.equal(no.ok, false);
+});

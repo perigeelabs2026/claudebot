@@ -241,10 +241,12 @@ export class BrokerApi {
         if (!tab) return { ok: false, text: 'Not recorded: this task has no browser tab. Submit in your tab first, then record it while the confirmation is showing.' };
         const company = String(a.company ?? '').trim().slice(0, 120); const role = String(a.role ?? '').trim().slice(0, 160); if (!company || !role) return { ok: false, text: 'company and role are required' };
         const ev = await this.browserRunner(['evaluate', '--fn', '() => (document.title + "\\n" + location.href + "\\n" + document.body.innerText).slice(0, 20000)', '--target-id', tab], 'browser.evaluate', 30_000);
-        const pageText = ev.stdout ?? ''; const urlNow = await this.tabUrl(tab);
+        let pageText = ev.stdout ?? ''; const urlNow = await this.tabUrl(tab);
+        // Some career pages show the form (and its thank-you) inside an embedded frame that page text cannot reach; the accessibility snapshot includes frames.
+        if (!/(thank|submitted|received)/i.test(pageText)) { const snap = await this.browserRunner(['snapshot', '--format', 'aria', '--target-id', tab], 'browser.snapshot', 30_000).catch(() => null); if (snap?.ok) pageText += `\n${snap.stdout ?? ''}`; }
         const CONFIRM = /(thank(s| you)[^.\n]{0,40}(for )?(apply|application|your interest|submitting))|(application (has been |was )?(submitted|received|sent|complete))|(we('| ha)ve received your application)|(successfully (submitted|applied))|(your application is (in|complete))|(applied\s*[✓✔]?\s*$)/im;
         const ERROR = /(is required|please (fix|correct|complete)|there (was|were) (an )?(error|problem)s?|invalid|captcha|verify you are human)/i;
-        if (!ev.ok || !CONFIRM.test(pageText) || (ERROR.test(pageText) && !/thank/i.test(pageText))) return { ok: false, text: `Not recorded: the page in your tab (${urlNow}) does not show an application confirmation${ERROR.test(pageText) ? ' and shows an error or required field' : ''}. It is NOT submitted. Read the page, fix what it asks for (or try another way to attach the file), submit again, then record it. Never tell the owner it was submitted until this succeeds.` };
+        if (!pageText || !CONFIRM.test(pageText) || (ERROR.test(pageText) && !/thank/i.test(pageText))) return { ok: false, text: `Not recorded: the page in your tab (${urlNow}) does not show an application confirmation${ERROR.test(pageText) ? ' and shows an error or required field' : ''}. It is NOT submitted. Read the page, fix what it asks for (or try another way to attach the file), submit again, then record it. Never tell the owner it was submitted until this succeeds.` };
         const conf = (pageText.split('\n').find((l) => CONFIRM.test(l)) ?? '').trim().slice(0, 300);
         let shotArt: string | null = null;
         try {
@@ -259,6 +261,22 @@ export class BrokerApi {
         return { ok: true, text: `Recorded and verified: ${company} – ${role}. Confirmation on the page: "${conf}". ${shotArt ? 'The receipt screenshot shows as a file card under your reply.' : ''} You may now tell the owner it was submitted.`, data: { record_id: recId, receipt: shotArt } };
       }
       // ---- conversation tools (chat replies) ----
+      case 'read_conversation': {   // the durable record of a chat the assistant belongs to (approvals and Telegram delivery included); never a reason to ask the owner to export a chat
+        const me = this.store.get(cap.job_id); const want = String(a.conversation ?? '').trim();
+        const conv = (want ? (db.prepare('SELECT id, title, type FROM conversations WHERE id = ? OR title = ? ORDER BY updated_at DESC LIMIT 1').get(want, want) ?? db.prepare("SELECT id, title, type FROM conversations WHERE title LIKE ? ORDER BY updated_at DESC LIMIT 1").get(`%${want}%`)) : (me?.conversation_id ? db.prepare('SELECT id, title, type FROM conversations WHERE id = ?').get(me.conversation_id) : undefined)) as { id: string; title: string | null; type: string } | undefined;
+        if (!conv) return { ok: false, text: want ? `no conversation called "${want}"` : 'this task is not linked to a conversation; pass conversation' };
+        const role = me?.agent_role ?? cap.role; const member = !!db.prepare('SELECT 1 FROM conversation_members WHERE conversation_id = ? AND agent_id = ?').get(conv.id, role);
+        if (!member && role !== 'coordinator') return { ok: false, text: 'you are not a member of that conversation (ask the lead assistant)' };
+        const after = Math.max(0, Math.floor(Number(a.after_seq ?? 0))); const limit = Math.min(200, Math.max(1, Math.floor(Number(a.limit ?? 200))));
+        const rows = db.prepare(`SELECT m.seq, m.created_at, m.role, m.sender, m.kind, m.content, m.artifact_id, m.approval_id, ap.status AS ap_status, ap.decided_by AS ap_by, ap.action_kind AS ap_kind, ap.target AS ap_target, (SELECT o.kind FROM telegram_outbox o WHERE o.message_id = m.id LIMIT 1) AS tg
+          FROM messages m LEFT JOIN approvals ap ON ap.id = m.approval_id WHERE m.conversation_id = ? AND m.seq > ? ORDER BY m.seq LIMIT ?`).all(conv.id, after, limit) as Array<Record<string, string | number | null>>;
+        const names = new Map((db.prepare('SELECT id, name FROM agent_definitions').all() as Array<{ id: string; name: string }>).map((x) => [x.id, x.name]));
+        const lines = rows.map((r) => { const who = r.role === 'owner' ? 'Owner' : r.role === 'assistant' ? names.get(String(r.sender)) ?? String(r.sender) : 'ClaudeBot';
+          const extra = [r.approval_id ? `decision: ${r.ap_kind ?? ''} ${r.ap_target ?? ''} → ${r.ap_status ?? 'unknown'}${r.ap_by ? ` by ${r.ap_by}` : ''}` : '', r.artifact_id ? `file ${r.artifact_id}` : '', r.tg ? `Telegram: ${r.tg}` : ''].filter(Boolean).join(' · ');
+          return `#${r.seq} [${r.created_at}] ${who}${r.kind && r.kind !== 'text' ? ` (${r.kind})` : ''}: ${String(r.content ?? '')}${extra ? `\n   (${extra})` : ''}`; });
+        const last = rows.length ? Number(rows[rows.length - 1].seq) : null; const more = rows.length === limit;
+        return { ok: true, text: `Conversation "${conv.title ?? conv.id}" (${conv.type}), messages after #${after}:\n${lines.join('\n')}${more ? `\n[more: read_conversation after_seq ${last}]` : '\n[end of conversation]'}`, data: { conversation_id: conv.id, count: rows.length, last_seq: last, more } };
+      }
       case 'read_message': {   // the full text of a long message in this conversation (context lines never cut silently)
         const me = this.store.get(cap.job_id); const msg = new ChatStore(db, this.store).message(String(a.id ?? ''));
         if (!me?.conversation_id || !msg || msg.conversation_id !== me.conversation_id) return { ok: false, text: 'that message is not in this conversation' };

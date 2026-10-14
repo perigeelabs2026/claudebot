@@ -30,7 +30,7 @@ test('wording: titles strip implementation clauses; progress notes read as plain
   assert.equal(taskTitle('Open https://example.com and record the main heading. Read only: do not sign in.'), 'Open https://example.com and record the main heading');
   assert.ok(taskTitle('x'.repeat(200)).length <= 90);
   assert.equal(conversationTitle('Please write a short customer welcome note, about 120 words, for a fictional dog-walking service, and save it as welcome-note.md.'), 'Write a short customer welcome note, about…');
-  assert.equal(progressWording('agent acp'), 'Claude is working on this step'); assert.equal(progressWording('agent tool'), 'Claude is using a tool'); assert.equal(progressWording('assistant text'), 'Claude is writing'); assert.equal(progressWording('running stage write'), 'Starting step "write"');
+  assert.equal(progressWording('agent acp'), 'Working on this step'); assert.equal(progressWording('agent tool'), 'Using a tool'); assert.equal(progressWording('assistant text'), 'Writing'); assert.equal(progressWording('running stage write'), 'Starting step "write"');
   assert.equal(eventWording('tool.called', { tool: 'write_artifact' }), 'Saving a result'); assert.equal(eventWording('lease.acquired', {}), 'Picked up by a worker'); assert.equal(eventWording('checkpoint.written', { stage: 'write', phase: 'before' }), 'Started step "write"');
 });
 

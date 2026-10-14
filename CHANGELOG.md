@@ -11,6 +11,7 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Existing installs: run `claudebot update` to pick up these settings.
 
 ### Added
+- Assistants can read the full record of a chat they belong to (the lead can read any), instead of asking you to export it.
 - Assistants remember their other conversations: each turn sees recent messages from your other chats with them (a direct chat knows what went wrong in the group chat).
 - Your Mac stays awake while assistants have work, and can sleep again when they are idle.
 - In the private computer each assistant works in its own browser window on its own screen (3 screens, one shared sign-in). The Browser page shows All screens; a chat's browser pane shows that assistant's screen.
@@ -40,6 +41,9 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Assistants can open zip and tar archives you give them: files are extracted into a new folder inside the task. Links, paths that escape the folder, and oversized archives are refused. Documents and PDFs also get text copies the assistants can read.
 
 ### Fixed
+- Plain progress words everywhere ("Working on this step", "Using the browser"); ClaudeBot's instruction notes fold into one line; statuses read the same in every view; Members fits at 1024 px and the lead cannot be removed.
+- Verified applications also recognise a thank-you shown inside an embedded application frame.
+- A turn resumed after a restart carries on instead of stopping to ask you.
 - The morning report is built from live tasks and verified applications, and "Needs you" only lists what truly needs you (passwords, codes, CAPTCHAs, personal answers, spending, approvals). Things the team can fix itself are listed separately.
 - A note sent to a turned-off assistant waits and is delivered when it is turned back on.
 - Office desk labels stay in their own column and say "Working"; Members shows the same live status as the Office; the header says "N waiting on a teammate".

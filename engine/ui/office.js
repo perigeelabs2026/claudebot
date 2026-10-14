@@ -73,7 +73,7 @@ function clip(s, n) { s = String(s || ''); return s.length > n ? s.slice(0, n - 
 export function statusText(a, task) {
   if (a.status === 'disabled') return 'Switched off';
   if (!task) return a.status === 'idle' ? 'Available' : STATUS_LABEL[a.status];
-  if (task.status === 'working') { const p = String(task.progress || '').trim(); return p && !/^Claude (is|has) /i.test(p) ? `Working · ${p}` : 'Working'; }
+  if (task.status === 'working') { const p = String(task.progress || '').trim(); return p && !/^Claude (is|has) |^(Working on|Started) this step$/i.test(p) ? `Working · ${p}` : 'Working'; }
   if (task.status === 'checking') return 'Checking status (no fresh heartbeat)';
   if (task.status === 'blocked_on') return `Waiting on ${task.waiting_on_tasks.map((w) => w.assistant).join(', ')}`;
   if (task.status === 'queued') return 'Waiting to start';
