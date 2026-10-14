@@ -348,7 +348,7 @@ export class ChatStore {
         FROM messages m JOIN conversations c ON c.id = m.conversation_id JOIN workspaces w ON w.id = c.workspace_id
         WHERE m.conversation_id <> ? AND m.created_at >= ? AND EXISTS (SELECT 1 FROM conversation_members cm WHERE cm.conversation_id = c.id AND cm.agent_id = ?)
           AND COALESCE(json_extract(w.policies, '$.telegram'), 1) <> 0 AND COALESCE(json_extract(w.policies, '$.dry_run'), 0) = 0
-          AND (m.role = 'owner' OR (m.role = 'assistant' AND (m.sender = ? OR m.sender = 'coordinator')) OR m.kind IN ('result','blocker')))
+          AND (m.role = 'owner' OR (m.role = 'assistant' AND (m.sender = ? OR m.sender = 'coordinator')) OR m.kind IN ('result','blocker') OR json_extract(m.meta, '$.mirror_of') IS NOT NULL))
       WHERE rn <= ? ORDER BY created_at, seq`).all(exceptConversationId, since, agentId, agentId, perConv) as Array<{ id: string; seq: number; role: string; sender: string; kind: string; content: string; artifact_id: string | null; created_at: string; conversation_id: string; title: string | null; type: string }>;
     if (!rows.length) return '';
     const names = new Map((this.db.prepare('SELECT id, name FROM agent_definitions').all() as Array<{ id: string; name: string }>).map((a) => [a.id, a.name]));
@@ -364,7 +364,7 @@ export class ChatStore {
   /** What other members said in a group since this assistant last spoke (each member's session sees only its own turns). */
   groupContext(conversationId: string, agentId: string, beforeSeq: number): string {
     const last = this.db.prepare("SELECT max(seq) AS s FROM messages WHERE conversation_id = ? AND role = 'assistant' AND sender = ? AND seq < ?").get(conversationId, agentId, beforeSeq) as { s: number | null };
-    const rows = this.db.prepare("SELECT id, role, sender, kind, content, artifact_id FROM messages WHERE conversation_id = ? AND seq > ? AND seq < ? AND (role IN ('owner','assistant') OR kind IN ('result','delegation')) ORDER BY seq DESC LIMIT 40").all(conversationId, last.s ?? 0, beforeSeq) as Array<{ role: string; sender: string; kind: string; content: string }>;
+    const rows = this.db.prepare("SELECT id, role, sender, kind, content, artifact_id FROM messages WHERE conversation_id = ? AND seq > ? AND seq < ? AND (role IN ('owner','assistant') OR kind IN ('result','delegation') OR json_extract(meta, '$.mirror_of') IS NOT NULL) ORDER BY seq DESC LIMIT 40").all(conversationId, last.s ?? 0, beforeSeq) as Array<{ role: string; sender: string; kind: string; content: string }>;
     const names = new Map((this.db.prepare('SELECT id, name FROM agent_definitions').all() as Array<{ id: string; name: string }>).map((a) => [a.id, a.name]));
     return rows.reverse().filter((r) => !(r.role === 'assistant' && r.sender === agentId)).map((r) => `${r.role === 'owner' ? 'Owner' : r.role === 'assistant' ? (names.get(r.sender) ?? r.sender) : 'System'}: ${this.contextText(r as never)}`).join('\n');
   }
@@ -443,7 +443,7 @@ export class ChatStore {
 
   /** Transcript for a lead-assistant session that has to be (re)started: the recent owner/assistant exchange. */
   transcript(conversationId: string, opts: { limit?: number; beforeSeq?: number; names?: boolean } = {}): string {
-    const rows = (this.db.prepare("SELECT id, role, kind, content, sender, artifact_id FROM messages WHERE conversation_id = ? AND seq < ? AND (role IN ('owner','assistant') OR kind IN ('result','delegation')) ORDER BY seq DESC LIMIT ?").all(conversationId, opts.beforeSeq ?? Number.MAX_SAFE_INTEGER, opts.limit ?? 30) as Array<{ role: string; kind: string; content: string; sender: string }>).reverse();
+    const rows = (this.db.prepare("SELECT id, role, kind, content, sender, artifact_id FROM messages WHERE conversation_id = ? AND seq < ? AND (role IN ('owner','assistant') OR kind IN ('result','delegation') OR json_extract(meta, '$.mirror_of') IS NOT NULL) ORDER BY seq DESC LIMIT ?").all(conversationId, opts.beforeSeq ?? Number.MAX_SAFE_INTEGER, opts.limit ?? 30) as Array<{ role: string; kind: string; content: string; sender: string }>).reverse();
     const names = opts.names ? new Map((this.db.prepare('SELECT id, name FROM agent_definitions').all() as Array<{ id: string; name: string }>).map((a) => [a.id, a.name])) : null;
     return rows.map((r) => `${r.role === 'owner' ? 'Owner' : r.role === 'assistant' ? (names ? (names.get(r.sender) ?? r.sender) : 'You') : 'System'}: ${this.contextText(r as never)}`).join('\n');
   }
@@ -511,7 +511,7 @@ export class ChatStore {
     for (const j of this.db.prepare(`SELECT * FROM jobs WHERE conversation_id IS NOT NULL AND kind = '${CHAT_WORKFLOW}' AND state IN ('waiting_for_auth','waiting_for_reset','failed_terminal','cancelled')`).all() as unknown as Job[]) {
       if (has(j.id, 'status', j.state)) continue;
       const name = (this.db.prepare('SELECT name FROM agent_definitions WHERE id = ?').get(j.agent_role) as { name: string } | undefined)?.name ?? 'The assistant';
-      const content = j.state === 'failed_terminal' ? `${name} could not reply. ${j.failure_detail ? 'Reason: ' + j.failure_detail.slice(0, 300) + '.' : ''} ${j.operator_action ?? ''}`.trim() : j.state === 'cancelled' ? 'This request was cancelled.' : `${plainState(j)}. ${j.operator_action ?? ''}`.trim();
+      const content = j.state === 'failed_terminal' ? `${name} couldn't finish this reply${/turned off|disabled/i.test(String(j.failure_detail ?? '')) ? ' while switched off; it waits until they are back on' : ''}. The details are in the task.` : j.state === 'cancelled' ? 'This request was cancelled.' : `${plainState(j)}. ${j.operator_action ?? ''}`.trim();
       this.add({ conversation_id: j.conversation_id!, role: 'system', kind: 'status', content, job_id: j.id, meta: { state: j.state } }); touched.add(j.conversation_id!);
     }
     // 2b. Stop/failure cascade: children of a stopped or failed task cannot report to anyone; stop them too.

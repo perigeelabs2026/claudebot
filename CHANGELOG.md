@@ -50,7 +50,10 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Assistants stop asking "should I…?" about work the team can do themselves: the reply goes back to the assistant to do it, and the question is not pushed to Telegram. Questions about sending, spending, posting or deleting, and requests for passwords, codes or personal answers, still reach you.
 - An assistant can only report "blocked" after trying at least two other routes, unless the block is a CAPTCHA, MFA, a sign-in or a spend.
 - Every delegated task (not only chat turns) gets the try-alternatives-first rule and `lookup_answer`. When a task in a conversation comes back blocked or partial, the lead's automatic report may start one follow-up task to try another route.
-- Telegram now carries only the lead's replies, decisions and files. Other assistants' chatter stays in the app.
+- Telegram now sends only replies to messages you wrote on Telegram, decision cards, verified application receipts and the morning line. Everything else stays in the app's team group.
+- Replies that say something "stays unsent" or "could not be verified" without listing other routes tried go back to the assistant to try other people and sources.
+- Answers and work history the team saves in the private computer (`shared/profile`, `shared/resumes/master`) are copied into your memory folder every 10 minutes, so `lookup_answer` sees them.
+- Work mirrored into the team group now shows in group context and transcripts, and a failed reply shows a plain status instead of a raw error line.
 - The application-answers template now says that a blank line means "answer from the resume or skip", never "ask the owner".
 - Assistants try other people, sources and routes before reporting they are stuck, and list what they tried. Form questions are answered from your resume, memory and a new `shared/profile/application-answers.md` in the private computer (an empty template you fill in once). Reports that hand you answers the team can find are sent back to the assistant.
 - With "Submit job applications without asking" turned on, every field, dropdown and key press inside an application form on a job site is covered, so no more approval cards mid-application. The permission is still off until you turn it on.

@@ -627,3 +627,18 @@ test('an automatic report may start one follow-up when delegated work came back 
   const one = await s.broker.call(cap(auto, ['create_job']), 'create_job', { kind: 'document.create', objective: 'Find another decision-maker and verify their address', agent_role: 'builder' }); assert.equal(one.ok, true, one.text);
   const two = await s.broker.call(cap(auto, ['create_job']), 'create_job', { kind: 'document.create', objective: 'and another', agent_role: 'builder' }); assert.equal(two.ok, false, 'only one follow-up per report');
 });
+
+test('one answer store: the team folder answers sync into the vault and "quota attainment" resolves; a stuck report with no alternatives is bounced; assistants see the team record', async () => {
+  const { syncAnswerBank } = await import('../../src/memory/answer-sync.ts'); const { lookupAnswer } = await import('../../src/memory/answer-bank.ts');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bank-'));
+  const files: Record<string, string> = { 'application-answers.md': '- Quota attainment: 70% across all quarters\n- Stack rank: top 20% of the team\n' };
+  const wrote = await syncAnswerBank(async (f) => files[path.basename(f)] ?? null, dir); assert.deepEqual(wrote, ['Application answers.md']);
+  assert.match(lookupAnswer('What was your quota attainment last year?', dir)[0].text, /70% across all quarters/);
+  assert.deepEqual(await syncAnswerBank(async (f) => files[path.basename(f)] ?? null, dir), [], 'unchanged files are not rewritten');
+  const s = setup([{ kind: 'ok', text: "The hiring manager's address is still not verified, so the Acme follow-up stays unsent." }, { kind: 'ok', text: 'Tried the CEO and the CS team; found and verified one address.' }]); addAssistant(s, 'scout', 'Scout', 'Job boards');
+  const team = s.chat.create({ workspace_id: s.ws.id, type: 'group', title: 'Job Hunters', members: ['coordinator', 'scout'] });
+  const d = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] });
+  const { job } = s.chat.send(d.id, 'Follow up with Acme', s.defs); assert.equal(await run(s, job.id), 'completed');
+  const bounce = s.db.prepare('SELECT objective FROM jobs WHERE idempotency_key = ?').get(`engine:askback:${job.id}`) as { objective: string }; assert.ok(bounce, 'stuck report bounced'); assert.match(bounce.objective, /do not stop at the first blocked path/);
+  assert.match(s.chat.groupContext(team.id, 'scout', 1e9), /From direct chat.* · You: Follow up with Acme/, 'the team record is in group context');
+});

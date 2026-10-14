@@ -40,7 +40,7 @@ const msg = (id: number, chatId: number, text: string, extra: Record<string, unk
 
 
 /** Make a conversation the owner's Telegram chat with the lead (as if he had written there from Telegram). */
-function linkTelegram(s: { db: import('node:sqlite').DatabaseSync; chat: ChatStore }, convId: string) { const m = s.chat.add({ conversation_id: convId, role: 'owner', sender: 'owner', content: 'hi from Telegram' }); s.db.prepare("INSERT INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?, 777, 1, 'inbound', ?)").run(m.id, new Date().toISOString()); }
+function linkTelegram(s: { db: import('node:sqlite').DatabaseSync; chat: ChatStore; store: import('../../src/jobs/store.ts').JobStore }, convId: string): string { const m = s.chat.add({ conversation_id: convId, role: 'owner', sender: 'owner', content: 'hi from Telegram' }); s.db.prepare("INSERT INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?, 777, 1, 'inbound', ?)").run(m.id, new Date().toISOString()); return s.store.create({ idempotency_key: `tg-turn-${m.id}`, kind: 'chat.turn', objective: 'reply', success_contract: {}, agent_role: 'coordinator', workspace_id: null, inputs: { conversation_id: convId, message_id: m.id } } as never, 'owner').job.id; }
 
 test('T1: no token, nothing happens; a malformed token is refused and the token file is private', async () => {
   const f = await fakeTelegram(); const s = setup(f.base);
@@ -136,7 +136,7 @@ test('T6: Telegram is a command channel through the lead: plain decision cards t
   const turn = s.chat.send(c.id, '@researcher email the hiring manager', s.defs).job;
   s.chat.add({ conversation_id: c.id, role: 'assistant', sender: 'researcher', content: 'specialist chatter' });
   s.chat.add({ conversation_id: c.id, role: 'assistant', sender: 'coordinator', content: 'group lead chatter' });
-  const tgc = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] }); linkTelegram(s, tgc.id); s.chat.add({ conversation_id: tgc.id, role: 'assistant', sender: 'coordinator', content: 'lead summary' });
+  const tgc = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] }); const tj = linkTelegram(s, tgc.id); s.chat.add({ conversation_id: tgc.id, role: 'assistant', sender: 'coordinator', job_id: tj, content: 'lead summary' });
   const ap = s.approvals.request({ job_id: turn.id, action_kind: 'send', target: 'email to hm@example.test', content: 'To: hm@example.test\nSubject: Channel role\n\nHi Sam,\nThe full body.' });
   s.chat.add({ conversation_id: c.id, role: 'system', kind: 'decision', content: 'decision', approval_id: ap.id, job_id: turn.id });
   f.calls.length = 0; await s.bridge.cycle(0);
@@ -164,15 +164,15 @@ test('T6: Telegram is a command channel through the lead: plain decision cards t
 test('T7: quiet hours send nothing (held, never sent later) and test projects never reach Telegram', async () => {
   const f = await fakeTelegram(); const s = setup(f.base); saveToken(s.secrets, TOKEN);
   const { code } = newPairingCode(s.db); f.push(msg(1, 777, `/start ${code}`)); await s.bridge.cycle(0);
-  const c = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] }); linkTelegram(s, c.id);
+  const c = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] }); const tj = linkTelegram(s, c.id);
   s.db.prepare("INSERT INTO runtime_state(key, value, evidence, observed_at) VALUES ('telegram.quiet_until', ?, '{}', ?)").run(JSON.stringify({ until: new Date(Date.now() + 3600_000).toISOString() }), new Date().toISOString());
-  s.chat.add({ conversation_id: c.id, role: 'assistant', sender: 'coordinator', content: 'night news' }); f.calls.length = 0; await s.bridge.cycle(0);
+  s.chat.add({ conversation_id: c.id, role: 'assistant', sender: 'coordinator', job_id: tj, content: 'night news' }); f.calls.length = 0; await s.bridge.cycle(0);
   assert.ok(!f.calls.some((x) => x.method === 'sendMessage' && String(x.body.text).includes('night news')), 'nothing during quiet hours');
   s.db.prepare("DELETE FROM runtime_state WHERE key = 'telegram.quiet_until'").run(); await s.bridge.cycle(0);
   assert.ok(!f.calls.some((x) => x.method === 'sendMessage' && String(x.body.text).includes('night news')), 'held notices are not sent later');
   const ws2 = new Workspaces(s.db, path.join(os.tmpdir(), `tg-ws-${Date.now()}`)).create({ name: 'Test project', policies: { telegram: false } }, 'test');
   const c2 = s.chat.create({ workspace_id: ws2.id, type: 'direct', members: ['coordinator'] }); s.chat.add({ conversation_id: c2.id, role: 'assistant', sender: 'coordinator', content: 'rehearsal chatter' });
-  s.chat.add({ conversation_id: c.id, role: 'assistant', sender: 'coordinator', content: 'real morning news' }); f.calls.length = 0; await s.bridge.cycle(0);
+  s.chat.add({ conversation_id: c.id, role: 'assistant', sender: 'coordinator', job_id: tj, content: 'real morning news' }); f.calls.length = 0; await s.bridge.cycle(0);
   const texts = f.calls.filter((x) => x.method === 'sendMessage').map((x) => String(x.body.text)); assert.ok(texts.some((x) => x.includes('real morning news'))); assert.ok(!texts.some((x) => x.includes('rehearsal chatter')));
   f.close();
 });
@@ -180,11 +180,11 @@ test('T7: quiet hours send nothing (held, never sent later) and test projects ne
 test('T8: when quiet hours end, one good-morning summary goes out and decisions still waiting arrive as cards; held chatter stays in the app; /status answers', async () => {
   const f = await fakeTelegram(); const s = setup(f.base); saveToken(s.secrets, TOKEN);
   const { code } = newPairingCode(s.db); f.push(msg(1, 777, `/start ${code}`)); await s.bridge.cycle(0);
-  const c = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] }); linkTelegram(s, c.id);
+  const c = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] }); const tj8 = linkTelegram(s, c.id);
   const turn = s.chat.send(c.id, 'apply to the Dragos role', s.defs).job;
   const setQuiet = (ms: number) => s.db.prepare("INSERT INTO runtime_state(key, value, evidence, observed_at) VALUES ('telegram.quiet_until', ?, '{}', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify({ until: new Date(Date.now() + ms).toISOString() }), new Date().toISOString());
   setQuiet(3600_000);
-  s.chat.add({ conversation_id: c.id, role: 'assistant', sender: 'coordinator', content: 'night news' });
+  s.chat.add({ conversation_id: c.id, role: 'assistant', sender: 'coordinator', job_id: tj8, content: 'night news' });
   const open = s.approvals.request({ job_id: turn.id, action_kind: 'send', target: 'email to hm@example.test', content: 'To: hm@example.test\nSubject: Follow-up\n\nHi.' });
   s.chat.add({ conversation_id: c.id, role: 'system', kind: 'decision', content: 'decision', approval_id: open.id, job_id: turn.id });
   const gone = s.approvals.request({ job_id: turn.id, action_kind: 'send', target: 'email to other@example.test', content: 'To: other@example.test\nSubject: Old\n\nHi.' });
@@ -218,13 +218,16 @@ test('T10: routine progress never goes to Telegram: assistants\' updates, group 
   const f = await fakeTelegram(); const s = setup(f.base); saveToken(s.secrets, TOKEN);
   const { code } = newPairingCode(s.db); f.push(msg(1, 777, `/start ${code}`)); await s.bridge.cycle(0);
   const g = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] });
-  const tgc = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] }); linkTelegram(s, tgc.id);
-  s.chat.add({ conversation_id: tgc.id, role: 'assistant', sender: 'coordinator', content: 'progress line', meta: { update: true } });
+  const tgc = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] }); const tj = linkTelegram(s, tgc.id);
+  s.chat.add({ conversation_id: tgc.id, role: 'assistant', sender: 'coordinator', job_id: tj, content: 'progress line', meta: { update: true } });
   s.chat.add({ conversation_id: g.id, role: 'assistant', sender: 'coordinator', content: 'group reply' });
   s.chat.add({ conversation_id: g.id, role: 'system', kind: 'activity', content: 'From Telegram · You: start' });
-  s.chat.add({ conversation_id: tgc.id, role: 'assistant', sender: 'coordinator', content: 'Two applications are in.' });
+  s.chat.add({ conversation_id: tgc.id, role: 'assistant', sender: 'coordinator', job_id: tj, content: 'Two applications are in.' });
+  const auto = s.store.create({ idempotency_key: 'auto-r', kind: 'chat.turn', objective: 'Automatic report', success_contract: {}, agent_role: 'coordinator', workspace_id: null, inputs: { conversation_id: tgc.id, automatic: true } } as never, 'engine').job;
+  s.chat.add({ conversation_id: tgc.id, role: 'assistant', sender: 'coordinator', job_id: auto.id, content: 'Routine automatic report.' });
+  const rj = s.store.create({ idempotency_key: 'apply-1', kind: 'chat.turn', objective: 'apply', success_contract: {}, agent_role: 'researcher', workspace_id: s.ws.id } as never, 'owner').job; s.store.event(rj.id, 'agent:researcher', 'application.verified', { company: 'Dragos', role: 'Senior CSM' });
   f.calls.length = 0; await s.bridge.cycle(0);
   const texts = f.calls.filter((x) => x.method === 'sendMessage').map((x) => String(x.body.text));
-  assert.deepEqual(texts, ['Two applications are in.']);
+  assert.deepEqual(texts.sort(), ['Applied: Dragos, Senior CSM. Confirmation page seen and receipt saved.', 'Two applications are in.'], 'only the reply to their Telegram message and the verified receipt; never a routine automatic report');
   f.close();
 });

@@ -59,7 +59,7 @@ export function homeSnapshot(db: DB, opts: { workspace?: string | null; hours?: 
     else if (s.cron) for (let m = Math.ceil(now.getTime() / 60_000) * 60_000; m <= horizon; m += 60_000) if (cronMatches(s.cron, new Date(m), s.tz ?? null)) { at = new Date(m); break; }
     if (at && (!next_routine || at.toISOString() < next_routine.at)) next_routine = { title: s.name || taskTitle(s.objective), at: at.toISOString() };
   }
-  // Only what truly needs the owner stays on his list (passwords, codes, CAPTCHAs, personal answers, spend, approvals); the rest the team fixes.
+  // Only what truly needs the owner stays on their list (passwords, codes, CAPTCHAs, personal answers, spend, approvals); the rest the team fixes.
   const split = partitionOwnerNeeds(today); const being_fixed = split.team; today.length = 0; today.push(...split.owner);
   const order = { approval: 0, sign_in: 1, blocker: 2, question: 3, draft: 3, routine: 4, done: 5 } as const;
   today.sort((x, y) => order[x.kind] - order[y.kind] || String(x.at).localeCompare(String(y.at)));

@@ -81,7 +81,7 @@ export function collectReport(db: DB, jobId: string, workspace: string | null): 
   lines.push(`Results saved: ${snap.figures.results}.`, `Running now: ${running.length}.`);
   lines.push(`Live tasks (${live.length}: ${running.length} running, ${waiting.length} queued or waiting):`, ...(live.length ? live.map((t) => `- ${t.agent}: ${t.title} (${STATE_WORDS[t.state] ?? t.state})`) : ['- none']));
   lines.push(`Job applications submitted and verified in the last ${snap.window_hours} hours (${applications.length}):`, ...(applications.length ? applications.map((a) => `- ${a.company} — ${a.role} (verified${a.agent ? `, by ${a.agent}` : ''})`) : ['- none']));
-  // The owner's list holds only what truly needs him; what an assistant can unblock itself is the team's (see cos/owner-needs.ts).
+  // The owner's list holds only what truly needs them; what an assistant can unblock itself is the team's (see cos/owner-needs.ts).
   lines.push(`Needs the owner (${snap.figures.needs_you}):`, ...(needs.length ? needs.map((x) => `- ${x.title}${x.detail ? ` — ${x.detail}` : ''}`) : ['- nothing']));
   lines.push(`Being fixed by the team (${fixing.length}):`, ...(fixing.length ? fixing.map((x) => `- ${x.title}${x.detail ? ` — ${x.detail}` : ''}`) : ['- nothing']));
   lines.push('Routines due today:', ...(snap.today.filter((x) => x.kind === 'routine').map((x) => `- ${x.title} at ${x.at}`)), ...(snap.today.some((x) => x.kind === 'routine') ? [] : [`- none left today${snap.next_routine ? `; next: ${snap.next_routine.title} at ${new Date(snap.next_routine.at).toLocaleString('en-US', { weekday: 'long', hour: 'numeric', minute: '2-digit' })}` : ''}`]));

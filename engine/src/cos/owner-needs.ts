@@ -1,6 +1,6 @@
 /**
  * Who has to act on a blocked item: the owner, or the team. Only things that truly need the owner go to "Needs the owner":
- * a password or sign-in, an MFA / verification code he must type, a CAPTCHA, a personal answer only he knows (salary, quota
+ * a password or sign-in, an MFA / verification code they must type, a CAPTCHA, a personal answer only they know (salary, quota
  * numbers, an essay about himself), a spend or purchase, or an approval decision. Anything an assistant could unblock with a
  * product capability ("allow unzip", "extract the zips", "export the chat log", "give access to records", re-run a task) is the
  * team's to fix and is reported under "Being fixed by the team". Deterministic: the report and Home use this, not the model.

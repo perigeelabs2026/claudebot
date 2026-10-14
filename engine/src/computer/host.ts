@@ -18,7 +18,7 @@ export interface ComputerHost { status(): Promise<ComputerHealth>; up(): Promise
 const ROOT = path.resolve(import.meta.dirname, '..', '..', '..');
 export const NAME = process.env.CLAUDEBOT_COMPUTER_NAME ?? 'claudebot-computer';
 const DISK = `${NAME}-data`;
-const LIMACTL = ['/opt/homebrew/bin/limactl', '/usr/local/bin/limactl'].find((p) => fs.existsSync(p)) ?? 'limactl';
+export const LIMACTL = ['/opt/homebrew/bin/limactl', '/usr/local/bin/limactl'].find((p) => fs.existsSync(p)) ?? 'limactl';
 export const versions = () => JSON.parse(fs.readFileSync(path.join(ROOT, 'computer', 'versions.json'), 'utf8')) as { vm: { cpus: number; memory: string; disk: string; data_disk: string; zram_mb: number; screens: number }; image: { location: string; arch: string }; packages: string[]; ports: { computerd_guest: number; computerd_host: number; gateway_guest: number; gateway_host: number } };
 
 /** The Lima template: pinned image and size, no host mounts, only computerd forwarded (to 127.0.0.1), provisioning embedded. */

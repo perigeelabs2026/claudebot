@@ -33,6 +33,7 @@ import type { ModelRuntime } from '../runtime/types.ts';
 import { ChatStore } from '../chat/store.ts';
 import { BrowserLive } from '../browser/live.ts';
 import { KeepAwake } from '../power/awake.ts';
+import { syncAnswerBank } from '../memory/answer-sync.ts';
 import { releaseTabsOfFinishedTasks, cdpCloser } from '../browser/tabs.ts';
 import { rollupWorkLogs } from '../memory/worklog.ts';
 import { localDay } from '../memory/vault.ts';
@@ -132,6 +133,8 @@ timers.push(setInterval(() => { snapshot(db, cfg.backupsDir, 20, 'auto').catch((
 // Keep the Mac awake (caffeinate -i) only while a job is leased or running, so the engine never sleeps mid-task; released when idle.
 const keepAwake = new KeepAwake(db, log);
 try { keepAwake.tick(); } catch (e) { log.warn('keep-awake tick failed', { err: (e as Error).message }); }
+// One answer store: the team folder's answers and work history are copied into the memory vault for lookup_answer.
+if (!simulated) { const sync = () => syncAnswerBank().then((w) => { if (w.length) log.info('answer bank synced', { files: w }); }).catch((e) => log.warn('answer bank sync failed', { err: (e as Error).message })); sync(); timers.push(setInterval(sync, 10 * 60_000)); }
 timers.push(setInterval(() => { try { keepAwake.tick(); } catch (e) { log.warn('keep-awake tick failed', { err: (e as Error).message }); } }, 30_000));
 timers.push(setInterval(() => api.broadcast('tick', { at: new Date().toISOString(), active: store.list({ state: ['leased', 'running'] }).length }), 10_000));
 
