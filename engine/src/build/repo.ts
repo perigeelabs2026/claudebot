@@ -147,7 +147,7 @@ unset NODE_OPTIONS NODE_TEST_CONTEXT
 ${cmd}`;
   // As the builder: the worktree is the builder's for the length of the check (not its .git pointer or .claudebot/), then handed back.
   const script = sh.builder ? `me=$(id -un)
-own() { find ${q(dir)} -mindepth 1 \\( -path ${q(`${dir}/.git`)} -o -path ${q(`${dir}/.claudebot`)} \\) -prune -o -exec ${sh.sudo}chown -h "$1" {} + ; ${sh.sudo}chown "$1" ${q(dir)}; }
+own() { ${sh.sudo}find ${q(dir)} -mindepth 1 \\( -path ${q(`${dir}/.git`)} -o -path ${q(`${dir}/.claudebot`)} \\) -prune -o -exec chown -h "$1" {} + ; ${sh.sudo}chown "$1" ${q(dir)}; }   # find runs privileged: the folder is 0700 and belongs to the builder while it is handed over
 own ${q(sh.builder.match(/-u (\S+)/)?.[1] ?? BUILDER)}
 ${sh.builder} bash -s <<'CLAUDEBOT_CHECK'
 ${inner}

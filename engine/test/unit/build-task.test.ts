@@ -155,7 +155,7 @@ test('hooks bypass cannot commit', () => assert.throws(() => cp.execFileSync('gi
     const ran = JSON.stringify(s.db.prepare("SELECT detail FROM job_events WHERE job_id = ? AND type = 'command.ran'").all(job.id)); assert.match(ran, /npm test/);
     assert.equal(git(path.join(root, 'demo'), 'rev-parse', 'main'), before, 'main unchanged');
     const wt = path.join(root, 'demo-worktrees', job.id); assert.equal(fs.statSync(wt).uid, process.getuid!(), 'the worktree is handed back after the check');
-    assert.equal(fs.statSync(path.join(wt, 'test', 'escape.test.js')).uid, process.getuid!());
+    assert.equal(fs.statSync(path.join(wt, 'test', 'escape.test.js')).uid, process.getuid!(), 'and everything in it');
   } finally { delete process.env.CLAUDEBOT_BUILD_BUILDER; }
 });
 
