@@ -46,6 +46,7 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Assistants can open zip and tar archives you give them: files are extracted into a new folder inside the task. Links, paths that escape the folder, and oversized archives are refused. Documents and PDFs also get text copies the assistants can read.
 
 ### Fixed
+- A model probe that only finds idle or closed sessions no longer pauses probing, so the first assistant turn after a restart still fetches the model list. Setting a model on a closed session is reported as a gone session, not recorded as set.
 - Restoring a session after an accepted probe now uses the model of the assistant whose task ran in that session (session keys name OpenClaw's agent, the same for every assistant), so an Opus assistant is not dropped to the default. The restore stays inside the probe's time limit. An idle or closed session ("Unable to resolve session target") is skipped.
 - After a restart, a session that wrongly accepted the model probe gets its assistant's configured model back (or `default`), even on a turn that names no model. A probe walk is capped at about 20 seconds, stops on a timeout, and moves past closed sessions. An empty reply to the probe counts as accepted.
 - Model list probes are limited: each assistant session is asked at most once while the list is unknown, and a probe that lists nothing pauses probing for 10 minutes. If the connection ever accepts the probe, the session's real model is put back. The last few assistant sessions are tried in order until one lists.

@@ -336,3 +336,19 @@ test('1 (live Mac): an idle or closed session ("Unable to resolve session target
   const t = s.chat.send(c.id, 'x', s.defs).job; s.db.prepare("UPDATE jobs SET session_ref = 'agent:claude:acp:7f3c2a10-0007', agent_role = 'researcher' WHERE id = ?").run(t.id);
   assert.deepEqual(sessionModels(s.db, ['agent:claude:acp:7f3c2a10-0007', 'agent:claude:acp:7f3c2a10-0008']), { 'agent:claude:acp:7f3c2a10-0007': 'claude-opus-5-5' });
 });
+
+test('1 (Fable f1aac4a): a startup walk that finds only gone sessions starts no cooldown, so the first turn probes its fresh session and harvests', async () => {
+  const rt = probeRt(); const sent: string[] = [];
+  rt.command = async (m) => { sent.push(m); if (/7f3c2a10-00(10|11)/.test(m)) return '⚠️ Unable to resolve session target: agent:claude:acp:7f3c2a10-0010'; if (/7f3c2a10-0012/.test(m)) throw new Error('ACP session not found'); return 'ACP error: unknown model. Available models: default, opus, fable, sonnet, haiku'; };
+  assert.equal(await rt.advertisedModels({ sessionKeys: ['agent:claude:acp:7f3c2a10-0010', 'agent:claude:acp:7f3c2a10-0011', 'agent:claude:acp:7f3c2a10-0012'] }), null);
+  assert.equal(rt.lastEmptyProbe, 0, 'no cooldown from gone sessions');
+  assert.equal(await rt.probeOn('agent:claude:acp:7f3c2a10-0013', 'agent:claude:acp:7f3c2a10-0013'), 'listed', 'the first turn probes and harvests');
+  assert.ok((await rt.advertisedModels())?.models.includes('fable'));
+});
+
+test('1 (Fable f1aac4a): "Unable to resolve session target" when setting a model is a gone session, not a successful set and not a refused model', async () => {
+  const rt = probeRt(); rt.command = async () => '⚠️ Unable to resolve session target: agent:claude:acp:7f3c2a10-0014';
+  await assert.rejects(rt.ensureModel('agent:claude:acp:7f3c2a10-0014', 'claude-opus-5-5'), (e: Error & { code?: string }) => e.code === 'ACP_SESSION_GONE' || /session is gone/.test(e.message));
+  assert.equal(rt.models.has('agent:claude:acp:7f3c2a10-0014'), false, 'not recorded as set');
+  assert.equal((rt as unknown as { refusedModels: Map<string, unknown> }).refusedModels.size, 0, 'the model is not cached as refused');
+});

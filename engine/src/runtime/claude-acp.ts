@@ -243,10 +243,12 @@ export class ClaudeAcpRuntime implements ModelRuntime {
     let reply: string; let errored = false;
     try { reply = await this.command(`/acp model claudebot-model-probe ${sessionKey}`, left()); } catch (e) { reply = (e as Error).message; errored = true; }
     if (this.harvestModels(reply)) return 'listed';
-    this.lastEmptyProbe = Date.now();
     this.o.log.warn('model list probe listed nothing; the list stays unverified', { sessionKey, reply: redact(reply).slice(0, 160) });
-    if (errored) return /timed out|timeout/i.test(reply) ? 'timeout' : 'empty';
-    if (SESSION_GONE.test(reply)) return 'empty';
+    // A gone session or a session error says nothing about the connection: no cooldown, so the first turn's fresh session still
+    // probes. The cooldown starts only on a timeout, a usage-only reply or an accepted probe.
+    if (errored && /timed out|timeout/i.test(reply)) { this.lastEmptyProbe = Date.now(); return 'timeout'; }
+    if (errored || SESSION_GONE.test(reply)) return 'empty';
+    this.lastEmptyProbe = Date.now();
     // Any reply that is not a refusal (an empty one included) means the gateway took the probe model: the session is now on a model
     // that does not exist. Forget what we set there and put a real model back: the one we set, else the role's configured model,
     // else `default`. The turn's own session is reset by ensureModel right after (even when the turn names no model).
@@ -261,6 +263,7 @@ export class ClaudeAcpRuntime implements ModelRuntime {
     if (!model && this.poisoned.has(sessionKey)) {   // the session took the probe model and the turn names none: put a real one back
       const restore = this.restoreModelFor(sessionKey, role);
       const r = await this.command(`/acp model ${acpModel(restore)} ${sessionKey}`, 20_000).catch(() => 'ACP error');
+      if (SESSION_GONE.test(r)) throw new GatewayError('ACP_SESSION_GONE', `The session is gone: ${redact(r).slice(0, 160)}`, true);
       if (!REFUSED.test(r)) { this.poisoned.delete(sessionKey); if (restore !== 'default') this.models.set(sessionKey, restore); }
       return null;
     }
@@ -272,6 +275,7 @@ export class ClaudeAcpRuntime implements ModelRuntime {
     if (cached && cached.until > Date.now()) reason = cached.reason;
     else {
       const reply = await this.command(`/acp model ${acpModel(model)} ${sessionKey}`, 20_000);
+      if (SESSION_GONE.test(reply)) throw new GatewayError('ACP_SESSION_GONE', `The session is gone: ${redact(reply).slice(0, 160)}`, true);   // not a set, and not a refusal of the model
       if (!refused(reply)) { this.refusedModels.delete(cachedKey); this.poisoned.delete(sessionKey); this.models.set(sessionKey, model); this.o.log.info('acp session model set', { sessionKey, model, reply: reply.slice(0, 120) }); return null; }
       this.harvestModels(reply);
       reason = redact(reply).replace(/\s+/g, ' ').slice(0, 200); this.refusedModels.set(cachedKey, { until: Date.now() + 3600_000, reason });
@@ -280,6 +284,7 @@ export class ClaudeAcpRuntime implements ModelRuntime {
     if (fallback && fallback !== model) {
       if (this.models.get(sessionKey) === fallback) return { requested: model, used: fallback, reason };
       const r2 = await this.command(`/acp model ${acpModel(fallback)} ${sessionKey}`, 20_000);
+      if (SESSION_GONE.test(r2)) throw new GatewayError('ACP_SESSION_GONE', `The session is gone: ${redact(r2).slice(0, 160)}`, true);
       this.harvestModels(r2);
       if (!refused(r2)) { this.poisoned.delete(sessionKey); this.models.set(sessionKey, fallback); this.o.log.warn('acp model refused; fell back', { sessionKey, model, fallback, reason }); return { requested: model, used: fallback, reason }; }
     }
