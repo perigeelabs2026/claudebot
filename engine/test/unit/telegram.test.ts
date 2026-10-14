@@ -307,3 +307,28 @@ test('emails permission: an email card on Telegram offers Always allow emails, w
   assert.equal(s.approvals.get(buy.id)!.status, 'pending', 'Always allow on a non-email card does nothing');
   f.close();
 });
+
+test('emails permission on Telegram: an expired permission is named on the email card, "renew" turns it back on, and the watch says a week ahead and on expiry', async () => {
+  const f = await fakeTelegram(); const s = setup(f.base); saveToken(s.secrets, TOKEN); const { code } = newPairingCode(s.db);
+  f.push(msg(40, 777, `/start ${code}`)); await s.bridge.cycle(0);
+  const P = await import('../../src/approvals/permissions.ts'); const { permissionNotices } = await import('../../src/cos/watch.ts');
+  const team = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] });
+  const p = P.grantEmails(s.db, 'owner:test', { days: 5 });
+  const lines = () => (s.db.prepare("SELECT content FROM messages WHERE conversation_id = ? AND kind = 'activity'").all(team.id) as Array<{ content: string }>).map((m) => m.content);
+  permissionNotices(s.db, s.store, Date.now()); permissionNotices(s.db, s.store, Date.now());
+  assert.equal(lines().filter((l) => /"Send emails without asking" ends on/.test(l)).length, 1, 'one line a week ahead');
+  s.db.prepare('UPDATE standing_permissions SET expires_at = ?, activated_at = ? WHERE id = ?').run(new Date(Date.now() - 1000).toISOString(), new Date(Date.now() - 5 * 86400_000).toISOString(), p.id);
+  permissionNotices(s.db, s.store, Date.now()); permissionNotices(s.db, s.store, Date.now());
+  assert.equal(lines().filter((l) => /expired on .*Reply "renew"/.test(l)).length, 1, 'one line on expiry');
+  const sent = s.chat.send(team.id, '@coordinator follow up with Pat', s.defs);
+  const ap = s.approvals.request({ job_id: sent.job.id, action_kind: 'send', target: 'email to pat@initech.example', content: 'Subject: Follow-up\n\nHi Pat.' });
+  s.chat.add({ conversation_id: team.id, role: 'system', kind: 'decision', content: 'decision', job_id: sent.job.id, approval_id: ap.id, meta: {} });
+  f.calls.length = 0; await s.bridge.flush();
+  const card = f.calls.find((x) => x.method === 'sendMessage' && x.body.reply_markup); assert.ok(card);
+  assert.match(String(card!.body.text), /expired on \d{4}-\d{2}-\d{2}; reply "renew" to turn it back on/);
+  f.calls.length = 0; f.push(msg(41, 777, 'renew')); await s.bridge.cycle(0);
+  const back = P.emailPermission(s.db); assert.ok(back, 'renewed'); assert.ok(f.calls.some((x) => x.method === 'sendMessage' && /Renewed: "Send emails without asking" is on until/.test(String(x.body.text))));
+  f.calls.length = 0; f.push(msg(42, 777, 'renew')); await s.bridge.cycle(0);
+  assert.ok(!f.calls.some((x) => /Renewed/.test(String(x.body.text))), 'nothing expired: "renew" goes to the Chief of Staff as plain words');
+  f.close();
+});

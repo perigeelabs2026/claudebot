@@ -55,33 +55,54 @@ export function isApplicationControl(name: string): boolean {
  *  team sends emails without asking"): an email the team writes is sent without a card; each one is recorded and shown in the team group. */
 export const EMAILS = 'email_send';
 export const EMAILS_SCOPE = 'Send emails without asking: assistants may send the emails they write (follow-ups and outreach to hiring managers and recruiters) without asking. Each email is recorded and shown in the team chat. Spending, public posts and deletes still ask.';
-export function emailPermission(db: DB, at = now()): StandingPermission | null {
-  const p = db.prepare("SELECT * FROM standing_permissions WHERE status = 'active' AND action_kind = ? ORDER BY created_at DESC LIMIT 1").get(EMAILS) as unknown as StandingPermission | undefined;
-  if (!p) return null;
-  if (p.expires_at <= at) { db.prepare("UPDATE standing_permissions SET status = 'expired' WHERE id = ?").run(p.id); ev(db, 'system', 'permission.expired', { id: p.id }); return null; }
-  return usesToday(db, p.id, at) < p.max_per_day ? p : null;
+/** A permission the owner gave with no time limit: expires_at holds this sentinel (the column is NOT NULL). */
+/** Webmail whose Send button the emails permission covers in the team browser (Gmail, Outlook, Yahoo); null for any other page. */
+const WEBMAIL = [{ name: 'Gmail', host: /(^|\.)mail\.google\.com$/ }, { name: 'Outlook', host: /(^|\.)outlook\.(live|office|office365)\.com$/ }, { name: 'Yahoo Mail', host: /(^|\.)mail\.yahoo\.com$/ }];
+export function webmailName(url: string): string | null { let h = ''; try { h = new URL(url).hostname; } catch { return null; } return WEBMAIL.find((w) => w.host.test(h))?.name ?? null; }
+export const NO_EXPIRY = '9999-12-31T23:59:59.000Z';
+export const untilText = (p: { expires_at: string }) => p.expires_at >= NO_EXPIRY ? 'with no end date' : `until ${p.expires_at.slice(0, 10)}`;
+/** Who an email goes to: the recipients its content names, else the address in the target ("email to jane@acme.com"). */
+export function emailRecipients(target: string, content: string): string[] { const rc = contentRecipients(content) ?? []; if (rc.length) return rc; const t = targetAddress(target); return t ? [t] : []; }
+/** One of the team-wide permissions (emails, job applications): the live one, the live one that hit today's cap, or the last one
+ *  that expired (for "expired on <date>; reply renew"). Expiry is recorded the first time it is seen. */
+export function teamPermissionState(db: DB, kind: string, at = now()): { live: StandingPermission | null; capped: StandingPermission | null; expired: StandingPermission | null } {
+  const p = db.prepare("SELECT * FROM standing_permissions WHERE status = 'active' AND action_kind = ? ORDER BY created_at DESC LIMIT 1").get(kind) as unknown as StandingPermission | undefined;
+  if (p && p.expires_at <= at) { db.prepare("UPDATE standing_permissions SET status = 'expired' WHERE id = ?").run(p.id); ev(db, 'system', 'permission.expired', { id: p.id }); }
+  else if (p) return usesToday(db, p.id, at) < p.max_per_day ? { live: p, capped: null, expired: null } : { live: null, capped: p, expired: null };
+  const e = db.prepare("SELECT * FROM standing_permissions WHERE status = 'expired' AND action_kind = ? ORDER BY expires_at DESC LIMIT 1").get(kind) as unknown as StandingPermission | undefined;
+  return { live: null, capped: null, expired: e ?? null };
 }
-export function grantEmails(db: DB, by: string, opts: { max_per_day?: number; days?: number; reason?: string } = {}): StandingPermission {
-  const live = emailPermission(db); if (live) return live;
-  const t = now(); const max = Math.max(1, Math.min(200, Math.round(Number(opts.max_per_day ?? 50)))); const days = Math.max(1, Math.min(365, Math.round(Number(opts.days ?? 90))));
-  const id = newId('perm'); const expires = new Date(Date.parse(t) + days * 86400_000).toISOString();
+export function emailPermission(db: DB, at = now()): StandingPermission | null { return teamPermissionState(db, EMAILS, at).live; }
+/** Switch "Send emails without asking" on. days = null (the owner set no limit) means no end date. */
+export function grantEmails(db: DB, by: string, opts: { max_per_day?: number; days?: number | null; reason?: string } = {}): StandingPermission {
+  const live = teamPermissionState(db, EMAILS); const cur = live.live ?? live.capped;
+  if (cur) { if (opts.max_per_day !== undefined && Number(opts.max_per_day) !== cur.max_per_day) { const max = Math.max(1, Math.min(200, Math.round(Number(opts.max_per_day)))); db.prepare('UPDATE standing_permissions SET max_per_day = ? WHERE id = ?').run(max, cur.id); ev(db, by, 'permission.cap_changed', { id: cur.id, max_per_day: max }); return getPermission(db, cur.id)!; } return cur; }
+  const t = now(); const max = Math.max(1, Math.min(200, Math.round(Number(opts.max_per_day ?? 50))));
+  const expires = opts.days === null ? NO_EXPIRY : new Date(Date.parse(t) + Math.max(1, Math.min(365, Math.round(Number(opts.days ?? 90)))) * 86400_000).toISOString();
+  const id = newId('perm');
   db.prepare("INSERT INTO standing_permissions(id, agent_id, action_kind, target, max_per_day, expires_at, reason, scope_text, scope_hash, status, from_approval, created_by, created_at, activated_at) VALUES (?,?,?,?,?,?,?,?,?,'active',NULL,?,?,?)")
     .run(id, '*', EMAILS, 'emails the team writes', max, expires, String(opts.reason ?? '').slice(0, 300), EMAILS_SCOPE, sha256(EMAILS_SCOPE), by, t, t);
   ev(db, by, 'permission.created', { id, agent: '*', kind: EMAILS, max_per_day: max, expires_at: expires, reason: opts.reason ?? null });
   return getPermission(db, id)!;
 }
-/** The live "Submit job applications without asking" permission, if on and not expired or over today's limit. */
-export function jobApplicationPermission(db: DB, at = now()): StandingPermission | null {
-  const p = db.prepare("SELECT * FROM standing_permissions WHERE status = 'active' AND action_kind = ? ORDER BY created_at DESC LIMIT 1").get(JOB_APPLICATIONS) as unknown as StandingPermission | undefined;
-  if (!p) return null;
-  if (p.expires_at <= at) { db.prepare("UPDATE standing_permissions SET status = 'expired' WHERE id = ?").run(p.id); ev(db, 'system', 'permission.expired', { id: p.id }); return null; }
-  return usesToday(db, p.id, at) < p.max_per_day ? p : null;
+/** The owner said "renew": turn back on each team-wide permission that expired, for the same length (or no end date) and daily limit. */
+export function renewExpired(db: DB, by: string): StandingPermission[] {
+  const out: StandingPermission[] = [];
+  for (const kind of [EMAILS, JOB_APPLICATIONS]) {
+    const st = teamPermissionState(db, kind); if (st.live || st.capped || !st.expired) continue; const e = st.expired;
+    const days = Math.max(1, Math.round((Date.parse(e.expires_at) - Date.parse(e.activated_at ?? e.created_at)) / 86400_000));
+    const o = { max_per_day: e.max_per_day, days, reason: `owner renewed it (${by})` };
+    out.push(kind === EMAILS ? grantEmails(db, by, o) : grantJobApplications(db, by, o));
+  }
+  return out;
 }
+/** The live "Submit job applications without asking" permission, if on and not expired or over today's limit. */
+export function jobApplicationPermission(db: DB, at = now()): StandingPermission | null { return teamPermissionState(db, JOB_APPLICATIONS, at).live; }
 /** Switch "Submit job applications without asking" on (the owner in the app, or the owner's words via the Chief of Staff). */
-export function grantJobApplications(db: DB, by: string, opts: { max_per_day?: number; days?: number; reason?: string } = {}): StandingPermission {
-  const live = jobApplicationPermission(db); if (live) return live;
-  const t = now(); const max = Math.max(1, Math.min(400, Math.round(Number(opts.max_per_day ?? 200)))); const days = Math.max(1, Math.min(365, Math.round(Number(opts.days ?? 90))));
-  const id = newId('perm'); const expires = new Date(Date.parse(t) + days * 86400_000).toISOString();
+export function grantJobApplications(db: DB, by: string, opts: { max_per_day?: number; days?: number | null; reason?: string } = {}): StandingPermission {
+  const st = teamPermissionState(db, JOB_APPLICATIONS); const live = st.live ?? st.capped; if (live) return live;
+  const t = now(); const max = Math.max(1, Math.min(400, Math.round(Number(opts.max_per_day ?? 200))));
+  const id = newId('perm'); const expires = opts.days === null ? NO_EXPIRY : new Date(Date.parse(t) + Math.max(1, Math.min(365, Math.round(Number(opts.days ?? 90)))) * 86400_000).toISOString();
   db.prepare("INSERT INTO standing_permissions(id, agent_id, action_kind, target, max_per_day, expires_at, reason, scope_text, scope_hash, status, from_approval, created_by, created_at, activated_at) VALUES (?,?,?,?,?,?,?,?,?,'active',NULL,?,?,?)")
     .run(id, '*', JOB_APPLICATIONS, 'job sites and application forms', max, expires, String(opts.reason ?? '').slice(0, 300), JOB_APPLICATIONS_SCOPE, sha256(JOB_APPLICATIONS_SCOPE), by, t, t);
   ev(db, by, 'permission.created', { id, agent: '*', kind: JOB_APPLICATIONS, max_per_day: max, expires_at: expires, reason: opts.reason ?? null });

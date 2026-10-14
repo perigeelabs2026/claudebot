@@ -179,3 +179,39 @@ test('emails permission (Fable checks): off by default; set_permission "emails" 
   const buy = await s.call(task, 'request_approval', { kind: 'purchase', target: 'Premium plan', content: '$30' }); assert.match(buy.text, /the owner must approve/);
   const off = await s.call(asked, 'set_permission', { permission: 'emails', on: false, owner_words: 'send them without asking' }); assert.equal(off.ok, true); assert.equal(emailPermission(s.db), null);
 });
+
+test('emails permission (Fable gaps): no end date unless the owner set one; recipient from the target when the content names none; daily cap says so and can be raised; an expired permission says so and "renew" turns it back on', async () => {
+  const s = setupBroker(); const P = await import('../../src/approvals/permissions.ts');
+  const c = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] });
+  const asked = s.chat.send(c.id, '@coordinator Emails don\'t need my approval, send them without asking', s.defs).job;
+  const on = await s.call(asked, 'set_permission', { permission: 'emails', on: true, max_per_day: 2, owner_words: 'send them without asking' });
+  assert.match(on.text, /with no end date/, 'no time limit in the owner\'s words, so no end date'); assert.equal(P.emailPermission(s.db)!.expires_at, P.NO_EXPIRY);
+  // The content is only the body; the address is in the target.
+  const r1 = await s.call(asked, 'request_approval', { kind: 'send', target: 'email to pat@initech.example', content: 'Subject: Hi\n\nHi Pat.' }); assert.match(r1.text, /standing permission/, r1.text);
+  const r2 = await s.call(asked, 'request_approval', { kind: 'send', target: 'email to lee@initech.example', content: 'Subject: Hi\n\nHi Lee.' }); assert.match(r2.text, /standing permission/);
+  const r3 = await s.call(asked, 'request_approval', { kind: 'send', target: 'email to kim@initech.example', content: 'Subject: Hi\n\nHi Kim.' });
+  assert.match(r3.text, /daily email cap of 2 is reached/); assert.equal((r3.data as { cap_reached: number }).cap_reached, 2);
+  const lines = () => (s.db.prepare("SELECT content FROM messages WHERE kind = 'activity'").all() as Array<{ content: string }>).map((m) => m.content);
+  assert.equal(lines().filter((l) => /Daily email cap of 2 reached/.test(l)).length, 1, 'one team line');
+  await s.call(asked, 'request_approval', { kind: 'send', target: 'email to max@initech.example', content: 'Subject: Hi\n\nHi Max.' });
+  assert.equal(lines().filter((l) => /Daily email cap of 2 reached/.test(l)).length, 1, 'once a day, not per email');
+  const raise = await s.call(asked, 'set_permission', { permission: 'emails', on: true, max_per_day: 10, owner_words: 'send them without asking' }); assert.equal(raise.ok, true);
+  assert.equal(P.emailPermission(s.db)!.max_per_day, 10, 'the cap is raised in place');
+  assert.match((await s.call(asked, 'request_approval', { kind: 'send', target: 'email to ann@initech.example', content: 'Subject: Hi\n\nHi Ann.' })).text, /standing permission/);
+  // Expiry: the next email says when it expired and how to renew; renew grants it again for the same length.
+  s.db.prepare("UPDATE standing_permissions SET expires_at = ?, activated_at = ? WHERE action_kind = 'email_send'").run(new Date(Date.now() - 1000).toISOString(), new Date(Date.now() - 30 * 86400_000).toISOString());
+  const ex = await s.call(asked, 'request_approval', { kind: 'send', target: 'email to bo@initech.example', content: 'Subject: Hi\n\nHi Bo.' });
+  assert.match(ex.text, /expired on \d{4}-\d{2}-\d{2}/); assert.match(ex.text, /renew/);
+  const back = P.renewExpired(s.db, 'owner:test'); assert.equal(back.length, 1); assert.equal(back[0].max_per_day, 10);
+  assert.ok(Math.abs(Date.parse(back[0].expires_at) - Date.now() - 30 * 86400_000) < 86400_000, 'same length as before');
+  assert.equal(P.jobApplicationPermission(s.db), null, 'renew never switches on something that was not on');
+  const timed = P.grantJobApplications(s.db, 'owner:test', { days: 14 }); assert.match(P.untilText(timed), /^until \d{4}-/);
+});
+
+test('webmail Send in the team browser: Outlook and Yahoo are covered by the emails permission like Gmail', async () => {
+  const { webmailName } = await import('../../src/approvals/permissions.ts');
+  assert.equal(webmailName('https://mail.google.com/mail/u/0/#inbox?compose=new'), 'Gmail');
+  for (const url of ['https://outlook.live.com/mail/0/', 'https://outlook.office.com/mail/', 'https://outlook.office365.com/mail/']) assert.equal(webmailName(url), 'Outlook', url);
+  assert.equal(webmailName('https://mail.yahoo.com/d/compose/1'), 'Yahoo Mail');
+  for (const url of ['https://mail.google.com.evil.example/', 'https://www.linkedin.com/messaging/', 'not a url']) assert.equal(webmailName(url), null, url);
+});

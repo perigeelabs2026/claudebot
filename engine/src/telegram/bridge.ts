@@ -1,5 +1,5 @@
 import { Vault, type Rule } from '../memory/vault.ts';
-import { grantEmails } from '../approvals/permissions.ts';
+import { grantEmails, renewExpired, teamPermissionState, untilText, EMAILS } from '../approvals/permissions.ts';
 import { classifyBlocked } from '../cos/owner-needs.ts';
 import { requeueBankKnownBlockers, requeueKey } from '../cos/requeue.ts';
 import { allowlistEntry } from '../approvals/allowlist.ts';
@@ -112,7 +112,7 @@ export class TelegramBridge {
         // "Always allow emails": the owner's tap switches on the team-wide "Send emails without asking" permission (any recipient, every
         // assistant, delegated work too) and allows this one.
         let always = '';
-        if (m[3] === 'always') { const p = grantEmails(db, 'owner:telegram', { reason: 'Always allow emails, tapped on Telegram' }); always = ` Emails now go out without asking until ${p.expires_at.slice(0, 10)} (up to ${p.max_per_day} a day); each one shows in the team chat. Tell your Chief of Staff to switch it off any time.`; m[3] = 'allow'; }
+        if (m[3] === 'always') { const p = grantEmails(db, 'owner:telegram', { reason: 'Always allow emails, tapped on Telegram', days: null }); always = ` Emails now go out without asking ${untilText(p)} (up to ${p.max_per_day} a day); each one shows in the team chat. Tell your Chief of Staff to switch it off any time.`; m[3] = 'allow'; }
         this.d.approvals.decide(ap.id, m[3] === 'allow' ? 'approved' : 'rejected', 'owner', m[3] === 'allow' ? (always ? 'allowed from the bound Telegram chat with Always allow emails' : 'allowed from the bound Telegram chat') : 'denied from the bound Telegram chat');
         if (ap.job_id) { const j = this.d.store.get(ap.job_id); if (j && j.state === 'waiting_for_approval') this.d.store.transition(j.id, 'queued', 'owner', { waiting_on: null, blocker_code: null, operator_action: null, next_action: 'resume after owner decision' }, { approval: ap.id, via: 'telegram' }); }
         if (m[3] === 'allow') this.d.chat.resumeForApproval(ap.id, this.d.defs);
@@ -141,6 +141,10 @@ export class TelegramBridge {
     }
     if (!b || chatId !== b.chat_id) { ev(db, 'telegram.refused', { reason: 'message from an unbound chat' }); return 'refused:unbound'; }
     if (text.startsWith('/')) return this.command(chatId, text);
+    if (/^renew[.!]?$/i.test(text)) {   // "renew" turns an expired emails or job-applications permission back on
+      const r = renewExpired(db, 'owner:telegram');
+      if (r.length) { ev(db, 'telegram.renewed', { ids: r.map((p) => p.id) }); await this.api('sendMessage', { chat_id: chatId, text: `Renewed: ${r.map((p) => `"${p.action_kind === EMAILS ? 'Send emails' : 'Submit job applications'} without asking" is on ${untilText(p)}`).join('; ')}.` }).catch(() => {}); return 'renewed'; }
+    }
     // Route: a reply to one of our notices goes to that conversation; otherwise the latest direct chat with the Chief of Staff.
     let conv: string | null = null;
     if (msg.reply_to_message) conv = (db.prepare('SELECT m.conversation_id FROM telegram_outbox o JOIN messages m ON m.id = o.message_id WHERE o.tg_message_id = ? AND o.chat_id = ?').get(msg.reply_to_message.message_id, chatId) as { conversation_id: string } | undefined)?.conversation_id ?? null;
@@ -254,7 +258,9 @@ export class TelegramBridge {
         const v = describeApproval(ap); const asker = ap.job_id ? (db.prepare('SELECT agent_role FROM jobs WHERE id = ?').get(ap.job_id) as { agent_role: string } | undefined)?.agent_role : undefined;
         // One plain sentence about what will happen, and the email itself when it is an email; no ids, fingerprints, expiry or raw links.
         const askerName = (asker ? this.d.defs.getAgent(asker)?.name : null)?.replace(/\s*\(.*\)$/, '') ?? 'An assistant';
-        const text = v.email ? `${askerName} wants to send this email. Allow it?\n\n${v.text.slice(0, 3400)}` : v.browser ? `${askerName} wants to ${v.text}. Allow it?` : `${askerName} wants to ${allowlistEntry(ap.action_kind)?.verb ?? v.label.toLowerCase()}: ${String(ap.target).replace(/https?:\/\/\S+/g, '').trim().slice(0, 300)}. Allow it?`;
+        const est = v.email ? teamPermissionState(db, EMAILS) : null;
+        const why = est?.capped ? `The daily email cap of ${est.capped.max_per_day} is reached. ` : est?.expired ? `Your "Send emails without asking" permission expired on ${est.expired.expires_at.slice(0, 10)}; reply "renew" to turn it back on. ` : '';
+        const text = v.email ? `${why}${askerName} wants to send this email. Allow it?\n\n${v.text.slice(0, 3400)}` : v.browser ? `${askerName} wants to ${v.text}. Allow it?` : `${askerName} wants to ${allowlistEntry(ap.action_kind)?.verb ?? v.label.toLowerCase()}: ${String(ap.target).replace(/https?:\/\/\S+/g, '').trim().slice(0, 300)}. Allow it?`;
         const k = (label: string, act: string) => ({ text: label, callback_data: `ap:${ap.id}:${ap.content_hash.slice(0, 12)}:${act}` });
         const keys = v.missingBody ? [k('Deny', 'deny')] : v.email ? [k('Allow once', 'allow'), k('Always allow emails', 'always'), k('Deny', 'deny')] : [k('Allow once', 'allow'), k('Deny', 'deny')];
         body = { chat_id: b.chat_id, text, reply_markup: { inline_keyboard: [keys] } };

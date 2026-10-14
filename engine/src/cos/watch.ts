@@ -1,3 +1,4 @@
+import { EMAILS, JOB_APPLICATIONS, NO_EXPIRY, teamPermissionState } from '../approvals/permissions.ts';
 /**
  * Silent-idle watch (Fable audit 2026-10-14): paths where a failure left the team idle with nothing in the group chat. One tick a
  * minute from the supervisor; each finding is one line in the team group (cos/alerts.ts), posted once; owner-relevant lines also go
@@ -127,9 +128,20 @@ export function approvalReminders(db: DB, store: JobStore, nowMs = Date.now()): 
   return n;
 }
 
+/** Team-wide permissions (emails, job applications) never lapse silently: one line a week before they end, and one when they do. */
+export function permissionNotices(db: DB, store: JobStore, t: number): number {
+  let n = 0; const at = new Date(t).toISOString();
+  for (const [kind, label] of [[EMAILS, 'Send emails without asking'], [JOB_APPLICATIONS, 'Submit job applications without asking']] as const) {
+    const st = teamPermissionState(db, kind, at); const p = st.live ?? st.capped;
+    if (p && p.expires_at < NO_EXPIRY && Date.parse(p.expires_at) - t <= 7 * 86400_000 && teamLine(db, store, { key: `perm-soon:${p.id}`, owner: true, text: `"${label}" ends on ${p.expires_at.slice(0, 10)}. Reply "renew" to keep it on.` })) n++;
+    if (!p && st.expired && teamLine(db, store, { key: `perm-expired:${st.expired.id}`, owner: true, text: `"${label}" expired on ${st.expired.expires_at.slice(0, 10)}, so the team asks you again. Reply "renew" to turn it back on.` })) n++;
+  }
+  return n;
+}
+
 export function watchTick(db: DB, store: JobStore, opts: { workerLimit: number; nowMs?: number }): void {
   const t = opts.nowMs ?? Date.now();
-  for (const f of [() => failureStreaks(db, store, t), () => routineLines(db, store, t), () => governorLine(db, store, t), () => starvation(db, store, opts.workerLimit, t), () => resetLapsed(db, store, t), () => approvalReminders(db, store, t)]) {
+  for (const f of [() => failureStreaks(db, store, t), () => routineLines(db, store, t), () => governorLine(db, store, t), () => starvation(db, store, opts.workerLimit, t), () => resetLapsed(db, store, t), () => approvalReminders(db, store, t), () => permissionNotices(db, store, t)]) {
     try { f(); } catch { /* one check failing never stops the others */ }
   }
 }
