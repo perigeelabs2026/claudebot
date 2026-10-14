@@ -169,11 +169,21 @@ export class ClaudeAcpRuntime implements ModelRuntime {
    *  before the turn; if the backend refuses the model, the turn fails and says so rather than running on another model. */
   private models = new Map<string, string>();
   private refusedModels = new Map<string, { until: number; reason: string }>();
-  /** The models the connection lists (`/acp model` with no arguments), with its reply; null when the reply names none. */
-  async advertisedModels(): Promise<{ models: string[]; reply: string } | null> {
-    const reply = await this.command('/acp model', 20_000).catch(() => '');
-    const models = [...new Set((reply.match(/\b(default|opus|fable|sonnet|haiku|claude-[a-z0-9.-]+(?:\[1m\])?)\b/gi) ?? []).map((m) => m.toLowerCase()))];
-    return models.length ? { models, reply: redact(reply).replace(/\s+/g, ' ').slice(0, 300) } : null;
+  /** The connection's model list, verified live. `/acp model` with no arguments prints only a usage line (verified 2026-10-14); the
+   *  list appears only inside a refusal ("Available models: default, opus, fable, sonnet, haiku, …"). So every refusal is harvested,
+   *  and when nothing has been seen yet one known-bad model is set on the control session to make the connection list them. */
+  private verified: { models: string[]; reply: string; at: string } | null = null;
+  harvestModels(reply: string): boolean {
+    const m = /Available models:\s*([^\n]+)/i.exec(reply); if (!m) return false;
+    const models = [...new Set(m[1].split(/[,\s]+/).map((x) => x.replace(/[.…]+$/, '').trim().toLowerCase()).filter((x) => /^(default|[a-z][a-z0-9.-]*(\[1m\])?)$/.test(x)))];
+    if (!models.length) return false;
+    this.verified = { models, reply: `Available models: ${models.join(', ')}`, at: new Date().toISOString() }; return true;
+  }
+  async advertisedModels(opts: { probe?: boolean } = {}): Promise<{ models: string[]; reply: string; at: string } | null> {
+    if (this.verified) return this.verified;
+    if (opts.probe === false) return null;
+    const reply = await this.command(`/acp model claudebot-model-probe ${this.controlKey}`, 20_000).catch(() => '');
+    return this.harvestModels(reply) ? this.verified : null;   // a usage-only or empty reply stays unverified
   }
   private async ensureModel(sessionKey: string, model: string | undefined, fallback?: string, role = ''): Promise<ModelFallback | null> {
     if (!model || this.models.get(sessionKey) === model) return null;
@@ -185,12 +195,14 @@ export class ClaudeAcpRuntime implements ModelRuntime {
     else {
       const reply = await this.command(`/acp model ${acpModel(model)} ${sessionKey}`, 20_000);
       if (!refused(reply)) { this.refusedModels.delete(cachedKey); this.models.set(sessionKey, model); this.o.log.info('acp session model set', { sessionKey, model, reply: reply.slice(0, 120) }); return null; }
+      this.harvestModels(reply);
       reason = redact(reply).replace(/\s+/g, ' ').slice(0, 200); this.refusedModels.set(cachedKey, { until: Date.now() + 3600_000, reason });
     }
     // A refused model falls back to the assistant's previous model for this turn (never silently: the result carries it and the team is told).
     if (fallback && fallback !== model) {
       if (this.models.get(sessionKey) === fallback) return { requested: model, used: fallback, reason };
       const r2 = await this.command(`/acp model ${acpModel(fallback)} ${sessionKey}`, 20_000);
+      this.harvestModels(r2);
       if (!refused(r2)) { this.models.set(sessionKey, fallback); this.o.log.warn('acp model refused; fell back', { sessionKey, model, fallback, reason }); return { requested: model, used: fallback, reason }; }
     }
     throw new GatewayError('MODEL_REFUSED', `The model "${model}" was not accepted: ${reason}`, false);

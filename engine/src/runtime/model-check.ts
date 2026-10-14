@@ -17,15 +17,16 @@ export const resolves = (model: string, advertised: readonly string[] = ADVERTIS
 
 /** The connection's own list, or the fallback list when it names none. */
 export async function advertised(runtime: Pick<ModelRuntime, 'advertisedModels'> | null | undefined): Promise<{ models: readonly string[]; reply: string | null; verified: boolean }> {
-  try { const r = await runtime?.advertisedModels?.(); if (r && r.models.length) return { ...r, verified: true }; } catch { /* the fallback list */ }
+  try { const r = await runtime?.advertisedModels?.(); if (r && r.models.length) return { models: r.models, reply: r.reply, verified: true }; } catch { /* the fallback list */ }
   return { models: ADVERTISED_MODELS, reply: null, verified: false };
 }
 
-/** Whether a model may be saved on an assistant; when not, the reason in the connection's own words. */
-export async function validateModel(runtime: Pick<ModelRuntime, 'advertisedModels'> | null | undefined, model: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+/** Whether a model may be saved on an assistant. Blocked only when the connection's own list (harvested from a refusal) lacks it;
+ *  when the list is not known yet, it passes with a note ("could not verify"), never an alarm. */
+export async function validateModel(runtime: Pick<ModelRuntime, 'advertisedModels'> | null | undefined, model: string): Promise<{ ok: true; note?: string } | { ok: false; reason: string }> {
   const a = await advertised(runtime);
   if (resolves(model, a.models)) return { ok: true };
-  if (!a.verified) return { ok: false, reason: `Could not verify "${model}": the Claude connection did not list its models, and "${acpModel(model)}" has not been verified live. Pick ${a.models.filter((m) => m !== 'default').join(', ')}, or try again when the connection is up.` };
+  if (!a.verified) return { ok: true, note: `Could not verify "${model}" yet: the Claude connection has not listed its models. If it refuses it, this assistant falls back to its previous model and you are told.` };
   return { ok: false, reason: `The Claude connection does not offer "${model}" (it is sent as "${acpModel(model)}"). ${a.reply ? `It says: ${a.reply}` : `It offers: ${a.models.join(', ')}.`}` };
 }
 
@@ -46,4 +47,14 @@ export function reportModelProblem(db: DB, store: JobStore, p: { agent: string; 
   const name = p.name.replace(/\s*\(.*\)$/, '');
   return teamLine(db, store, { key: `model:${p.agent}|${p.model}|${new Date().toISOString().slice(0, 10)}`, owner: true, jobId: p.jobId ?? null,
     text: `${name}'s model "${p.model}" is not accepted by the Claude connection (${p.reason}). ${p.fallback ? `${name} is running on ${p.fallback} instead until you change it in Edit assistant > Advanced.` : `${name}'s turns cannot run until a model is picked in Edit assistant > Advanced.`}` });
+}
+
+/** The startup check, after the gateway is healthy: with the connection's own list, each assistant whose model it lacks is reported
+ *  (group and owner); without one, it is recorded only (an event and a log line), never an alarm. */
+export async function startupModelCheck(db: DB, store: JobStore, runtime: Pick<ModelRuntime, 'advertisedModels'> | null | undefined, previousModel: (agentId: string) => string): Promise<{ verified: boolean; problems: ModelProblem[] }> {
+  const a = await advertised(runtime);
+  const problems = checkModelAliases(db, previousModel, a.models);
+  if (a.verified) for (const p of problems) reportModelProblem(db, store, { ...p, reason: a.reply ? `it says: ${a.reply}` : 'not one of the models it offers' });
+  else if (problems.length) store.event(null, 'supervisor', 'model.unverified', { models: problems.map((p) => ({ agent: p.agent, model: p.model })), note: 'the connection has not listed its models; checked again on the next refusal' });
+  return { verified: a.verified, problems };
 }

@@ -1258,7 +1258,7 @@ async function agentEditor(a) {
   const save = async () => {
     const body = { name: name.value.trim(), role: role.value.trim(), purpose: purpose.value.trim(), system_instructions: instr.value, color_index: color, allowed_tools: [...tools].filter((t) => catalogue.includes(t)), prohibited_actions: lines(proh.value), approval_rules: lines(appr.value), data_scopes: lines(scopes.value), memory_scope: lines(mem.value), model: model.value };
     if (!body.name) { notify('Give it a name.', true); return; } if (!body.purpose) { notify('Say in a sentence what it does.', true); return; }
-    try { const r = a ? await api(`/api/agents/${a.id}`, { method: 'PATCH', body }) : await api('/api/agents', { method: 'POST', body }); if (r && r.error) throw new Error(r.error); const v = document.querySelector('#view'); if (v) v.dataset.dirty = ''; await refreshAssistants(); notify(`Saved ${body.name}.`); location.hash = `#agents/${a ? a.id : (r.id || '')}`; route(); } catch (e) { notify(e.message, true); }
+    try { const r = a ? await api(`/api/agents/${a.id}`, { method: 'PATCH', body }) : await api('/api/agents', { method: 'POST', body }); if (r && r.error) throw new Error(r.error); const v = document.querySelector('#view'); if (v) v.dataset.dirty = ''; await refreshAssistants(); notify(r && r.model_note ? `Saved ${body.name}. ${r.model_note}` : `Saved ${body.name}.`); location.hash = `#agents/${a ? a.id : (r.id || '')}`; route(); } catch (e) { notify(e.message, true); }
   };
   const sys = !!(a && a.is_system);
   const saveBtn = h('button', { class: 'btn2 primary', onclick: save, disabled: a ? true : null }, 'Save');

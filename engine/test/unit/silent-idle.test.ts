@@ -12,7 +12,7 @@ import { Definitions } from '../../src/model/definitions.ts';
 import { Workspaces } from '../../src/model/workspaces.ts';
 import { ChatStore } from '../../src/chat/store.ts';
 import { ClaudeAcpRuntime, classifyFailure } from '../../src/runtime/claude-acp.ts';
-import { validateModel, checkModelAliases, advertised } from '../../src/runtime/model-check.ts';
+import { validateModel, advertised } from '../../src/runtime/model-check.ts';
 import { failureStreaks, routineLines, governorLine, starvation, resetLapsed, approvalReminders, STREAK } from '../../src/cos/watch.ts';
 
 function setup() {
@@ -35,22 +35,41 @@ test('1: a refused model is its own failure class and never retried; a refused m
   assert.equal(sent.filter((m) => m.includes('claude-mystery-9')).length, 1, 'the refused model is asked for once');
 });
 
-test('1: a model is checked against the connection\'s own list, at startup and on save, and refused in its own words', async () => {
-  const gw = { advertisedModels: async () => ({ models: ['default', 'opus', 'sonnet', 'haiku'], reply: 'Available models: default, opus, sonnet, haiku' }) };
-  const v = await validateModel(gw, 'claude-fable-5-1'); assert.equal(v.ok, false); assert.match((v as { reason: string }).reason, /does not offer "claude-fable-5-1" \(it is sent as "fable"\)\. It says: Available models: default, opus, sonnet, haiku/);
-  assert.deepEqual(await validateModel(gw, 'claude-opus-5-5'), { ok: true });
-  assert.deepEqual(await advertised(null), { models: ['default', 'opus', 'sonnet', 'haiku'], reply: null, verified: false }, 'no list from the connection: the live-verified list, without Fable');
-  const offline = await validateModel(null, 'claude-fable-5-1'); assert.equal(offline.ok, false); assert.match((offline as { reason: string }).reason, /^Could not verify "claude-fable-5-1"/, 'unverifiable is reported, never passed');
+test('1: the model list is harvested from a refusal ("Available models: …"); a usage-only reply stays unverified; a startup probe makes the connection list them', async () => {
+  const rt = new ClaudeAcpRuntime({ gateway: {} as never, log, claudeExecutable: '/bin/false', claudeConfigDir: '/tmp/none' }) as unknown as { command: (m: string) => Promise<string>; ensureModel: (k: string, m?: string, f?: string, role?: string) => Promise<unknown>; advertisedModels: (o?: { probe?: boolean }) => Promise<{ models: string[]; reply: string; at: string } | null> };
+  const sent: string[] = [];
+  rt.command = async (m) => { sent.push(m); return '⚠️ Usage: /acp model <model-id> [session-key|session-id|session-label]'; };
+  assert.equal(await rt.advertisedModels(), null, 'a usage-only reply is unverified'); assert.match(sent[0], /^\/acp model claudebot-model-probe /, 'the probe sets a known-bad model');
+  rt.command = async (m) => { sent.push(m); return /claude-mystery-9/.test(m) ? 'ACP error: model "claude-mystery-9" is not available. Available models: default, opus, fable, sonnet, haiku, …' : 'ok'; };
+  await rt.ensureModel('s1', 'claude-mystery-9', 'claude-opus-5-5', 'researcher');
+  const n = sent.length; const v = await rt.advertisedModels();
+  assert.deepEqual(v?.models, ['default', 'opus', 'fable', 'sonnet', 'haiku'], 'harvested from the refusal'); assert.match(v!.at, /^\d{4}-/, 'with a timestamp'); assert.equal(sent.length, n, 'no probe once a list is known');
+  const rt2 = new ClaudeAcpRuntime({ gateway: {} as never, log, claudeExecutable: '/bin/false', claudeConfigDir: '/tmp/none' }) as unknown as typeof rt;
+  rt2.command = async () => 'ACP error: unknown model claudebot-model-probe. Available models: default, opus, fable, sonnet, haiku';
+  assert.deepEqual((await rt2.advertisedModels())?.models, ['default', 'opus', 'fable', 'sonnet', 'haiku'], 'the startup probe harvests the list');
+});
+
+test('1: on save, a model the harvested list lacks is blocked in the connection\'s words; an unverified one passes with a note', async () => {
+  const listed = { advertisedModels: async () => ({ models: ['default', 'opus', 'sonnet', 'haiku'], reply: 'Available models: default, opus, sonnet, haiku' }) };
+  const v = await validateModel(listed, 'claude-fable-5-1'); assert.equal(v.ok, false); assert.match((v as { reason: string }).reason, /does not offer "claude-fable-5-1" \(it is sent as "fable"\)\. It says: Available models: default, opus, sonnet, haiku/);
+  assert.deepEqual(await validateModel(listed, 'claude-opus-5-5'), { ok: true });
+  assert.deepEqual(await advertised(null), { models: ['default', 'opus', 'sonnet', 'haiku'], reply: null, verified: false });
+  const offline = await validateModel(null, 'claude-fable-5-1'); assert.equal(offline.ok, true); assert.match((offline as { note?: string }).note ?? '', /^Could not verify "claude-fable-5-1" yet/);
   assert.deepEqual(await validateModel(null, 'claude-sonnet-5-5'), { ok: true });
-  assert.deepEqual(await validateModel({ advertisedModels: async () => ({ models: ['default', 'opus', 'fable', 'sonnet', 'haiku'], reply: 'x' }) }, 'claude-fable-5-1'), { ok: true }, 'listed live: passes');
+});
+
+test('1: the startup check alerts only with a verified list; "could not verify" is recorded, never posted', async () => {
+  const { startupModelCheck } = await import('../../src/runtime/model-check.ts');
   const s = setup(); s.defs.upsertAgent({ ...s.defs.getAgent('researcher')!, model: 'claude-fable-5-1' }, 'owner');
-  const probs = checkModelAliases(s.db, (id) => s.defs.previousModel(id), (await advertised(gw)).models);
-  assert.deepEqual(probs.map((p) => [p.agent, p.model]), [['researcher', 'claude-fable-5-1']], 'this morning\'s alias would have been caught at startup');
-  // The connection's runtime asks with `/acp model` and reads the names it lists.
-  const rt = new ClaudeAcpRuntime({ gateway: {} as never, log, claudeExecutable: '/bin/false', claudeConfigDir: '/tmp/none' }) as unknown as { command: (m: string) => Promise<string>; advertisedModels: () => Promise<unknown> };
-  rt.command = async (m) => (m === '/acp model' ? 'Current model: default. Available: default, opus, fable, sonnet, haiku' : '');
-  assert.deepEqual(rt.advertisedModels && (await rt.advertisedModels() as { models: string[] }).models, ['default', 'opus', 'fable', 'sonnet', 'haiku']);
-  rt.command = async () => 'Usage: /acp model <id> <session>'; assert.equal(await rt.advertisedModels(), null);
+  const un = await startupModelCheck(s.db, s.store, null, (id) => s.defs.previousModel(id));
+  assert.equal(un.verified, false); assert.equal(s.lines().length, 0, 'no group or Telegram line');
+  assert.ok(s.db.prepare("SELECT 1 FROM job_events WHERE type = 'model.unverified'").get(), 'recorded in the event log');
+  const ok = await startupModelCheck(s.db, s.store, { advertisedModels: async () => ({ models: ['default', 'opus', 'fable', 'sonnet', 'haiku'], reply: 'Available models: default, opus, fable, sonnet, haiku' }) }, (id) => s.defs.previousModel(id));
+  assert.deepEqual(ok.problems, [], 'fable listed live: nothing to report'); assert.equal(s.lines().length, 0);
+  await startupModelCheck(s.db, s.store, { advertisedModels: async () => ({ models: ['default', 'opus', 'sonnet', 'haiku'], reply: 'Available models: default, opus, sonnet, haiku' }) }, (id) => s.defs.previousModel(id));
+  const l = s.lines(); assert.equal(l.length, 1); assert.match(l[0].content, /model "claude-fable-5-1" is not accepted by the Claude connection \(it says: Available models: default, opus, sonnet, haiku\)/);
+  const main = fs.readFileSync(path.resolve(import.meta.dirname, '..', '..', 'src/supervisor/main.ts'), 'utf8');
+  assert.match(main, /runtime\.health\(\)[\s\S]{0,200}startupModelCheck\(/, 'the check waits for a healthy gateway');
 });
 
 test('1: three failures by one assistant in 30 minutes post once (group and owner) and pause its queue until a turn works', () => {
