@@ -79,6 +79,12 @@ test('"verified" needs a *.verified record or a page about the same thing: an ea
   event(db, j.id, 'browser.act', { action: 'click', name: 'Verify email', url: 'https://jobs.globex.example/listing/account-executive', commit: true });
   assert.deepEqual(honestyNotes(db, 'I confirmed the Account Executive role at Globex.', j.id, null), [], 'a committed action on the matching page counts');
   assert.match(honestyNotes(db, 'I verified the mailing address.', j.id, null).join(''), /nothing was verified/, 'a different subject still needs evidence');
+  const g = job(store, 'g', 'Apply to Globex');
+  event(db, g.id, 'browser.act', { action: 'click', name: 'Next', url: 'https://globex.example/apply/role-123', commit: true });
+  event(db, g.id, 'browser.act', { action: 'click', name: 'Save and continue', url: 'https://globex.example/apply/role-123', commit: true });
+  assert.match(honestyNotes(db, 'I confirmed the Globex role.', g.id, null).join(''), /nothing was verified/, 'Next, Continue or Save confirms nothing');
+  event(db, g.id, 'browser.act', { action: 'click', name: 'Submit application', url: 'https://globex.example/apply/role-123', commit: true });
+  assert.deepEqual(honestyNotes(db, 'I confirmed the Globex role.', g.id, null), [], 'Submit application on the Globex page counts');
   event(db, j.id, 'email.verified', { address: 'x' });
   assert.deepEqual(honestyNotes(db, 'I verified the address.', j.id, null), []);
 });

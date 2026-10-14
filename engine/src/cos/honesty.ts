@@ -62,7 +62,9 @@ export function hasEvidence(db: DB, claim: Claim, jobId: string, conversationId:
       if (ev("e.type LIKE '%.verified'")) return true;
       if (db.prepare("SELECT 1 FROM records r JOIN jobs j ON j.id = r.job_id WHERE r.type = 'application' AND (r.job_id = ? OR (j.conversation_id = ? AND r.created_at > ?)) LIMIT 1").get(jobId, conversationId ?? '', since)) return true;
       const words = claimSubject(sentence); if (!words.length) return false;
-      return ev(`e.type = 'browser.act' AND json_extract(e.detail, '$.commit') = 1 AND (${words.map(() => 'lower(e.detail) LIKE ?').join(' OR ')})`, ...words.map((w) => `%${w}%`));
+      // Only a committing control that does the confirming (Submit, Confirm, Verify, Apply, Send); Next, Continue or Save confirms nothing.
+      const CONFIRMING = "(lower(json_extract(e.detail, '$.name')) LIKE '%submit%' OR lower(json_extract(e.detail, '$.name')) LIKE '%confirm%' OR lower(json_extract(e.detail, '$.name')) LIKE '%verify%' OR lower(json_extract(e.detail, '$.name')) LIKE '%apply%' OR lower(json_extract(e.detail, '$.name')) LIKE '%send%')";
+      return ev(`e.type = 'browser.act' AND json_extract(e.detail, '$.commit') = 1 AND ${CONFIRMING} AND (${words.map(() => 'lower(e.detail) LIKE ?').join(' OR ')})`, ...words.map((w) => `%${w}%`));
     }
     case 'account': return ev("e.type = 'account.password_set' OR (e.type = 'browser.act' AND json_extract(e.detail, '$.commit') = 1 AND lower(json_extract(e.detail, '$.name')) GLOB '*[cr][re][eg]*' AND (lower(json_extract(e.detail, '$.name')) LIKE '%create%' OR lower(json_extract(e.detail, '$.name')) LIKE '%register%' OR lower(json_extract(e.detail, '$.name')) LIKE '%sign up%'))");
     case 'signed_in': return ev("(e.type = 'browser.act' AND (lower(json_extract(e.detail, '$.name')) LIKE '%sign in%' OR lower(json_extract(e.detail, '$.name')) LIKE '%log in%' OR lower(json_extract(e.detail, '$.name')) LIKE '%signin%' OR lower(json_extract(e.detail, '$.name')) LIKE '%login%')) OR e.type IN ('browser.login_ok', 'auth.signed_in')");
