@@ -111,7 +111,11 @@ export class BrokerApi {
         const depends = wanted.filter((id) => { const d = this.store.get(id); return d && (d.workspace_id ?? null) === (parent?.workspace_id ?? null) && (!parent?.conversation_id || d.conversation_id === parent.conversation_id); });   // dependencies stay inside the same conversation
         if (wanted.length && depends.length !== wanted.length) return { ok: false, text: `dependency task id(s) not found in this conversation: ${wanted.filter((x) => !depends.includes(x)).join(', ')}` };
         // Budgets (owner settings, enforced here; no tool can change them): depth, children per task, and a free worker for children.
-        { const why = notOwnerInitiated(parent?.inputs); if (why) { this.store.event(cap.job_id, actor, 'delegation.refused', { kind: wf.id, reason: why }); return { ok: false, text: `Not delegated: this is ${why}, not an owner request. Report what you found and ask the owner before starting new work.` }; } }
+        // An automatic report turn may start one follow-up when delegated work in this conversation came back blocked or partial (try another route).
+        const followUp = !!parent && notOwnerInitiated(parent.inputs) === 'an automatic report' && !!parent.conversation_id
+          && !!db.prepare("SELECT 1 FROM jobs WHERE conversation_id = ? AND id <> ? AND outcome IN ('partial','blocked') AND updated_at > ? LIMIT 1").get(parent.conversation_id, parent.id, new Date(Date.now() - 60 * 60_000).toISOString())
+          && !db.prepare('SELECT 1 FROM jobs WHERE parent_id = ? LIMIT 1').get(parent.id);
+        { const why = followUp ? null : notOwnerInitiated(parent?.inputs); if (why) { this.store.event(cap.job_id, actor, 'delegation.refused', { kind: wf.id, reason: why }); return { ok: false, text: `Not delegated: this is ${why}, not an owner request. Report what you found and ask the owner before starting new work.` }; } }
         const budget = delegationBudget(db, cap.job_id);
         if (!budget.ok) { this.store.event(cap.job_id, actor, 'delegation.refused', { kind: wf.id, reason: budget.reason, depth: budget.depth, children: budget.children }); return { ok: false, text: `Not delegated: ${budget.reason}.` }; }
         const lead = parent?.kind === 'chat.turn';
