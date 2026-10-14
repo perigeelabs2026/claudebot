@@ -314,7 +314,15 @@ Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-�
         let reply = r.text.replace(/\s*DONE\s*$/i, '').trim() || 'I did not produce a reply. Please try again.';
         const titleLine = reply.match(/^\s*Title:\s*(.{3,80}?)\s*(?:\n|$)/i);
         if (titleLine) { reply = reply.slice(titleLine[0].length).trim() || reply; if (!isGroup && (!conv.title || conv.title === chat.defaultTitle(conv.id))) chat.setTitle(conv.id, titleLine[1].replace(/[*_`]/g, '')); }
-        chat.add({ conversation_id: conv.id, role: 'assistant', sender: agentId, content: reply, job_id: job.id, reply_to: msg.kind === 'handoff' ? msg.id : null, meta: { duration_ms: r.durationMs, session_resumed: resume, ...(router ? { router: true } : {}) } });
+        // Ask-back guard (owner: "IT NEEDS TO STOP ASKING ME"): a reply that ends by asking whether to do work the team can do itself is sent
+        // straight back to do it, and the question is not pushed to Telegram. Real owner matters (messages, money, posts, deletes, passwords,
+        // codes, personal answers) may still be asked. One bounce per question: the bounce turn itself is never bounced again.
+        const lastSentence = (reply.trim().split(/(?<=[.!?])\s+/).pop() ?? '');
+        const askBack = !String(msg.content ?? '').startsWith('ClaudeBot: do not ask the owner') && /\b(should i|shall i|want me to|do you want me to|would you like me to|can i go ahead|ok(ay)? to|or leave (it|them) for later)\b[^?]{0,240}\?\s*$/i.test(lastSentence)
+          && !/\b(send|email|e-mail|message|post|publish|pay|buy|purchase|spend|delete|remove)\b/i.test(lastSentence.replace(/\bverify\b[^?]*/i, ''))   // asking to send, spend, post or delete is the owner's call
+          && !/\b(password|passcode|verification code|captcha|salary|compensation|pay range|quota|stack rank|essay)\b/i.test(reply.trim().slice(-400));   // a personal answer may be named in the sentence before the question
+        chat.add({ conversation_id: conv.id, role: 'assistant', sender: agentId, content: reply, job_id: job.id, reply_to: msg.kind === 'handoff' ? msg.id : null, meta: { duration_ms: r.durationMs, session_resumed: resume, ...(router ? { router: true } : {}), ...(askBack ? { update: 1, ask_back: true } : {}) } });
+        if (askBack) chat.engineTurn(conv.id, agentId, 'ClaudeBot: do not ask the owner whether to do work you and the team can do yourselves; the owner asked not to be asked. Do what you just offered now, and report the result when it is done.', `askback:${job.id}`, ctx.defs);
         // Honesty guard: a reply that claims an application went in, with no verified confirmation recorded in this turn, gets a plain note under it.
         const claimsSubmission = /\b(i|we|he|she|they)\s+(have\s+|just\s+|successfully\s+)?(submitted|applied|sent in)\b|\bsubmitted\s+(your|the|his|her|their|an?|\d+)\b[^.]{0,30}\bapplications?\b|\bapplications?\s+(was|were|has been|have been|is|are)\s+(submitted|sent|in)\b|\b(is|are)\s+(now\s+)?submitted\b/i.test(reply);
         const negated = /\b(not|n't|never|nothing|no|none|without|couldn't|didn't|isn't|wasn't|haven't|hasn't|won't)\b[^.]{0,40}\b(submitted|applied)\b|\b(submitted|applied)\b[^.]{0,20}\b(none|nothing|no one|zero)\b/i.test(reply);

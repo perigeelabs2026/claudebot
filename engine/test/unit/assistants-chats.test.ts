@@ -579,3 +579,14 @@ test('a ClaudeBot note can start the work it describes (the lead refused a queue
   const { notOwnerInitiated } = await import('../../src/broker/api.ts');
   assert.equal(notOwnerInitiated(JSON.stringify({ automatic: true })), 'an automatic report'); assert.equal(notOwnerInitiated(JSON.stringify({ engine: true })), null);
 });
+
+test('ask-back guard: a reply that ends by asking whether to do team work is bounced back to do it (not pushed to Telegram); owner matters may still be asked; never bounced twice', async () => {
+  const s = setup([{ kind: 'ok', text: 'Both are started. I haven\'t sent anything to the hiring manager; I\'ll only send the follow-up once the address is confirmed. Should I have the researcher try to verify her address now?' }, { kind: 'ok', text: 'Verified and saved.' }, { kind: 'ok', text: 'The form asks your desired salary. Should I enter $120K?' }]);
+  const d = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] });
+  const { job } = s.chat.send(d.id, 'Start the handoff index', s.defs); assert.equal(await run(s, job.id), 'completed');
+  const ask = s.chat.messages(d.id).find((m) => m.role === 'assistant')!; assert.equal((ask.meta as { ask_back?: boolean }).ask_back, true);
+  const bounce = s.db.prepare("SELECT id FROM jobs WHERE idempotency_key = ?").get(`engine:askback:${job.id}`) as { id: string }; assert.ok(bounce, 'bounced back to do the work');
+  assert.equal(await run(s, bounce.id), 'completed'); assert.equal((s.db.prepare("SELECT count(*) AS n FROM jobs WHERE idempotency_key LIKE 'engine:askback:%'").get() as { n: number }).n, 1, 'the bounce turn is never bounced again');
+  const t2 = s.chat.send(d.id, 'Fill the application', s.defs).job; assert.equal(await run(s, t2.id), 'completed');
+  assert.ok(!s.db.prepare("SELECT 1 FROM jobs WHERE idempotency_key = ?").get(`engine:askback:${t2.id}`), 'a salary question is the owner\'s to answer');
+});

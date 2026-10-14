@@ -42,6 +42,7 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 
 ### Fixed
 - The lead no longer refuses work it queued itself from your instructions as "automatic" and asks you again. Automatic reports and event triggers still cannot start work.
+- Assistants stop asking "should I…?" about work the team can do themselves: the reply goes back to the assistant to do it, and the question is not pushed to Telegram. Questions about sending, spending, posting or deleting, and requests for passwords, codes or personal answers, still reach you.
 - With "Submit job applications without asking" turned on, every field, dropdown and key press inside an application form on a job site is covered, so no more approval cards mid-application. The permission is still off until you turn it on.
 - Telegram decision cards are one plain sentence (the email itself for emails), without page address, fingerprint or expiry; the lead's messages arrive as plain text, and link previews are off.
 - Plain progress words everywhere ("Working on this step", "Using the browser"); ClaudeBot's instruction notes fold into one line; statuses read the same in every view; Members fits at 1024 px and the lead cannot be removed.
