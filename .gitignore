@@ -7,3 +7,4 @@ shell/build/
 .env
 *.sqlite
 *.token
+*.tmp.ts

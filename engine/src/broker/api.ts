@@ -93,7 +93,13 @@ export class BrokerApi {
       case 'create_job': {
         const defs = new Definitions(db); const wf = defs.getWorkflow(String(a.kind)); if (!wf || !wf.enabled) return { ok: false, text: `unknown workflow ${a.kind}; available: ${defs.listWorkflows().filter((w) => w.id !== 'chat.turn').map((w) => w.id).join(', ')}` };
         if (['chat.turn', 'assistant.draft', 'report.morning', 'priority.rank'].includes(wf.id)) return { ok: false, text: wf.id === 'chat.turn' ? 'chat turns cannot be delegated' : 'new assistants are drafted with propose_assistant, not delegated' };
-        const parent = this.store.get(cap.job_id); const agent = a.agent_role && defs.getAgent(String(a.agent_role))?.enabled ? String(a.agent_role) : wf.default_agent;
+        const parent = this.store.get(cap.job_id);
+        // Who does it: the assistant the lead names (by id, name or first name), never silently someone else.
+        const want = a.agent_role ? String(a.agent_role).trim().toLowerCase().replace(/^@/, '') : '';
+        const named = want ? defs.listAgents({ includeDisabled: true }).find((x) => x.id.toLowerCase() === want || x.name.toLowerCase() === want || x.name.toLowerCase().split(/[\s(]+/)[0] === want) : undefined;
+        if (want && !named) return { ok: false, text: `There is no assistant called "${a.agent_role}". Use one of: ${defs.listAgents().map((x) => x.name).join(', ')}.` };
+        const agent = named ? named.id : wf.default_agent;
+        const assignee = defs.getAgent(agent); if (!assignee || !assignee.enabled) return { ok: false, text: `${assignee?.name ?? agent} is switched off, so the task was not created. Give it to an assistant who is on (agent_role), or ask the owner to switch ${assignee?.name ?? agent} on.` };
         const objective = String(a.objective ?? '').trim(); if (!objective) return { ok: false, text: 'objective is required' };
         const inputs = (a.inputs && typeof a.inputs === 'object' ? a.inputs : {}) as Record<string, unknown>;
         const wanted = Array.isArray(a.depends_on) ? (a.depends_on as unknown[]).map(String) : [];

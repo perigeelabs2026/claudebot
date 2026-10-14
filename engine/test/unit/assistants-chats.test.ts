@@ -500,3 +500,13 @@ test('the lead switches an assistant off and back on, only on the owner\'s words
   assert.equal((await s.broker.call(cap(t2, ['enable_assistant']), 'enable_assistant', { assistant: 'researcher', owner_words: 'make jude work' })).ok, false);
   assert.equal((await s.broker.call(cap(t2, ['enable_assistant']), 'enable_assistant', { assistant: 'researcher', owner_words: 'turn everyone back on' })).ok, true); assert.equal(s.defs.getAgent('researcher')!.enabled, true);
 });
+
+test('delegation goes to the assistant the lead names (by first name), and a switched-off or unknown one is refused, never silently replaced (rehearsal 1 finding)', async () => {
+  const s = setup(); addAssistant(s, 'resume-tailor', 'Roger (Resume Tailor)', 'Resumes');
+  const c = s.chat.create({ workspace_id: s.ws.id }); const t1 = s.chat.send(c.id, 'Roger: make the resume', s.defs).job;
+  const ok = await s.broker.call(cap(t1, ['create_job']), 'create_job', { kind: 'document.create', objective: 'One-page resume', agent_role: 'Roger' });
+  assert.equal(ok.ok, true, ok.text); assert.equal(s.store.get((ok.data as { id: string }).id)!.agent_role, 'resume-tailor');
+  s.defs.setAgentEnabled('builder', false, 'owner');
+  const off = await s.broker.call(cap(t1, ['create_job']), 'create_job', { kind: 'document.create', objective: 'Another doc' }); assert.equal(off.ok, false); assert.match(off.text, /switched off/);
+  const nobody = await s.broker.call(cap(t1, ['create_job']), 'create_job', { kind: 'document.create', objective: 'x', agent_role: 'Zed' }); assert.equal(nobody.ok, false); assert.match(nobody.text, /no assistant called "Zed"/);
+});

@@ -33,6 +33,7 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Assistants can open zip and tar archives you give them: files are extracted into a new folder inside the task. Links, paths that escape the folder, and oversized archives are refused. Documents and PDFs also get text copies the assistants can read.
 
 ### Fixed
+- Work goes to the assistant you named: the lead hands each part to exactly that assistant (by name or first name), and an unknown or switched-off assistant is refused instead of the work silently going to someone else.
 - File uploads really attach: ClaudeBot sets the file field directly, falls back to the file chooser, and only reports success when the page holds the file.
 - Pages that time out the page reader fall back to the accessibility tree.
 - Submits covered by "Submit job applications without asking" no longer post a decision card.
