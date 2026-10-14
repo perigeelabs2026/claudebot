@@ -14,6 +14,7 @@ import { issueCapability } from '../../src/broker/capabilities.ts';
 import { loadConfig } from '../../src/config.ts';
 import { recordTaskTab } from '../../src/browser/tabs.ts';
 import { parseSnapshot, decide } from '../../src/browser/act-policy.ts';
+import { AccountSecrets as AccountSecretsT } from '../../src/secrets/accounts.ts';
 
 // The snapshot below is the real `openclaw browser snapshot --format ai` output of https://httpbin.org/forms/post (7 Oct 2026),
 // trimmed, plus a search box. The browser itself is FAKED here (no Chrome, no network): these tests prove the policy and the
@@ -40,6 +41,8 @@ function setup() {
   const wsDir = path.join(tmp, 'task'); fs.mkdirSync(wsDir, { recursive: true });
   const cap = issueCapability(path.join(tmp, 'run'), job, wsDir, defs.getAgent('browser_operator')!.allowed_tools);
   const broker = new BrokerApi(db, store, approvals, loadConfig({ CLAUDEBOT_HOME: tmp, CLAUDEBOT_BROWSER_CDP_PORT: '1' } as NodeJS.ProcessEnv));
+  // The password store is the 0600 file here on every OS (CI's macOS runner has no unlocked login Keychain); the Keychain path is tested with a mocked security tool.
+  broker.accounts = () => new AccountSecretsT({ secretsDir: path.join(tmp, 'secrets'), platform: 'linux' });
   const calls: string[][] = [];
   broker.browserRunner = async (args: string[]) => {
     calls.push(args);
@@ -131,7 +134,7 @@ test('account passwords: set_account_password stores a generated password and fi
   let r = await s.broker.call(cap, 'browser_act', { action: 'fill_secret', ref: 'e50', account: 'jobs.example.com:owner@example.com' }); results.push(JSON.stringify(r));
   assert.equal(r.ok, false); assert.match(r.text, /set_account_password/); assert.equal(typed.length, 0, 'nothing typed without a stored password');
   r = await s.broker.call(cap, 'set_account_password', { account: 'Jobs.Example.com:owner@example.com' }); results.push(JSON.stringify(r)); assert.equal(r.ok, true);
-  const stored = (await new AccountSecrets({ secretsDir: path.join(s.tmp, 'secrets') }).get('jobs.example.com:owner@example.com'))!;
+  const stored = (await new AccountSecrets({ secretsDir: path.join(s.tmp, 'secrets'), platform: 'linux' }).get('jobs.example.com:owner@example.com'))!;
   assert.equal(stored.length, 20); assert.match(stored, /[A-Z]/); assert.match(stored, /[a-z]/); assert.match(stored, /\d/); assert.match(stored, /[!#$%*+\-=?@_]/);
   r = await s.broker.call(cap, 'browser_act', { action: 'fill_secret', ref: 'e5', account: 'jobs.example.com:owner@example.com' }); results.push(JSON.stringify(r));
   assert.equal(r.ok, false); assert.match(r.text, /only into a password field/); assert.equal(typed.length, 0);
