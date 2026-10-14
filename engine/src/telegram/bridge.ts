@@ -1,5 +1,5 @@
-import { bankKnows } from '../memory/answer-bank.ts';
 import { classifyBlocked } from '../cos/owner-needs.ts';
+import { requeueBankKnownBlockers, requeueKey } from '../cos/requeue.ts';
 import { allowlistEntry } from '../approvals/allowlist.ts';
 /**
  * Telegram bridge (long polling; no public webhook is needed on a Mac). Owner-only:
@@ -21,7 +21,7 @@ import { now } from '../jobs/store.ts';
 import type { ApprovalStore } from '../approvals/store.ts';
 import type { ChatStore } from '../chat/store.ts';
 import type { Definitions } from '../model/definitions.ts';
-import type { JobStore } from '../jobs/store.ts';
+import { JobStore } from '../jobs/store.ts';
 
 export interface TgDeps { db: DB; secretsDir: string; apiBase?: string; chat: ChatStore; approvals: ApprovalStore; defs: Definitions; store: JobStore; defaultWorkspace: () => string; fetchImpl?: typeof fetch; onChange?: (conversationId: string) => void; log?: { info: (m: string, d?: unknown) => void; warn: (m: string, d?: unknown) => void } }
 const KEY_BIND = 'telegram.binding'; const KEY_PAIR = 'telegram.pairing'; const KEY_OFFSET = 'telegram.offset'; const KEY_SINCE = 'telegram.notify_since';
@@ -203,11 +203,14 @@ export class TelegramBridge {
     // True blockers that only the owner can clear (a password, a code, a CAPTCHA, a sign-in) are important: one plain line each.
     if (!onlyIds) {
       const quietNow = String((rs(db, 'telegram.quiet_until') as { until?: string } | null)?.until ?? '') > now();
-      const blocked = db.prepare(`SELECT j.id, j.agent_role, j.objective, j.failure_detail, j.state, j.waiting_on, w.policies FROM jobs j LEFT JOIN workspaces w ON w.id = j.workspace_id WHERE j.updated_at >= ? AND ((j.state = 'failed_terminal' AND j.blocker_code = 'BLOCKED') OR j.state = 'waiting_for_auth') AND NOT EXISTS (SELECT 1 FROM telegram_outbox o WHERE o.message_id = 'blocker:' || j.id) ORDER BY j.updated_at LIMIT 10`).all(since) as Array<{ id: string; agent_role: string; objective: string; failure_detail: string | null; state: string; waiting_on: string | null; policies: string | null }>;
+      requeueBankKnownBlockers(db, new JobStore(db));   // bank-known and essay blockers go back to the team first
+      const blocked = db.prepare(`SELECT j.id, j.idempotency_key, j.agent_role, j.objective, j.failure_detail, j.state, j.waiting_on, w.policies FROM jobs j LEFT JOIN workspaces w ON w.id = j.workspace_id WHERE j.updated_at >= ? AND ((j.state = 'failed_terminal' AND j.blocker_code = 'BLOCKED') OR j.state = 'waiting_for_auth') AND NOT EXISTS (SELECT 1 FROM telegram_outbox o WHERE o.message_id = 'blocker:' || j.id) ORDER BY j.updated_at LIMIT 10`).all(since) as Array<{ id: string; idempotency_key: string; agent_role: string; objective: string; failure_detail: string | null; state: string; waiting_on: string | null; policies: string | null }>;
       for (const j of blocked) {
         let pol: { telegram?: boolean; dry_run?: boolean } = {}; try { pol = JSON.parse(j.policies || '{}'); } catch { /* */ }
         const detail = String(j.failure_detail ?? '').replace(/^blocked: /, ''); const secret = /\b(password|passcode|code|sign[- ]?in|log[- ]?in|purchase|payment|spend)\b/i.test(detail);   // only the owner can type or pay
-        const ownerOnly = j.state === 'waiting_for_auth' || /captcha/i.test(detail) || (classifyBlocked({ kind: 'blocker', title: j.objective, detail }) === 'owner' && (secret || !bankKnows(detail)));   // an answer the bank already holds is not theirs to give
+        // Re-queued to the team (the bank answers it, or it is an essay): no Telegram. A re-queued task that blocks again goes to the owner.
+        const requeued = !!db.prepare('SELECT 1 FROM jobs WHERE idempotency_key = ?').get(requeueKey(j.id)); const second = j.idempotency_key.startsWith('requeue:');
+        const ownerOnly = j.state === 'waiting_for_auth' || /captcha/i.test(detail) || (!requeued && (secret || second || classifyBlocked({ kind: 'blocker', title: j.objective, detail }) === 'owner'));
         if (!ownerOnly) { db.prepare('INSERT OR IGNORE INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?,?,?,?,?)').run(`blocker:${j.id}`, b.chat_id, null, 'skipped-team', now()); continue; }
         const skip = quietNow || pol.telegram === false || pol.dry_run; const who = (this.d.defs.getAgent(j.agent_role)?.name ?? j.agent_role).replace(/\s*\(.*\)$/, '');
         const what = j.state === 'waiting_for_auth' ? `needs you to sign in${j.waiting_on?.startsWith('browser:') ? ` to ${j.waiting_on.slice(8)}` : ''}` : `is stuck on something only you can do: ${detail.replace(/\s+/g, ' ').slice(0, 200)}`;

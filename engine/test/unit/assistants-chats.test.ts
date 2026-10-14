@@ -706,3 +706,23 @@ test('ask-back: an essay question or a fact the answer bank holds is bounced bac
     assert.equal(await bounced('Fill the third form'), false, 'salary is not in the bank: the owner may be asked');
   } finally { delete process.env.CLAUDEBOT_MEMORY_DIR; }
 });
+
+test('a task blocked on something the answer bank answers (or an essay) is re-queued once with the answer and posted to the team group; passwords never are', async () => {
+  const { requeueBankKnownBlockers } = await import('../../src/cos/requeue.ts');
+  const bank = fs.mkdtempSync(path.join(os.tmpdir(), 'bank7-')); fs.mkdirSync(path.join(bank, 'Owner')); fs.writeFileSync(path.join(bank, 'Owner', 'Application answers.md'), '- Quota attainment: 70% across all quarters\n');
+  const s = setup(); addAssistant(s, 'scout', 'Scout'); s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'scout'] });
+  const blocked = (key: string, detail: string) => { const j = s.store.create({ idempotency_key: key, kind: 'research.report', objective: `Apply ${key}`, success_contract: {}, agent_role: 'scout', workspace_id: s.ws.id, inputs: { company: 'Acme' } } as never, 'owner').job; s.store.patch(j.id, { state: 'failed_terminal', blocker_code: 'BLOCKED', failure_detail: `blocked: ${detail}` } as never); return j; };
+  const quota = blocked('q', 'the form needs quota attainment for each of the last 4 years');
+  const essay = blocked('e', 'the form needs an essay: why do you want to join Acme?');
+  const pw = blocked('p', 'the site wants the password for the candidate account');
+  const salary = blocked('s', 'the form asks for desired salary');
+  const r = requeueBankKnownBlockers(s.db, s.store, { bankDir: bank });
+  assert.deepEqual(r.map((x) => [x.from, x.how]).sort(), [[essay.id, 'draft'], [quota.id, 'bank']].sort(), 'only the bank-known and essay blockers');
+  const q2 = s.store.get(r.find((x) => x.from === quota.id)!.to)!; const qi = JSON.parse((q2 as unknown as { inputs: string }).inputs);
+  assert.equal(q2.state, 'queued'); assert.equal(qi.company, 'Acme', 'original inputs kept'); assert.deepEqual(qi.bank_answers, ['Quota attainment: 70% across all quarters']); assert.match(qi.unblock, /do not ask the owner/);
+  const team = s.chat.teamConversation()!; assert.ok(s.chat.messages(team).some((m) => /Back to Scout: "Apply q"/.test(m.content)), 'posted to the team group');
+  assert.deepEqual(requeueBankKnownBlockers(s.db, s.store, { bankDir: bank }), [], 'at most one re-queue per task');
+  s.store.patch(q2.id, { state: 'failed_terminal', blocker_code: 'BLOCKED', failure_detail: 'blocked: the form needs quota attainment again' } as never);
+  assert.deepEqual(requeueBankKnownBlockers(s.db, s.store, { bankDir: bank }), [], 'a re-queued task that blocks again is not re-queued again');
+  void pw; void salary;
+});
