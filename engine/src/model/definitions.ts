@@ -62,9 +62,19 @@ export class Definitions {
 
   // ---- agents ----
   listAgents(opts: { includeDisabled?: boolean } = {}): AgentDef[] { return (this.db.prepare(`SELECT * FROM agent_definitions ${opts.includeDisabled ? '' : 'WHERE enabled = 1'} ORDER BY is_system DESC, CASE id WHEN 'coordinator' THEN 0 WHEN 'researcher' THEN 1 WHEN 'reviewer' THEN 2 WHEN 'browser_operator' THEN 3 WHEN 'builder' THEN 4 ELSE 9 END, created_at, id`).all() as Record<string, unknown>[]).map(rowToAgent); }   // stable order: renaming an assistant never moves it
+  /** The model an assistant ran on before its current one (a refused model falls back to it), else its built-in default, else Sonnet. */
+  previousModel(id: string): string {
+    const cur = this.getAgent(id)?.model;
+    const r = this.db.prepare('SELECT value FROM runtime_state WHERE key = ?').get(`agent.previous_model.${id}`) as { value: string } | undefined;
+    const prev = (() => { try { return r ? String(JSON.parse(r.value)) : ''; } catch { return ''; } })();
+    for (const m of [prev, SYSTEM_MODEL[id], 'claude-sonnet-5-5']) if (m && m !== cur) return m;
+    return 'claude-haiku-5-5';
+  }
   getAgent(id: string): AgentDef | undefined { const r = this.db.prepare('SELECT * FROM agent_definitions WHERE id = ?').get(id) as Record<string, unknown> | undefined; return r ? rowToAgent(r) : undefined; }
   upsertAgent(input: Partial<AgentSeed> & { id: string; name: string; purpose: string }, actor: string): AgentDef {
     const existing = this.getAgent(input.id); const t = now();
+    const newModel = (input as { model?: string }).model;
+    if (existing && newModel && newModel !== existing.model) this.db.prepare("INSERT INTO runtime_state(key, value, evidence, observed_at) VALUES (?, ?, 'model changed in Edit assistant', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, evidence=excluded.evidence, observed_at=excluded.observed_at").run(`agent.previous_model.${input.id}`, JSON.stringify(existing.model), t);
     if (existing?.is_system) {
       // Built-in assistants are the owner's too: name, description, role, colour, instructions, tools and the wording of their limits can all change.
       // Safety does not depend on this text: what an assistant can do is enforced by the broker's tools and approvals, whatever the wording says.

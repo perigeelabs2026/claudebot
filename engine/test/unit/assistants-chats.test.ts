@@ -752,3 +752,14 @@ test('a group member (not only the lead) gets the ledger status block, so its co
   assert.equal(turn.agent_role, 'scout'); assert.equal(await run(s, turn.id), 'completed');
   assert.match(s.runtime.history.at(-1)!.prompt, /Team status from the work record \(use these numbers exactly/);
 });
+
+test('a turn whose model was refused and fell back is recorded and posted to the team group, never silent', async () => {
+  const s = setup(); addAssistant(s, 'scout', 'Scout', 'Job boards'); s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'scout'] });
+  const d = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['scout'] });
+  let req: { model?: string; fallbackModel?: string } = {};
+  s.runtime.startTurn = async (r) => { req = r; return { ok: true, text: 'Done.', durationMs: 5, runtimeSessionId: 'sim-x', modelFallback: { requested: 'claude-fable-5-1', used: 'claude-sonnet-5-5', reason: 'ACP error: unknown model' } }; };
+  const { job } = s.chat.send(d.id, 'Find roles', s.defs); assert.equal(await run(s, job.id), 'completed');
+  assert.ok(req.fallbackModel, 'every turn carries a fallback model');
+  assert.ok(s.db.prepare("SELECT 1 FROM job_events WHERE type = 'model.fallback' AND job_id = ?").get(job.id), 'recorded');
+  const team = s.chat.teamConversation()!; assert.match(s.chat.messages(team).map((m) => m.content).join('\n'), /Scout's model "claude-fable-5-1" is not accepted[\s\S]*running on claude-sonnet-5-5 instead/);
+});

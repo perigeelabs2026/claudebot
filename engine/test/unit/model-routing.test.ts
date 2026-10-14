@@ -28,7 +28,7 @@ test('every turn carries its assistant\'s model; a refused model fails the turn 
   const run = src('src/worker/run.ts'); assert.equal((run.match(/deps\.runtime\.startTurn\(\{[^\n]*model: (agent\?\.model|turnModel),/g) || []).length, 2, 'chat turns and workflow stages both pass the model');
   assert.match(run, /const turnModel = replan && replanModel \? replanModel : agent\?\.model;/, 'the lead re-plans on the opt-in replan_model when delegated work came back blocked or partial'); assert.match(run, /key = 'replan_model'/);
   const acp = src('src/runtime/claude-acp.ts');
-  assert.match(acp, /if \(!req\.probeOnly\) await this\.ensureModel\(sessionKey, req\.model\);/);
+  assert.match(acp, /if \(!req\.probeOnly\) modelFallback = await this\.ensureModel\(sessionKey, req\.model, req\.fallbackModel\);/);
   assert.match(acp, /throw new GatewayError\('MODEL_REFUSED'/);
 });
 
@@ -36,4 +36,46 @@ test('the owner picks the model in Edit assistant > Advanced; new assistants def
   const app = src('ui/app.js'); assert.match(app, /field\('Model \(on your Claude plan\)', model\)/); assert.match(app, /const curModel = a\?\.model \|\| 'claude-sonnet-5-5'/);
   assert.match(src('src/model/definitions.ts'), /input\.model \?\? existing\?\.model \?\? 'claude-sonnet-5-5'/, 'a new assistant without a choice gets Sonnet');
   const deny = JSON.parse(src('../install/claude-settings.json')).permissions.deny as string[]; assert.ok(deny.includes('Task') && deny.includes('Agent'));
+});
+
+test('every model an assistant can pick maps to a model the Claude connection advertises (Fable is "fable"; "claude-fable-5-1" was refused live)', async () => {
+  const { AGENT_MODELS } = await import('../../src/api/server.ts'); const { acpModel } = await import('../../src/runtime/claude-acp.ts');
+  const advertised = ['default', 'opus', 'fable', 'sonnet', 'haiku'];
+  for (const m of AGENT_MODELS) assert.ok(advertised.includes(acpModel(m)), `${m} → ${acpModel(m)}`);
+});
+
+test('a refused model falls back to the assistant\'s previous model for the turn; with no usable fallback the turn fails MODEL_REFUSED', async () => {
+  const { ClaudeAcpRuntime } = await import('../../src/runtime/claude-acp.ts');
+  const log = { info: () => {}, warn: () => {}, error: () => {} } as never;
+  const rt = new ClaudeAcpRuntime({ gateway: {} as never, log, claudeExecutable: '/bin/false', claudeConfigDir: '/tmp/none' }) as unknown as { command: (m: string) => Promise<string>; ensureModel: (k: string, m?: string, f?: string) => Promise<unknown> };
+  const sent: string[] = []; rt.command = async (m) => { sent.push(m); return /model claude-mystery-9 /.test(m) ? 'ACP error: unknown model claude-mystery-9' : 'model set'; };
+  assert.deepEqual(await rt.ensureModel('sk1', 'claude-mystery-9', 'claude-opus-5-5'), { requested: 'claude-mystery-9', used: 'claude-opus-5-5', reason: 'ACP error: unknown model claude-mystery-9' });
+  assert.deepEqual(sent, ['/acp model claude-mystery-9 sk1', '/acp model opus sk1']);
+  await assert.rejects(rt.ensureModel('sk2', 'claude-mystery-9'), /MODEL_REFUSED|was not accepted/);
+  rt.command = async () => 'ACP error: unknown model'; await assert.rejects(rt.ensureModel('sk3', 'claude-mystery-9', 'claude-opus-5-5'), /was not accepted/, 'both refused: the turn fails');
+});
+
+test('the previous model is remembered when the owner changes it; without one the built-in default, else Sonnet', () => {
+  const db = openDatabase(':memory:'); migrate(db); const d = new Definitions(db); d.seedSystemDefaults();
+  assert.equal(d.previousModel('researcher'), 'claude-sonnet-5-5', 'opus is current and the default: Sonnet');
+  d.upsertAgent({ ...d.getAgent('researcher')!, model: 'claude-fable-5-1' }, 'owner'); assert.equal(d.previousModel('researcher'), 'claude-opus-5-5');
+  assert.equal(d.previousModel('coordinator'), 'claude-sonnet-5-5', 'haiku is current and the default: Sonnet');
+});
+
+test('startup check: every configured model must resolve; a bad alias is posted to the team group once a day', async () => {
+  const { checkModelAliases, reportModelProblem, resolves } = await import('../../src/runtime/model-check.ts');
+  const { JobStore } = await import('../../src/jobs/store.ts'); const { ChatStore } = await import('../../src/chat/store.ts');
+  const db = openDatabase(':memory:'); migrate(db); const d = new Definitions(db); d.seedSystemDefaults(); const store = new JobStore(db);
+  for (const m of AGENT_MODELS) assert.ok(resolves(m), m);
+  assert.deepEqual(checkModelAliases(db, (id) => d.previousModel(id)), [], 'the shipped models all resolve');
+  d.upsertAgent({ ...d.getAgent('researcher')!, model: 'claude-fable-5-1[1m]' }, 'owner');
+  db.prepare("INSERT INTO settings(key, value, updated_at, updated_by) VALUES ('replan_model', ?, ?, 'test') ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify('claude-mystery-9'), new Date().toISOString());
+  const probs = checkModelAliases(db, (id) => d.previousModel(id));
+  assert.deepEqual(probs.map((p) => [p.agent, p.model, p.fallback]), [['researcher', 'claude-fable-5-1[1m]', 'claude-opus-5-5'], ['coordinator', 'claude-mystery-9', 'claude-sonnet-5-5']]);
+  const chat = new ChatStore(db, store); const { Workspaces } = await import('../../src/model/workspaces.ts'); const os = await import('node:os');
+  const ws = new Workspaces(db, fs.mkdtempSync(path.join(os.tmpdir(), 'mr-'))).create({ name: 'Home' }, 't');
+  chat.create({ workspace_id: ws.id, type: 'group', members: ['coordinator', 'researcher'] });
+  assert.equal(reportModelProblem(db, store, { ...probs[0], reason: 'not one of the models it offers' }), true);
+  assert.equal(reportModelProblem(db, store, { ...probs[0], reason: 'not one of the models it offers' }), false, 'once per assistant, model and day');
+  const team = chat.teamConversation()!; assert.match(chat.messages(team).map((m) => m.content).join('\n'), /model "claude-fable-5-1\[1m\]" is not accepted by the Claude connection[\s\S]*running on claude-opus-5-5 instead/);
 });

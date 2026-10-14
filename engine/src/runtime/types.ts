@@ -14,6 +14,8 @@ export interface TurnRequest {
   timeoutMs: number;
   /** the assistant's own Claude model (its Edit assistant setting); applied to the session before the turn, never silently replaced */
   model?: string;
+  /** used for this turn only when the backend refuses `model` (the assistant's previous model); the result then carries modelFallback */
+  fallbackModel?: string;
   onHeartbeat?: (note: string) => void;
   /** called as soon as the runtime session is bound, before the turn starts, so a stop can target it immediately */
   onSession?: (sessionRef: string) => void;
@@ -22,8 +24,9 @@ export interface TurnRequest {
   probeOnly?: boolean;
 }
 
-export interface TurnSuccess { ok: true; text: string; runtimeSessionId?: string | null; usage?: Record<string, unknown>; durationMs: number }
-export interface TurnFailure { ok: false; category: FailureCategory; message: string; resetAt?: string | null; retryable: boolean; runtimeSessionId?: string | null; detail?: Record<string, unknown> }
+export interface ModelFallback { requested: string; used: string; reason: string }
+export interface TurnSuccess { ok: true; text: string; runtimeSessionId?: string | null; usage?: Record<string, unknown>; durationMs: number; modelFallback?: ModelFallback }
+export interface TurnFailure { ok: false; category: FailureCategory; message: string; resetAt?: string | null; retryable: boolean; runtimeSessionId?: string | null; detail?: Record<string, unknown>; modelFallback?: ModelFallback; modelRefused?: { model: string; reason: string } }
 export type TurnResult = TurnSuccess | TurnFailure;
 
 export interface RuntimeHealth { id: RuntimeId; configured: boolean; ok: boolean; state: 'ready' | 'auth_required' | 'limited' | 'unreachable' | 'not_configured'; detail: string; observedAt: string; account?: { loggedIn: boolean; method?: string; subscription?: string; email?: string } }

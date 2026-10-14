@@ -2,7 +2,7 @@ import { runProbe } from '../infra/probe.ts';
 import crypto from 'node:crypto';
 import { redact, type Logger } from '../log.ts';
 import { GatewayClient, GatewayError, type GatewayEvent } from '../gateway/client.ts';
-import type { ModelRuntime, RuntimeHealth, TurnRequest, TurnResult, FailureCategory } from './types.ts';
+import type { ModelRuntime, RuntimeHealth, TurnRequest, TurnResult, FailureCategory, ModelFallback } from './types.ts';
 
 
 export interface ClaudeAcpOptions {
@@ -65,7 +65,7 @@ function nextOccurrence(h: number, m: number, tz: string | undefined, now: Date)
 
 /** Claude Code's ACP agent advertises its models by alias (default, opus, sonnet, haiku, or a full id such as claude-fable-5-1[1m]).
  *  ClaudeBot stores full model ids; these map to the alias the agent advertises. Anything else passes through unchanged. */
-export const ACP_MODEL_ALIAS: Record<string, string> = { 'claude-opus-5-5': 'opus', 'claude-sonnet-5-5': 'sonnet', 'claude-haiku-5-5': 'haiku' };
+export const ACP_MODEL_ALIAS: Record<string, string> = { 'claude-opus-5-5': 'opus', 'claude-sonnet-5-5': 'sonnet', 'claude-haiku-5-5': 'haiku', 'claude-fable-5-1': 'fable' };
 export const acpModel = (id: string) => ACP_MODEL_ALIAS[id] ?? id;
 
 export class ClaudeAcpRuntime implements ModelRuntime {
@@ -166,11 +166,19 @@ export class ClaudeAcpRuntime implements ModelRuntime {
   /** Each assistant runs on its own model (Edit assistant > Advanced). Set with the documented `/acp model <id> <session>` control
    *  before the turn; if the backend refuses the model, the turn fails and says so rather than running on another model. */
   private models = new Map<string, string>();
-  private async ensureModel(sessionKey: string, model: string | undefined): Promise<void> {
-    if (!model || this.models.get(sessionKey) === model) return;
+  private async ensureModel(sessionKey: string, model: string | undefined, fallback?: string): Promise<ModelFallback | null> {
+    if (!model || this.models.get(sessionKey) === model) return null;
+    const refused = (reply: string) => /ACP error|unknown|invalid|not (available|allowed|supported|found)|unsupported|usage:/i.test(reply);
     const reply = await this.command(`/acp model ${acpModel(model)} ${sessionKey}`, 20_000);
-    if (/ACP error|unknown|invalid|not (available|allowed|supported|found)|unsupported|usage:/i.test(reply)) throw new GatewayError('MODEL_REFUSED', `The model "${model}" was not accepted: ${redact(reply).slice(0, 200)}`, false);
-    this.models.set(sessionKey, model); this.o.log.info('acp session model set', { sessionKey, model, reply: reply.slice(0, 120) });
+    if (!refused(reply)) { this.models.set(sessionKey, model); this.o.log.info('acp session model set', { sessionKey, model, reply: reply.slice(0, 120) }); return null; }
+    const reason = redact(reply).replace(/\s+/g, ' ').slice(0, 200);
+    // A refused model falls back to the assistant's previous model for this turn (never silently: the result carries it and the team is told).
+    if (fallback && fallback !== model) {
+      if (this.models.get(sessionKey) === fallback) return { requested: model, used: fallback, reason };
+      const r2 = await this.command(`/acp model ${acpModel(fallback)} ${sessionKey}`, 20_000);
+      if (!refused(r2)) { this.models.set(sessionKey, fallback); this.o.log.warn('acp model refused; fell back', { sessionKey, model, fallback, reason }); return { requested: model, used: fallback, reason }; }
+    }
+    throw new GatewayError('MODEL_REFUSED', `The model "${model}" was not accepted: ${reason}`, false);
   }
 
   async inspectSession(sessionRef: string): Promise<{ text: string; observed_at: string }> {
@@ -182,6 +190,7 @@ export class ClaudeAcpRuntime implements ModelRuntime {
     const start = Date.now();
     const gw = this.o.gateway;
     let sessionKey = req.sessionRef;
+    let modelFallback: ModelFallback | null = null;
     let text = ''; let errorMessage: string | null = null; let errorKind: string | null = null; let errorDetail: Record<string, unknown> | null = null; let runId: string | null = null;
     const off = gw.onEvent((e: GatewayEvent) => {
       const p = e.payload;
@@ -196,7 +205,7 @@ export class ClaudeAcpRuntime implements ModelRuntime {
       await gw.connect();
       sessionKey = await this.ensureSession(req);
       if (!req.probeOnly) await this.ensureTimeout(sessionKey, req.timeoutMs);
-      if (!req.probeOnly) await this.ensureModel(sessionKey, req.model);
+      if (!req.probeOnly) modelFallback = await this.ensureModel(sessionKey, req.model, req.fallbackModel);
       req.onSession?.(sessionKey);
       req.onHeartbeat?.(`acp session ${sessionKey}`);
       if (req.signal?.aborted) { await this.cancel(sessionKey); return { ok: false, category: 'cancelled', message: 'stopped before the turn started', retryable: true, runtimeSessionId: sessionKey }; }
@@ -220,7 +229,7 @@ export class ClaudeAcpRuntime implements ModelRuntime {
       }
       if (wait.status === 'ok') {
         if (!text && !req.probeOnly) text = await this.lastAssistantText(sessionKey);
-        return { ok: true, text, durationMs: Date.now() - start, runtimeSessionId: sessionKey };
+        return { ok: true, text, durationMs: Date.now() - start, runtimeSessionId: sessionKey, ...(modelFallback ? { modelFallback } : {}) };
       }
       if (wait.status === 'error' || errorMessage) {
         const msg = errorMessage ?? wait.error ?? 'run error';
@@ -233,7 +242,7 @@ export class ClaudeAcpRuntime implements ModelRuntime {
       const err = e as GatewayError;
       const c = classifyFailure({ errorKind: err.code, message: err.message });
       const category = c.category === 'internal' && err instanceof GatewayError && err.retryable ? 'transient' : c.category;
-      return { ok: false, category, message: err.message, resetAt: c.resetAt, retryable: true, runtimeSessionId: sessionKey };
+      return { ok: false, category, message: err.message, resetAt: c.resetAt, retryable: true, runtimeSessionId: sessionKey, ...(err instanceof GatewayError && err.code === 'MODEL_REFUSED' ? { modelRefused: { model: String(req.model), reason: err.message } } : {}) };
     } finally { off(); this.activeRuns.delete(req.sessionRef); }
   }
 

@@ -46,6 +46,7 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Assistants can open zip and tar archives you give them: files are extracted into a new folder inside the task. Links, paths that escape the folder, and oversized archives are refused. Documents and PDFs also get text copies the assistants can read.
 
 ### Fixed
+- Fable turns run. `claude-fable-5-1` now maps to the `fable` alias the Claude connection advertises; before this, every Fable turn was refused. A model the connection refuses now falls back to the assistant's previous model for that turn and is posted to the team group, where it used to fail silently. At startup, ClaudeBot checks that every configured model resolves.
 - A Next, Continue or Save click no longer counts as confirming anything. Only a committed Submit, Confirm, Verify, Apply or Send on a page about the same subject does.
 - Opening or reading a page no longer counts as verifying it. A "verified" or "confirmed" claim needs a verification record, an application record, or a committed action on a page about the same subject.
 - Status counts leave out test projects (telegram:false, dry_run) unless the question is asked inside one. Every group member gets the status block, not only the lead. An assistant now sees the ClaudeBot check notes under its last reply on its next turn. "Verified" needs a verification record or a page about the same subject; an earlier send does not count. Owner/Accounts.md no longer feeds the answer bank, and "com", "net", "org", "io" and "www" are no longer answer-bank keys.
