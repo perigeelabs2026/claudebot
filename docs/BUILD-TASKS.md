@@ -22,7 +22,7 @@ The checks (installing dependencies, tests, typecheck) run as `claudebot-builder
 - cannot read the secret store, a clone's `.git` or any other task's worktree;
 - reaches the network only through the egress proxy on 127.0.0.1:18799. The proxy allows GitHub and npm over HTTPS (not Anthropic: checks never call Claude). nftables refuses everything else for that uid, except the computer's own DNS resolver and the engine's port on your Mac.
 
-The engine's own user hands one worktree to the builder and back with `/opt/claudebot/bin/claudebot-handover`. It refuses, and the task fails, if a check replaced the worktree's `.git` pointer or its `.claudebot` folder. The commit names the worktree's git folder itself, with hooks and signing off, so nothing a check left behind is followed. The `npm ci` output is kept in each check's saved output.
+The engine's own user hands one worktree to the builder and back with `/opt/claudebot/bin/claudebot-handover`. Handing back first kills every process the builder still has. It refuses, and the task fails, if a check replaced the worktree's `.git` pointer or its `.claudebot` folder. The commit names the worktree's git folder itself, with hooks and signing off, so nothing a check left behind is followed. The `npm ci` output is kept in each check's saved output.
 
 The narrow sudo rule for the engine's user, in `/etc/sudoers.d/claudebot` (check it with `visudo -cf` first):
 

@@ -1,19 +1,22 @@
 #!/bin/bash
 # Root helper: the one command the engine's user may run as root (sudoers.d/claudebot). Hands one build worktree to the builder uid or
-# back to the engine's user, for the length of a check. Usage: claudebot-handover <worktree> <claudebot-builder|engine user> check
+# back to the engine's user, for the length of a check. Handing back first kills every process the builder still has.
+# Usage: claudebot-handover <worktree> <claudebot-builder|engine user> check
 #   The worktree minus its .git pointer and .claudebot/ (the broker capability stays the engine's). Refuses (exit 3, nothing changed)
 #   unless .git is still the engine user's own regular file reading exactly "gitdir: <clone>/.git/worktrees/<job>" and .claudebot,
 #   when present, is still the engine user's own real directory: a check that swapped either cannot get it chowned or followed.
 set -euo pipefail
 D=/mnt/lima-claudebot-computer-data
 [ -z "${SUDO_USER:-}" ] && [ -n "${CLAUDEBOT_HANDOVER_DATA:-}" ] && D=$CLAUDEBOT_HANDOVER_DATA   # tests only (never under sudo)
+B=claudebot-builder; [ -z "${SUDO_USER:-}" ] && [ -n "${CLAUDEBOT_HANDOVER_BUILDER:-}" ] && B=$CLAUDEBOT_HANDOVER_BUILDER
 [ $# -eq 3 ] || { echo "usage: claudebot-handover <worktree> <user> check" >&2; exit 2; }
 dir=$(realpath -e -- "$1"); who=$2; mode=$3
 parent=$(dirname -- "$dir")
 case "$parent" in "$D"/repos/*-worktrees) ;; *) echo "refused: $dir is not a build worktree" >&2; exit 2;; esac
 [ "$(dirname -- "$parent")" = "$D/repos" ] || { echo "refused: $dir is not a build worktree" >&2; exit 2; }
 engine=$(stat -c %U "$D/repos")
-case "$who" in claudebot-builder|"$engine") ;; *) echo "refused: user $who" >&2; exit 2;; esac
+case "$who" in "$B"|"$engine") ;; *) echo "refused: user $who" >&2; exit 2;; esac
+[ "$mode" = check ] || { echo "refused: mode $mode" >&2; exit 2; }
 app=$(basename -- "$parent"); app=${app%-worktrees}; job=$(basename -- "$dir")
 want="gitdir: $D/repos/$app/.git/worktrees/$job"
 intact() {
@@ -23,8 +26,13 @@ intact() {
   fi
 }
 intact || exit 3
-case "$mode" in
-  check) find "$dir" -mindepth 1 \( -path "$dir/.git" -o -path "$dir/.claudebot" \) -prune -o -exec chown -h "$who" {} + ;;
-  *) echo "refused: mode $mode" >&2; exit 2;;
-esac
+# Handing back: nothing the check started (a background process, a daemonized install script) keeps running as the builder to write
+# into the worktree after the engine owns it again.
+if [ "$who" = "$engine" ] && id -u "$B" >/dev/null 2>&1; then
+  pkill -KILL -u "$B" || true
+  alive() { ps -u "$B" -o stat= 2>/dev/null | grep -qv '^Z'; }   # a killed process waiting to be reaped can no longer do anything
+  for _ in $(seq 50); do alive || break; sleep 0.1; done
+  alive && { echo "refused: processes of $B are still running" >&2; exit 4; }
+fi
+find "$dir" -mindepth 1 \( -path "$dir/.git" -o -path "$dir/.claudebot" \) -prune -o -exec chown -h "$who" {} +
 chown "$who" "$dir"

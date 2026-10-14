@@ -91,6 +91,23 @@ test('hand-over helper: only a worktree directly under repos/<app>-worktrees, on
   fs.rmSync(path.join(wt, '.claudebot'), { recursive: true }); run(wt, 'root', 'check'); assert.equal(fs.statSync(path.join(wt, 'src', 'a.js')).uid, 0, 'no .claudebot at all is fine');
 });
 
+test('hand-over helper: handing back kills every process the builder still has first', { skip: (process.getuid?.() !== 0 || process.platform !== 'linux') && 'needs root on Linux (a throwaway user)' }, async () => {
+  const B = `cbt${process.pid}`; execFileSync('useradd', ['-M', '-r', '-s', '/usr/sbin/nologin', B]);
+  try {
+    const D = fs.mkdtempSync(path.join(os.tmpdir(), 'hk-')); const wt = path.join(D, 'repos', 'demo-worktrees', 'job-1'); fs.mkdirSync(path.join(wt, 'src'), { recursive: true });
+    fs.chmodSync(D, 0o755); fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${D}/repos/demo/.git/worktrees/job-1\n`);
+    const env = { ...process.env, CLAUDEBOT_HANDOVER_DATA: D, CLAUDEBOT_HANDOVER_BUILDER: B }; delete (env as Record<string, string | undefined>).SUDO_USER;
+    const run = (...a: string[]) => execFileSync('bash', [path.join(ROOT, 'computer', 'runtime', 'claudebot-handover'), ...a], { env, encoding: 'utf8', stdio: 'pipe' });
+    run(wt, B, 'check'); assert.equal(fs.statSync(path.join(wt, 'src')).uid, Number(execFileSync('id', ['-u', B], { encoding: 'utf8' }).trim()));
+    // What a check could leave behind: a detached process still running as the builder, able to write into the worktree later.
+    const { spawn } = await import('node:child_process'); const left = spawn('setpriv', ['--reuid', B, '--regid', B, '--clear-groups', 'sleep', '300'], { detached: true, stdio: 'ignore' }); left.unref();
+    for (let i = 0; i < 50 && !execFileSync('bash', ['-c', `pgrep -u ${B} || true`], { encoding: 'utf8' }).trim(); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(execFileSync('bash', ['-c', `pgrep -u ${B} || true`], { encoding: 'utf8' }).trim(), 'the leftover process is running');
+    run(wt, 'root', 'check');
+    assert.equal(execFileSync('bash', ['-c', `ps -u ${B} -o stat= | grep -v '^Z' || true`], { encoding: 'utf8' }).trim(), '', 'no builder process survives the hand-back'); assert.equal(fs.statSync(path.join(wt, 'src')).uid, 0);
+  } finally { try { execFileSync('pkill', ['-KILL', '-u', B]); } catch { /* none */ } execFileSync('userdel', [B]); }
+});
+
 test('commit and export name the worktree\'s git dir explicitly, with hooks and signing off: a rewritten .git pointer or hooks path is not followed', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gd-')); const src = origin(root); const sh = localShell(path.join(root, 'repos'), {} as NodeJS.ProcessEnv); const repo = { app: 'demo', url: src };
   assert.equal(worktreeGitDir('/d/repos/app-worktrees/job-9'), '/d/repos/app/.git/worktrees/job-9');

@@ -95,7 +95,7 @@ export const DETERMINISTIC: Record<string, DetFn> = {
       const artifact = recordArtifact(ctx, 'checks', 'file', `Final ${r.label} (${r.notRun ? 'not run' : r.ok ? 'passed' : 'failed'})`, file, { command: r.label, where: sh.where });
       ctx.store.event(ctx.job.id, ctx.actor, 'command.ran', { command: r.label, cwd: dir, exit: r.ok ? 0 : 1, final: true, failing: r.failing });
       results.push({ check, label: r.label, ok: r.ok, notRun: r.notRun, failing: r.failing, artifact });
-      if (r.tampered) { ctx.store.event(ctx.job.id, ctx.actor, 'build.tampered', { check: r.label, cwd: dir }); return { ok: false, reason: `the ${r.label} check replaced the worktree's .git pointer or .claudebot, so the worktree was not handed back`, terminal: true, operatorAction: 'Nothing was committed. Inspect the branch before re-running the task.' }; }
+      if (r.tampered) { ctx.store.event(ctx.job.id, ctx.actor, 'build.tampered', { check: r.label, cwd: dir }); return { ok: false, reason: `the ${r.label} check replaced the worktree's .git pointer or .claudebot, or left processes that would not stop, so the worktree was not handed back`, terminal: true, operatorAction: 'Nothing was committed. Inspect the branch before re-running the task.' }; }
     }
     const failed = results.filter((x) => !x.ok && !x.notRun);
     if (failed.length) {

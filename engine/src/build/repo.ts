@@ -190,7 +190,7 @@ ${sh.builder} bash -s <<'CLAUDEBOT_CHECK'
 ${inner}
 CLAUDEBOT_CHECK
 rc=$?
-own "$me" || { echo 'HANDOVER_REFUSED: the check replaced the worktree pointer or .claudebot; the worktree was not handed back'; exit 5; }
+own "$me" || { echo 'HANDOVER_REFUSED: the worktree was not handed back (the check replaced its .git pointer or .claudebot, or left processes that would not stop)'; exit 5; }
 exit $rc` : inner;
   const r = await sh.run(script, { timeoutMs });
   const notRun = r.code === 3 && /NOT_RUN:/.test(r.out);
