@@ -318,14 +318,12 @@ export class BrokerApi {
         return { ok: true, text: `shared "${f.title}"` };
       }
       // ---- the lead's team tools: each acts only on the owner's own words in the message being answered ----
-      case 'set_rule': {   // the owner's standing rules (Owner/Rules.md): written only from an owner message in this conversation, quoted by id
+      case 'set_rule': {   // the owner's standing rules (Owner/Rules.md): any assistant, but only from an owner message (any conversation), quoted by id and word for word
         const refuse = (reason: string) => { this.store.event(cap.job_id, actor, 'rule.refused', { action: String(a.action ?? ''), owner_message_id: String(a.owner_message_id ?? '').slice(0, 80), rule: String(a.rule ?? a.contains ?? '').slice(0, 300), reason }); return { ok: false, text: `Not changed: ${reason}. Only the owner's own words change the rules; you may suggest the rule to the owner instead.` }; };
-        if (cap.role !== 'coordinator') return refuse('only the lead can change the owner\'s rules');
-        const me = this.store.get(cap.job_id); const mid = String(a.owner_message_id ?? '').trim();
+        const mid = String(a.owner_message_id ?? '').trim();
         if (!mid) return refuse('owner_message_id is missing: quote the id of the owner\'s message that states the rule');
         const m = db.prepare('SELECT id, conversation_id, role, content FROM messages WHERE id = ?').get(mid) as { id: string; conversation_id: string; role: string; content: string } | undefined;
         if (!m || m.role !== 'owner') return refuse('that id is not a message from the owner');
-        if (!me?.conversation_id || m.conversation_id !== me.conversation_id) return refuse('that owner message is not in this conversation');
         const norm = (x: string) => x.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"').replace(/\s+/g, ' ').trim();
         const vault = new Vault();
         if (a.action === 'remove') {
