@@ -20,17 +20,19 @@ function facts(dir: string): Array<{ text: string; key: string; source: string }
   for (const f of files) for (const raw of fs.readFileSync(f, 'utf8').split('\n')) {
     const line = raw.trim(); if (!/^[-*]\s+/.test(line)) continue; const text = line.replace(/^[-*]\s+/, '').trim(); if (text.length < 4) continue;
     if (text.includes(':') && !text.slice(text.indexOf(':') + 1).trim()) continue;   // a blank template line ("- Desired salary:") is not an answer
-    const key = text.includes(':') ? text.slice(0, text.indexOf(':')) : text; out.push({ text, key, source: path.relative(dir, f) });
+    // Only a labelled fact ("Quota attainment: …") has a key.
+    const key = text.includes(':') ? text.slice(0, text.indexOf(':')) : ''; out.push({ text, key, source: path.relative(dir, f) });
   }
   return out;
 }
 
 /** The best matching facts for a form question, strongest first; empty means the bank does not know. */
-export function lookupAnswer(question: string, dir: string = vaultDir(), limit = 3): Answer[] {
+export function lookupAnswer(question: string, dir: string = vaultDir(), limit = 3, opts: { keyMatch?: boolean } = {}): Answer[] {
   const q = new Set(words(question)); if (!q.size) return [];
-  const scored = facts(dir).map((f) => { const k = new Set(words(f.key)); const all = new Set(words(f.text)); let s = 0; for (const w of q) { if (k.has(w)) s += 2; else if (all.has(w)) s += 1; } return { text: f.text, source: f.source, score: s }; });
-  return scored.filter((a) => a.score >= 2).sort((a, b) => b.score - a.score).slice(0, limit);
+  const scored = facts(dir).map((f) => { const k = new Set(words(f.key)); const all = new Set(words(f.text)); let s = 0; let keyHit = false; for (const w of q) { if (k.has(w)) { s += 2; keyHit = true; } else if (all.has(w)) s += 1; } return { text: f.text, source: f.source, score: s, keyHit }; });
+  return scored.filter((a) => a.score >= 2 && (!opts.keyMatch || a.keyHit)).map(({ keyHit: _k, ...a }) => a).sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
-/** True when the bank holds an answer for this question (so it is not the owner's to answer). */
-export const bankKnows = (question: string, dir?: string) => lookupAnswer(question, dir).length > 0;
+/** True when the bank holds an answer for this question (so it is not the owner's to answer). Strict: the matched fact's own label must share a word with the question ("Quota attainment" for a quota question), so
+ *  a work-history line that merely names the same company never counts as an answer. */
+export const bankKnows = (question: string, dir?: string) => lookupAnswer(question, dir, 1, { keyMatch: true }).length > 0;

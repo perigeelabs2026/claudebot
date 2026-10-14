@@ -53,7 +53,7 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - Telegram now sends only replies to messages you wrote on Telegram, decision cards, verified application receipts and the morning line. Everything else stays in the app's team group.
 - Telegram sends one plain line when an assistant hits something only you can clear (a sign-in or a CAPTCHA, including hCaptcha). These lines are held during quiet hours.
 - The app window no longer looks frozen after the engine restarts, because every reconnect refreshes the whole view.
-- A Telegram blocker line is skipped when your answer bank already has the answer.
+- A Telegram blocker line is skipped when your answer bank already has the answer. Only a labelled fact whose label matches the question counts (a work-history line that names the company does not).
 - The stuck-reply check ignores negated, "would"/"could" and question sentences when looking for a route that was tried.
 - A verified application now posts its "Applied:" receipt in the team group.
 - The stuck-reply check now needs a route that was actually tried and named, and a sign-in or CAPTCHA mention only excuses its own sentence.

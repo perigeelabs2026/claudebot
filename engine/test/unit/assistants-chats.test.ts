@@ -660,3 +660,11 @@ test('the tried-check ignores negated and hypothetical routes ("I have not tried
   const d = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] });
   for (const q of ['Acme?', 'Acme again?']) { const { job } = s.chat.send(d.id, q, s.defs); assert.equal(await run(s, job.id), 'completed'); const b = s.db.prepare('SELECT id FROM jobs WHERE idempotency_key = ?').get(`engine:askback:${job.id}`) as { id: string } | undefined; assert.ok(b, `bounced: ${q}`); assert.equal(await run(s, b!.id), 'completed'); }
 });
+
+test('the answer bank only counts a fact whose own label matches the question (a work-history line naming the company is not an answer)', async () => {
+  const { bankKnows } = await import('../../src/memory/answer-bank.ts');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bank2-')); fs.mkdirSync(path.join(dir, 'Owner'));
+  fs.writeFileSync(path.join(dir, 'Owner', 'Work history.md'), '- Applied to Acme and hoping to join their customer team.\n- Quota attainment: 70% across all quarters\n');
+  assert.equal(bankKnows('Why do you want to join Acme? (essay)', dir), false);
+  assert.equal(bankKnows('the form needs quota attainment for each of the last 4 years', dir), true);
+});
