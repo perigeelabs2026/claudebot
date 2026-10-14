@@ -353,7 +353,7 @@ export class ChatStore {
     if (!rows.length) return '';
     const names = new Map((this.db.prepare('SELECT id, name FROM agent_definitions').all() as Array<{ id: string; name: string }>).map((a) => [a.id, a.name]));
     const who = (r: { role: string; sender: string }) => (r.role === 'owner' ? 'Owner' : r.role === 'assistant' ? (r.sender === agentId ? 'You' : names.get(r.sender) ?? r.sender) : 'System');
-    const day = (s: string) => new Date(s).toLocaleString('en-US', { timeZone: 'America/Phoenix', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    const day = (s: string) => new Date(s).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });   // the Mac's local time zone (the owner's day)
     const groups = new Map<string, typeof rows>();
     for (const r of rows) { const g = groups.get(r.conversation_id); if (g) g.push(r); else groups.set(r.conversation_id, [r]); }
     // Rows are oldest first, so each group's last row is its newest; the most recently active conversations are kept and shown last.

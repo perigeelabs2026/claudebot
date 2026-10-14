@@ -55,6 +55,7 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - The app window no longer looks frozen after the engine restarts, because every reconnect refreshes the whole view.
 - A Telegram blocker line is skipped when your answer bank already has the answer. Only a labelled fact whose label matches the question counts (a work-history line that names the company does not), and generic labels such as Company, Role, Name or Email never count as a match.
 - The stuck-reply check ignores negated, "would"/"could" and question sentences when looking for a route that was tried.
+- Recent-conversation timestamps shown to assistants use your Mac's time zone (they were fixed to Arizona time).
 - A verified application now posts its "Applied:" receipt in the team group.
 - The stuck-reply check now needs a route that was actually tried and named, and a sign-in or CAPTCHA mention only excuses its own sentence.
 - Replies that say something "stays unsent" or "could not be verified" without listing other routes tried go back to the assistant to try other people and sources.

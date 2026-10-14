@@ -621,7 +621,7 @@ test('an automatic report may start one follow-up when delegated work came back 
   const mk = (key: string, inputs: Record<string, unknown>) => { const j = s.store.create({ idempotency_key: key, kind: 'chat.turn', objective: 'Automatic report: delegated work finished', success_contract: {}, agent_role: 'coordinator', workspace_id: s.ws.id, inputs } as never, 'engine').job; s.db.prepare('UPDATE jobs SET conversation_id = ? WHERE id = ?').run(d.id, j.id); return s.store.get(j.id)!; };
   const quiet = mk('auto-1', { automatic: true, conversation_id: d.id });
   const no = await s.broker.call(cap(quiet, ['create_job']), 'create_job', { kind: 'document.create', objective: 'x', agent_role: 'builder' }); assert.equal(no.ok, false, 'nothing came back blocked: no new work');
-  const blocked = s.store.create({ idempotency_key: 'deleg-1', kind: 'research.report', objective: 'Verify Jean Laurent', success_contract: {}, agent_role: 'builder', workspace_id: s.ws.id } as never, 'owner').job;
+  const blocked = s.store.create({ idempotency_key: 'deleg-1', kind: 'research.report', objective: 'Verify Pat Rivera', success_contract: {}, agent_role: 'builder', workspace_id: s.ws.id } as never, 'owner').job;
   s.db.prepare("UPDATE jobs SET conversation_id = ?, outcome = 'blocked', updated_at = ? WHERE id = ?").run(d.id, new Date().toISOString(), blocked.id);
   const auto = mk('auto-2', { automatic: true, conversation_id: d.id });
   const one = await s.broker.call(cap(auto, ['create_job']), 'create_job', { kind: 'document.create', objective: 'Find another decision-maker and verify their address', agent_role: 'builder' }); assert.equal(one.ok, true, one.text);

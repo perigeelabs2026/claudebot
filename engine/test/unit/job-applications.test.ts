@@ -134,9 +134,9 @@ test('every field and key press inside a job application is covered by the permi
 test('blocked needs two alternatives tried first (one unverifiable contact is not "stuck"), unless only the owner can clear it; lookup_answer reads the answer bank', async () => {
   const s = setupBroker(); const c = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'researcher'] });
   const turn = s.chat.send(c.id, '@researcher find the hiring manager email', s.defs).job;
-  const one = await s.call(turn, 'report_outcome', { status: 'blocked', reason: 'Jean Laurent address not verified', alternatives_tried: [{ route: 'company site', result: 'no address' }] });
+  const one = await s.call(turn, 'report_outcome', { status: 'blocked', reason: 'Pat Rivera address not verified', alternatives_tried: [{ route: 'company site', result: 'no address' }] });
   assert.equal(one.ok, false); assert.match(one.text, /try another contact, source or route first/);
-  const two = await s.call(turn, 'report_outcome', { status: 'blocked', reason: 'no verifiable contact', alternatives_tried: [{ route: 'Jean Laurent via company site', result: 'unverified' }, { route: 'CEO via LinkedIn and press release', result: 'no public email' }] });
+  const two = await s.call(turn, 'report_outcome', { status: 'blocked', reason: 'no verifiable contact', alternatives_tried: [{ route: 'Pat Rivera via company site', result: 'unverified' }, { route: 'CEO via LinkedIn and press release', result: 'no public email' }] });
   assert.equal(two.ok, true, two.text);
   const cap2 = await s.call(turn, 'report_outcome', { status: 'blocked', block_kind: 'captcha', reason: 'hCaptcha at submit' }); assert.equal(cap2.ok, true);
   const { vaultDir } = await import('../../src/memory/vault.ts'); const dir = vaultDir(); fs.mkdirSync(path.join(dir, 'Owner'), { recursive: true });
