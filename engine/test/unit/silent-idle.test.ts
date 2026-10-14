@@ -11,7 +11,7 @@ import { ApprovalStore } from '../../src/approvals/store.ts';
 import { Definitions } from '../../src/model/definitions.ts';
 import { Workspaces } from '../../src/model/workspaces.ts';
 import { ChatStore } from '../../src/chat/store.ts';
-import { ClaudeAcpRuntime, classifyFailure } from '../../src/runtime/claude-acp.ts';
+import { ClaudeAcpRuntime, classifyFailure, PROBE_COOLDOWN_MS } from '../../src/runtime/claude-acp.ts';
 import { validateModel, advertised, startupModelCheck } from '../../src/runtime/model-check.ts';
 import { failureStreaks, routineLines, governorLine, starvation, resetLapsed, approvalReminders, STREAK } from '../../src/cos/watch.ts';
 
@@ -206,17 +206,18 @@ test('1: the model probe runs on the most recent real ACP session from the jobs 
   assert.equal(latestAcpSession(s.db), null, 'the control session is not an ACP session');
   s.db.prepare("UPDATE jobs SET session_ref = 'agent:researcher:acp:00aa11bb', updated_at = '2026-10-14T11:00:00Z' WHERE id = ?").run(t.id);
   assert.equal(latestAcpSession(s.db), 'agent:researcher:acp:00aa11bb');
-  const rt = new ClaudeAcpRuntime({ gateway: {} as never, log, claudeExecutable: '/bin/false', claudeConfigDir: '/tmp/none' }) as unknown as { command: (m: string) => Promise<string>; advertisedModels: (o?: unknown) => Promise<{ models: string[]; reply: string } | null> };
+  const rt = new ClaudeAcpRuntime({ gateway: {} as never, log, claudeExecutable: '/bin/false', claudeConfigDir: '/tmp/none' }) as unknown as { command: (m: string) => Promise<string>; advertisedModels: (o?: unknown) => Promise<{ models: string[]; reply: string } | null>; lastEmptyProbe: number; probedSessions: Set<string> };
   const sent: string[] = []; rt.command = async (m) => { sent.push(m); throw new Error('ACP session not found: agent:researcher:acp:00aa11bb'); };
   const v = await advertised(rt, { db: s.db }); assert.equal(v.verified, false, 'a session error is unverified, not a refusal'); assert.deepEqual(sent, ['/acp model claudebot-model-probe agent:researcher:acp:00aa11bb']);
   rt.command = async (m) => { sent.push(m); return 'ACP error: unknown model claudebot-model-probe. Available models: default, opus, fable, sonnet, haiku'; };
+  rt.lastEmptyProbe = 0; rt.probedSessions.clear();
   const v2 = await advertised(rt, { db: s.db }); assert.equal(v2.verified, true); assert.ok(v2.models.includes('fable'));
   assert.ok(sent.every((m) => !/agent:control:main/.test(m)), 'never probed on the control session');
   const r = await startupModelCheck(s.db, s.store, rt as never, (id) => s.defs.previousModel(id)); assert.equal(r.verified, true);
 });
 
 test('1: with no ACP session at startup nothing is probed, and the first assistant turn harvests the list', async () => {
-  const rt = new ClaudeAcpRuntime({ gateway: {} as never, log, claudeExecutable: '/bin/false', claudeConfigDir: '/tmp/none' }) as unknown as { command: (m: string) => Promise<string>; advertisedModels: (o?: unknown) => Promise<{ models: string[] } | null>; probeOn: (k: string) => Promise<boolean>; ensureSession: () => Promise<string>; ensureTimeout: () => Promise<void>; verified: unknown };
+  const rt = new ClaudeAcpRuntime({ gateway: {} as never, log, claudeExecutable: '/bin/false', claudeConfigDir: '/tmp/none' }) as unknown as { command: (m: string) => Promise<string>; advertisedModels: (o?: unknown) => Promise<{ models: string[]; reply: string } | null>; probeOn: (k: string) => Promise<boolean>; ensureSession: () => Promise<string>; ensureTimeout: () => Promise<void>; verified: unknown };
   const sent: string[] = []; rt.command = async (m) => { sent.push(m); return /claudebot-model-probe/.test(m) ? 'ACP error: unknown model. Available models: default, opus, fable, sonnet, haiku' : 'ok'; };
   assert.equal(await rt.advertisedModels(), null); assert.equal(sent.length, 0, 'no session: no probe');
   // The first turn: the runtime probes on the session it just spawned, before setting the assistant's model.
@@ -228,4 +229,45 @@ test('1: with no ACP session at startup nothing is probed, and the first assista
   assert.ok((await rt.advertisedModels())?.models.includes('fable'), 'the list is known after the first turn'); const n = sent.length;
   await (rt as unknown as { startTurn: (r: unknown) => Promise<unknown> }).startTurn({ jobId: 'j2', sessionRef: '', prompt: 'hi', cwd: '/tmp', timeoutMs: 60_000, model: 'claude-opus-5-5', role: 'researcher' }).catch(() => {});
   assert.equal(sent.slice(n).filter((m) => /claudebot-model-probe/.test(m)).length, 0, 'later turns do not probe again');
+});
+
+type ProbeRt = { command: (m: string) => Promise<string>; advertisedModels: (o?: unknown) => Promise<{ models: string[]; reply: string } | null>; probeOn: (k: string, cur?: string) => Promise<boolean>; models: Map<string, string>; lastEmptyProbe: number; probedSessions: Set<string> };
+const probeRt = () => new ClaudeAcpRuntime({ gateway: {} as never, log, claudeExecutable: '/bin/false', claudeConfigDir: '/tmp/none' }) as unknown as ProbeRt;
+
+test('1 (Fable d160a2c): while the list is unverified each session is probed once, and a probe that lists nothing starts a 10-minute cooldown for every path', async () => {
+  const rt = probeRt(); const sent: string[] = []; rt.command = async (m) => { sent.push(m); return 'Usage: /acp model <model-id>'; };
+  await rt.advertisedModels({ sessionKey: 'agent:researcher:acp:aa' }); assert.equal(sent.length, 1);
+  await rt.advertisedModels({ sessionKey: 'agent:researcher:acp:aa' }); await rt.advertisedModels({ sessionKeys: ['agent:builder:acp:bb'] }); await rt.probeOn('agent:builder:acp:bb', 'agent:builder:acp:bb');
+  assert.equal(sent.length, 1, 'no probe of any session during the cooldown (advertisedModels, saves, startup and turns alike)');
+  rt.lastEmptyProbe = Date.now() - PROBE_COOLDOWN_MS - 1;
+  await rt.advertisedModels({ sessionKey: 'agent:researcher:acp:aa' }); assert.equal(sent.length, 1, 'a session already probed is not asked again');
+  await rt.advertisedModels({ sessionKey: 'agent:builder:acp:bb' }); assert.equal(sent.length, 2, 'a new session after the cooldown is');
+  assert.equal(PROBE_COOLDOWN_MS, 600_000);
+});
+
+test('1 (Fable d160a2c): a probe the gateway accepts is undone: the session model is forgotten and, on another assistant\'s session, set back', async () => {
+  const rt = probeRt(); const sent: string[] = []; rt.command = async (m) => { sent.push(m); return 'Model set to claudebot-model-probe.'; };
+  rt.models.set('agent:researcher:acp:aa', 'claude-opus-5-5');
+  assert.equal(await rt.probeOn('agent:researcher:acp:aa'), false);
+  assert.deepEqual(sent, ['/acp model claudebot-model-probe agent:researcher:acp:aa', '/acp model opus agent:researcher:acp:aa'], 'the previous model is re-sent');
+  assert.equal(rt.models.get('agent:researcher:acp:aa'), 'claude-opus-5-5', 'and recorded again once accepted');
+  // The turn's own session: forgotten, not restored here (ensureModel sets its model right after).
+  const rt2 = probeRt(); const sent2: string[] = []; rt2.command = async (m) => { sent2.push(m); return 'ok'; }; rt2.models.set('agent:builder:acp:bb', 'claude-sonnet-5-5');
+  await rt2.probeOn('agent:builder:acp:bb', 'agent:builder:acp:bb'); assert.equal(sent2.length, 1); assert.equal(rt2.models.has('agent:builder:acp:bb'), false, 'so the turn sets the model again');
+  // A refusal changes nothing.
+  const rt3 = probeRt(); const sent3: string[] = []; rt3.command = async (m) => { sent3.push(m); return 'ACP error: unknown model'; }; rt3.models.set('agent:x:acp:cc', 'claude-opus-5-5');
+  await rt3.probeOn('agent:x:acp:cc'); assert.equal(sent3.length, 1); assert.equal(rt3.models.get('agent:x:acp:cc'), 'claude-opus-5-5');
+});
+
+test('1 (Fable d160a2c): the last few distinct ACP sessions are tried in order until one lists', async () => {
+  const { setupBroker } = await import('./helpers-broker.ts');
+  const { latestAcpSessions } = await import('../../src/runtime/model-check.ts');
+  const s = setupBroker(); const c = s.chat.create({ workspace_id: s.ws.id });
+  const keys = ['agent:researcher:acp:01', 'agent:researcher:acp:01', 'agent:builder:acp:02', 'agent:writer:acp:03'];
+  keys.forEach((k, i) => { const t = s.chat.send(c.id, `m${i}`, s.defs).job; s.db.prepare('UPDATE jobs SET session_ref = ?, updated_at = ? WHERE id = ?').run(k, `2026-10-14T1${i}:00:00Z`, t.id); });
+  assert.deepEqual(latestAcpSessions(s.db), ['agent:writer:acp:03', 'agent:builder:acp:02', 'agent:researcher:acp:01'], 'newest first, distinct');
+  const rt = probeRt(); const sent: string[] = [];
+  rt.command = async (m) => { sent.push(m); if (/acp:03/.test(m)) throw new Error('ACP session not found'); return 'ACP error: unknown model. Available models: default, opus, fable, sonnet, haiku'; };
+  const v = await advertised(rt, { db: s.db }); assert.equal(v.verified, true, 'the next candidate lists');
+  assert.deepEqual(sent, ['/acp model claudebot-model-probe agent:writer:acp:03', '/acp model claudebot-model-probe agent:builder:acp:02'], 'the broken newest one errors, the next is tried, and the walk stops at the first list');
 });

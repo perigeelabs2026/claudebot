@@ -15,16 +15,20 @@ import { teamLine } from '../cos/alerts.ts';
 export const ADVERTISED_MODELS = ['default', 'opus', 'sonnet', 'haiku'] as const;
 export const resolves = (model: string, advertised: readonly string[] = ADVERTISED_MODELS): boolean => advertised.map((a) => a.toLowerCase()).includes(acpModel(model).toLowerCase());
 
-/** The most recent real ACP session key (agent:<role>:acp:<uuid>) from the jobs table: the only kind of session `/acp model` lists models on. */
-export function latestAcpSession(db: DB | null | undefined): string | null {
-  if (!db) return null;
-  const r = db.prepare("SELECT COALESCE(CASE WHEN session_ref LIKE 'agent:%:acp:%' THEN session_ref END, CASE WHEN runtime_session_id LIKE 'agent:%:acp:%' THEN runtime_session_id END) AS k FROM jobs WHERE session_ref LIKE 'agent:%:acp:%' OR runtime_session_id LIKE 'agent:%:acp:%' ORDER BY updated_at DESC LIMIT 1").get() as { k: string | null } | undefined;
-  return r?.k ?? null;
+/** The most recent distinct real ACP session keys (agent:<role>:acp:<uuid>) from the jobs table, newest first: the only kind of session
+ *  `/acp model` lists models on. Several, so a closed or broken one does not end the probe. */
+export function latestAcpSessions(db: DB | null | undefined, limit = 5): string[] {
+  if (!db) return [];
+  const rows = db.prepare("SELECT session_ref AS a, runtime_session_id AS b FROM jobs WHERE session_ref LIKE 'agent:%:acp:%' OR runtime_session_id LIKE 'agent:%:acp:%' ORDER BY updated_at DESC LIMIT 50").all() as Array<{ a: string | null; b: string | null }>;
+  const out: string[] = [];
+  for (const r of rows) for (const k of [r.a, r.b]) if (k && /^agent:[a-z_]+:acp:[0-9a-f-]+$/i.test(k) && !out.includes(k)) { out.push(k); if (out.length >= limit) return out; }
+  return out;
 }
+export const latestAcpSession = (db: DB | null | undefined): string | null => latestAcpSessions(db, 1)[0] ?? null;
 
 /** The connection's own list, or the fallback list when it names none. */
 export async function advertised(runtime: Pick<ModelRuntime, 'advertisedModels'> | null | undefined, opts: { fresh?: boolean; db?: DB | null } = {}): Promise<{ models: readonly string[]; reply: string | null; verified: boolean }> {
-  try { const sessionKey = latestAcpSession(opts.db); const r = await runtime?.advertisedModels?.(opts.fresh || sessionKey ? { ...(opts.fresh ? { fresh: true } : {}), ...(sessionKey ? { sessionKey } : {}) } : undefined); if (r && r.models.length) return { models: r.models, reply: r.reply, verified: true }; } catch { /* the fallback list */ }
+  try { const sessionKeys = latestAcpSessions(opts.db); const r = await runtime?.advertisedModels?.(opts.fresh || sessionKeys.length ? { ...(opts.fresh ? { fresh: true } : {}), ...(sessionKeys.length ? { sessionKeys } : {}) } : undefined); if (r && r.models.length) return { models: r.models, reply: r.reply, verified: true }; } catch { /* the fallback list */ }
   return { models: ADVERTISED_MODELS, reply: null, verified: false };
 }
 

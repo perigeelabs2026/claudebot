@@ -71,6 +71,10 @@ export const ACP_MODEL_ALIAS: Record<string, string> = { 'claude-opus-5-5': 'opu
 /** How long a harvested model list is trusted before it is probed again. */
 export const MODEL_LIST_TTL_MS = 3600_000;
 const ACP_SESSION = /^agent:[a-z_]+:acp:[0-9a-f-]+$/i;
+/** A reply to `/acp model` that means the model was not taken (the session keeps its model). */
+const REFUSED = /ACP error|unknown|invalid|not (available|allowed|supported|found)|unsupported|usage:/i;
+/** After a probe that lists nothing, no session is probed again for this long (turns, saves, startup and list refreshes alike). */
+export const PROBE_COOLDOWN_MS = 600_000;
 export const acpModel = (id: string) => ACP_MODEL_ALIAS[id] ?? id;
 
 export class ClaudeAcpRuntime implements ModelRuntime {
@@ -184,7 +188,7 @@ export class ClaudeAcpRuntime implements ModelRuntime {
   }
   /** The cached list while it is under an hour old; otherwise (or with fresh: true) probe again. A probe that lists nothing keeps the
    *  older list rather than forgetting it. */
-  async advertisedModels(opts: { probe?: boolean; fresh?: boolean; sessionKey?: string | null } = {}): Promise<{ models: string[]; reply: string; at: string } | null> {
+  async advertisedModels(opts: { probe?: boolean; fresh?: boolean; sessionKey?: string | null; sessionKeys?: string[] } = {}): Promise<{ models: string[]; reply: string; at: string } | null> {
     const young = this.verified && Date.now() - Date.parse(this.verified.at) < MODEL_LIST_TTL_MS;
     if (this.verified && young && !opts.fresh) return this.verified;
     if (opts.probe === false) return this.verified;
@@ -192,21 +196,39 @@ export class ClaudeAcpRuntime implements ModelRuntime {
     // (seen live 2026-10-14). The probe runs on the most recent real ACP session (agent:<role>:acp:<uuid>): the one passed in (from
     // the jobs table), else one this process set a model on. With none, nothing is probed: the first assistant turn harvests the list.
     // A probe that lists nothing (usage, session error, timeout) is unverified, never a refusal.
-    const key = [opts.sessionKey, ...[...this.models.keys()].reverse()].find((k): k is string => !!k && ACP_SESSION.test(k));
-    if (!key) return this.verified;
-    await this.probeOn(key);
+    // Candidates in order: the ones passed in (newest first, from the jobs table), then sessions this process set a model on; each is
+    // tried in one walk until one lists. The cooldown is checked before the walk; probeOn skips sessions already probed.
+    if (this.coolingDown()) return this.verified;
+    const keys = [...new Set([opts.sessionKey, ...(opts.sessionKeys ?? []), ...[...this.models.keys()].reverse()].filter((k): k is string => !!k && ACP_SESSION.test(k)))];
+    for (const key of keys.slice(0, 5)) if (await this.probeOn(key, undefined, true)) break;
     return this.verified;
   }
   /** Set the never-accepted probe model on an ACP session and harvest the list from its refusal. A refusal changes nothing on the session. */
-  private async probeOn(sessionKey: string): Promise<boolean> {
-    const reply = await this.command(`/acp model claudebot-model-probe ${sessionKey}`, 20_000).catch((e: Error) => e.message);
-    const listed = this.harvestModels(reply);
-    if (!listed) this.o.log.warn('model list probe listed nothing; the list stays unverified', { sessionKey, reply: redact(reply).slice(0, 160) });
-    return listed;
+  private probedSessions = new Set<string>();   // sessions already probed while the list was unverified: never asked twice
+  private lastEmptyProbe = 0;
+  private coolingDown(): boolean { return Date.now() - this.lastEmptyProbe < PROBE_COOLDOWN_MS; }
+  /** `current` is the session of the turn being started (its model is set right after, so it is not restored here). */
+  private async probeOn(sessionKey: string, current?: string, walking = false): Promise<boolean> {
+    if (!walking && this.coolingDown()) return false;
+    if (!this.verified && this.probedSessions.has(sessionKey)) return false;
+    this.probedSessions.add(sessionKey);
+    let reply: string; let errored = false;
+    try { reply = await this.command(`/acp model claudebot-model-probe ${sessionKey}`, 20_000); } catch (e) { reply = (e as Error).message; errored = true; }
+    if (this.harvestModels(reply)) return true;
+    this.lastEmptyProbe = Date.now();
+    this.o.log.warn('model list probe listed nothing; the list stays unverified', { sessionKey, reply: redact(reply).slice(0, 160) });
+    // The gateway took the probe model: the session is now on a model that does not exist. Forget what we set there, and put the
+    // previous model back unless it is the turn's own session (its model is set next).
+    if (!errored && reply.trim() && !REFUSED.test(reply)) {
+      const prev = this.models.get(sessionKey); this.models.delete(sessionKey);
+      this.o.log.warn('model list probe was accepted; restoring the session model', { sessionKey, prev });
+      if (sessionKey !== current && prev) await this.command(`/acp model ${acpModel(prev)} ${sessionKey}`, 20_000).then((r) => { if (!REFUSED.test(r)) this.models.set(sessionKey, prev); }).catch(() => {});
+    }
+    return false;
   }
   private async ensureModel(sessionKey: string, model: string | undefined, fallback?: string, role = ''): Promise<ModelFallback | null> {
     if (!model || this.models.get(sessionKey) === model) return null;
-    const refused = (reply: string) => /ACP error|unknown|invalid|not (available|allowed|supported|found)|unsupported|usage:/i.test(reply);
+    const refused = (reply: string) => REFUSED.test(reply);
     // A model refused for this assistant in the last hour is not requested again: the turn goes straight to the fallback.
     const cachedKey = `${role || sessionKey}|${model}`; const cached = this.refusedModels.get(cachedKey);   // per assistant and model: a new session of the same assistant does not ask again
     let reason: string;
@@ -251,7 +273,7 @@ export class ClaudeAcpRuntime implements ModelRuntime {
       await gw.connect();
       sessionKey = await this.ensureSession(req);
       if (!req.probeOnly) await this.ensureTimeout(sessionKey, req.timeoutMs);
-      if (!req.probeOnly && !this.verified && ACP_SESSION.test(sessionKey)) await this.probeOn(sessionKey);   // the first turn on a real ACP session lists the models when nothing has yet
+      if (!req.probeOnly && !this.verified && ACP_SESSION.test(sessionKey)) await this.probeOn(sessionKey, sessionKey);   // the first turn on a real ACP session lists the models when nothing has yet
       if (!req.probeOnly) modelFallback = await this.ensureModel(sessionKey, req.model, req.fallbackModel, req.role);
       req.onSession?.(sessionKey);
       req.onHeartbeat?.(`acp session ${sessionKey}`);
