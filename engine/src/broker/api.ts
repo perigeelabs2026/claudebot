@@ -25,7 +25,7 @@ import crypto from 'node:crypto';
 import { markdownToHtml, renderDocument } from '../documents/render.ts';
 import { Vault } from '../memory/vault.ts';
 import { teamLine } from '../cos/alerts.ts';
-import { shellFor, runBuildCheck } from '../build/repo.ts';
+import { shellFor, runBuildCheck, buildRepo } from '../build/repo.ts';
 import { ACP_MODEL_ALIAS } from '../runtime/claude-acp.ts';
 import { taskTitle } from '../model/wording.ts';
 import type { Capability } from './capabilities.ts';
@@ -512,7 +512,7 @@ export class BrokerApi {
           if (!sh || !wt.startsWith(`${sh.root}/`)) { this.store.event(cap.job_id, actor, 'command.refused', { profile, worktree: wt || null, reason: 'no build worktree for this task' }); return { ok: false, text: 'This build task has no worktree yet.' }; }
           const n = (db.prepare("SELECT count(*) AS n FROM job_events WHERE job_id = ? AND type = 'command.ran'").get(cap.job_id) as { n: number }).n;
           if (n >= 20) return { ok: false, text: 'this task already ran 20 checks; report what remains instead of retrying' };
-          const r = await runBuildCheck(sh, wt, profile);
+          const r = await runBuildCheck(sh, wt, profile, undefined, { installScripts: buildRepo(db)?.install_scripts === true });
           if (r.notRun) return { ok: false, text: `not run: ${r.output.slice(-400)}` };
           const dir = path.resolve(cap.workspace); fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
           const file = path.join(dir, `check-${profile}-${n + 1}.txt`); fs.writeFileSync(file, r.output, { mode: 0o600 });

@@ -71,6 +71,11 @@ test('step 1: a build task changes one string on its own branch <lead>/<job-id> 
   assert.deepEqual(git(clone, 'diff', '--name-only', 'main', branch).split('\n').sort(), ['greet.js', 'test/greet.test.js']);
   const ev = (t: string) => s.db.prepare('SELECT detail FROM job_events WHERE job_id = ? AND type = ?').all(job.id, t) as Array<{ detail: string }>;
   assert.ok(ev('command.ran').some((e) => /npm test/.test(e.detail)), 'the engine ran the tests'); assert.ok(ev('build.committed').length === 1);
+  // The result leaves the computer: a bundle and a patch in the task folder, registered as results.
+  const arts = s.db.prepare("SELECT title, path FROM artifacts WHERE job_id = ? AND stage_name = 'commit'").all(job.id) as Array<{ title: string; path: string }>;
+  const bundle = arts.find((a) => /git bundle/.test(a.title))!; const patch = arts.find((a) => /patch/.test(a.title))!; assert.ok(bundle && patch, JSON.stringify(arts));
+  assert.equal(fs.statSync(bundle.path).mode & 0o777, 0o600); assert.match(fs.readFileSync(patch.path, 'utf8'), /\+exports\.greet = \(n\) => `Hi, /);
+  git(s.url, 'fetch', '-q', bundle.path, `${branch}:refs/heads/review`); assert.match(git(s.url, 'show', 'review:greet.js'), /Hi, /, 'the bundle fetches on this machine');
   assert.equal(git(clone, 'remote', 'get-url', '--push', 'origin'), 'no-push-from-build-jobs', 'the clone cannot push');
   // main is never writable: a commit on main in the clone is refused by its hooks, and so is moving refs/heads/main.
   fs.writeFileSync(path.join(clone, 'x.txt'), 'x'); git(clone, 'add', 'x.txt');
@@ -157,6 +162,12 @@ test('hooks bypass cannot commit', () => assert.throws(() => cp.execFileSync('gi
     const wt = path.join(root, 'demo-worktrees', job.id); assert.equal(fs.statSync(wt).uid, process.getuid!(), 'the worktree is handed back after the check');
     assert.equal(fs.statSync(path.join(wt, 'test', 'escape.test.js')).uid, process.getuid!(), 'and everything in it');
   } finally { delete process.env.CLAUDEBOT_BUILD_BUILDER; }
+});
+
+test('no repository set: a build task stops at once and says how to set one', async () => {
+  const s = setup(); s.db.prepare("DELETE FROM settings WHERE key = 'build_repo'").run(); const prev = process.env.CLAUDEBOT_BUILD_REPO_URL; delete process.env.CLAUDEBOT_BUILD_REPO_URL;
+  try { const job = await delegate(s, 'change something'); const done = await runAll(s, job.id); assert.equal(done.state, 'failed_terminal'); assert.match(JSON.stringify(s.store.get(job.id)), /No repository is set for build tasks/); }
+  finally { if (prev !== undefined) process.env.CLAUDEBOT_BUILD_REPO_URL = prev; }
 });
 
 test('failingTests reads node --test spec and TAP output', () => {

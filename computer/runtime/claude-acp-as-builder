@@ -1,0 +1,15 @@
+#!/bin/bash
+# Runs as claudebot-builder. The builder's own long-lived sign-in (claude setup-token, see docs/builder-turns.md) is read from a 0400
+# file it owns and exported for this process only: never in argv, the acpx config or a log. The team's own sign-in is not touched.
+# Everything it sends out goes through the egress proxy (Anthropic, GitHub, npm only; nftables refuses anything else for this uid).
+set -euo pipefail
+B=/var/lib/claudebot-builder; TOK="$B/.claude-oauth-token"; P=http://127.0.0.1:18799
+[ -r "$TOK" ] || { echo "builder turns: no sign-in token at $TOK (see docs/builder-turns.md)" >&2; exit 78; }
+export HOME="$B" CLAUDE_CONFIG_DIR="$B/claude" PATH=/opt/node/bin:/usr/bin:/bin
+export HTTPS_PROXY=$P HTTP_PROXY=$P https_proxy=$P http_proxy=$P NO_PROXY=127.0.0.1,localhost,host.lima.internal
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1
+export CLAUDE_CODE_EXECUTABLE="$B/.local/bin/claude" CLAUDE_AGENT_LOGS="$B/logs/claude-agent-acp.log"
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX OPENAI_API_KEY
+IFS= read -r CLAUDE_CODE_OAUTH_TOKEN < "$TOK"; export CLAUDE_CODE_OAUTH_TOKEN
+mkdir -p "$CLAUDE_CONFIG_DIR" "$B/logs"
+exec /opt/node/bin/node /opt/claudebot/acp/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js "$@"

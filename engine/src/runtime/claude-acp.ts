@@ -154,7 +154,7 @@ export class ClaudeAcpRuntime implements ModelRuntime {
       if (/session:\s*agent:/.test(st) && !/Unknown|not found/i.test(st)) return req.sessionRef;
     }
     if (req.probeOnly) throw new GatewayError('ACP_SESSION_GONE', 'probe: the session is gone; nothing was spawned', false);
-    const reply = await this.command(`/acp spawn claude --mode persistent --thread off --label ${this.labelPrefix}${req.label ?? req.jobId} --cwd ${req.cwd}`);
+    const reply = await this.command(`/acp spawn ${req.asBuilder ? 'builder' : 'claude'} --mode persistent --thread off --label ${this.labelPrefix}${req.label ?? req.jobId} --cwd ${req.cwd}`);
     const key = (reply.match(/agent:[a-z_]+:acp:[0-9a-f-]+/i) ?? [])[0];
     if (!key) throw new GatewayError('ACP_SPAWN_FAILED', reply.slice(0, 300), /sandbox|unavailable|timeout/i.test(reply));
     return key;

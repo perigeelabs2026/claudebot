@@ -1,0 +1,5 @@
+#!/bin/bash
+# acpx agent "builder" (builder turns; the engine asks for it only when the builder_turns setting is on, off by default).
+# Runs the Claude ACP adapter as claudebot-builder: no sudo, cannot read the data disk's secrets, the clones' .git or other worktrees.
+# sudo resets the environment, so nothing of the gateway's environment reaches the turn.
+exec sudo -n -u claudebot-builder -H /opt/claudebot/bin/claude-acp-as-builder "$@"

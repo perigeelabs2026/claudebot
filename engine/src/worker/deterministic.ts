@@ -9,7 +9,7 @@ import { ActionStore } from '../actions/store.ts';
 import { ApprovalStore } from '../approvals/store.ts';
 import { runProbe } from '../infra/probe.ts';
 import { collectReport, openWork } from '../cos/report.ts';
-import { buildShell, shellFor, buildRepo, ensureClone, prepareWorktree, runBuildCheck, commitBuild, type BuildCheck } from '../build/repo.ts';
+import { buildShell, shellFor, buildRepo, ensureClone, prepareWorktree, runBuildCheck, commitBuild, exportBuild, stageBundle, NO_BUILD_REPO, type BuildCheck } from '../build/repo.ts';
 
 export interface DetCtx { db: DB; store: JobStore; job: Job; workspace: string; previous: Record<string, unknown>; actor: string; approvals: ApprovalStore; actions: ActionStore; /** the assistants' computer is on (build jobs run there) */ vmOn?: boolean }
 export type DetResult = { ok: true; payload: Record<string, unknown> } | { ok: false; reason: string; terminal?: boolean; operatorAction?: string };
@@ -69,11 +69,13 @@ export const DETERMINISTIC: Record<string, DetFn> = {
    *  the branch <lead>/<job-id>. The worktree path is written into the job's inputs so run_project_check and later steps find it. */
   async prepare_build_worktree(ctx) {
     const sh = buildShell(!!ctx.vmOn); if (!sh) return { ok: false, reason: 'build jobs run inside the assistants\' computer, which is not on', terminal: true, operatorAction: 'Turn on the assistants\' computer (Settings), then re-run the task.' };
-    const repo = buildRepo(ctx.db);
-    const c = await ensureClone(sh, repo); if (!c.ok) return { ok: false, reason: c.terminal ? c.error : `could not clone or fetch ${repo.url}: ${c.error}`, terminal: !!c.terminal, ...(c.terminal ? { operatorAction: 'Replace the repository token with a read-only one.' } : {}) };
+    const repo = buildRepo(ctx.db); if (!repo) return { ok: false, reason: NO_BUILD_REPO, terminal: true, operatorAction: 'Set the repository for build tasks (settings build_repo), then re-run the task.' };
+    let bundle: string | undefined;
+    if (repo.bundle_from) { const b = await stageBundle(sh, repo); if (!b.ok) return { ok: false, reason: `could not hand the repository over: ${b.error}`, terminal: false }; bundle = b.path; }
+    const c = await ensureClone(sh, repo, bundle); if (!c.ok) return { ok: false, reason: c.terminal ? c.error : `could not clone or fetch ${repo.url}: ${c.error}`, terminal: !!c.terminal, ...(c.terminal ? { operatorAction: 'Replace the repository token with a read-only one.' } : {}) };
     const w = await prepareWorktree(sh, repo, ctx.job.id, ctx.job.agent_role || 'coordinator'); if (!w.ok) return { ok: false, reason: `could not create the worktree: ${w.error}`, terminal: true, operatorAction: 'See the task detail.' };
     const inputs = JSON.parse(ctx.job.inputs || '{}') as Record<string, unknown>;
-    ctx.db.prepare('UPDATE jobs SET inputs = ?, updated_at = ? WHERE id = ?').run(JSON.stringify({ ...inputs, worktree: w.dir, branch: w.branch, repo_where: sh.where, app: repo.app }), now(), ctx.job.id);
+    ctx.db.prepare('UPDATE jobs SET inputs = ?, updated_at = ? WHERE id = ?').run(JSON.stringify({ ...inputs, worktree: w.dir, branch: w.branch, base_commit: w.base_commit, repo_where: sh.where, app: repo.app }), now(), ctx.job.id);
     fs.mkdirSync(ctx.workspace, { recursive: true, mode: 0o700 });
     fs.writeFileSync(path.join(ctx.workspace, 'JOB.md'), `# Build ${ctx.job.id}\n\nObjective: ${ctx.job.objective}\nRepository: ${repo.app} (${sh.where === 'vm' ? 'in the assistants\' computer' : 'local'})\nWorktree: ${w.dir}\nBranch: ${w.branch} (from ${w.base})\n`);
     ctx.store.event(ctx.job.id, ctx.actor, 'build.worktree', { app: repo.app, where: sh.where, worktree: w.dir, branch: w.branch, base: w.base });
@@ -88,7 +90,7 @@ export const DETERMINISTIC: Record<string, DetFn> = {
     fs.mkdirSync(ctx.workspace, { recursive: true, mode: 0o700 });
     const results: Array<{ check: string; label: string; ok: boolean; notRun: boolean; failing: string[]; artifact: string | null }> = [];
     for (const check of checks.length ? checks : ['test' as const]) {
-      const r = await runBuildCheck(sh, dir, check);
+      const r = await runBuildCheck(sh, dir, check, undefined, { installScripts: buildRepo(ctx.db)?.install_scripts === true });
       const file = path.join(ctx.workspace, `final-${check}-output.txt`); fs.writeFileSync(file, r.output);
       const artifact = recordArtifact(ctx, 'checks', 'file', `Final ${r.label} (${r.notRun ? 'not run' : r.ok ? 'passed' : 'failed'})`, file, { command: r.label, where: sh.where });
       ctx.store.event(ctx.job.id, ctx.actor, 'command.ran', { command: r.label, cwd: dir, exit: r.ok ? 0 : 1, final: true, failing: r.failing });
@@ -107,13 +109,24 @@ export const DETERMINISTIC: Record<string, DetFn> = {
   /** build.task, last step: commit the worktree on its own branch (never main, never pushed in this step). */
   async commit_build(ctx) {
     const fresh = (ctx.db.prepare('SELECT inputs FROM jobs WHERE id = ?').get(ctx.job.id) as { inputs: string } | undefined)?.inputs ?? ctx.job.inputs;
-    const inputs = { ...(JSON.parse(fresh || '{}') as { worktree?: string; repo_where?: string; branch?: string }) };
+    const inputs = { ...(JSON.parse(fresh || '{}') as { worktree?: string; repo_where?: string; branch?: string; base_commit?: string }) };
     inputs.worktree ??= ctx.previous.repository as string | undefined; inputs.branch ??= ctx.previous.branch as string | undefined; inputs.repo_where ??= ctx.previous.repo_where as string | undefined;
     const sh = shellFor(inputs.repo_where); if (!sh || !inputs.worktree || !inputs.branch) return { ok: false, reason: 'the build worktree is missing', terminal: true, operatorAction: 'Re-run the task.' };
     const c = await commitBuild(sh, inputs.worktree, inputs.branch, `${ctx.job.objective.replace(/\s+/g, ' ').slice(0, 72)}\n\nBuild task ${ctx.job.id}`);
     if (!c.ok) return { ok: false, reason: `commit refused: ${c.error}`, terminal: true, operatorAction: 'See the task detail.' };
     ctx.store.event(ctx.job.id, ctx.actor, 'build.committed', { branch: inputs.branch, commit: c.commit, files: c.files });
-    return { ok: true, payload: { branch: inputs.branch, commit: c.commit, files: c.files, summary: `${String(ctx.previous.summary ?? '')}${c.commit ? ` · committed ${c.commit.slice(0, 7)} on ${inputs.branch} (${c.files.length} file${c.files.length === 1 ? '' : 's'}; not pushed)` : ' · no changes to commit'}`.trim() } };
+    // The result leaves the VM: a bundle of base..branch and the same commits as a patch, saved in the task folder on this machine.
+    let exported: { bundle: string; patch: string } | null = null;
+    if (c.commit && inputs.base_commit) {
+      const x = await exportBuild(sh, inputs.worktree, inputs.base_commit, inputs.branch);
+      if (!x.ok) return { ok: false, reason: `committed ${c.commit.slice(0, 7)} but could not copy it out of the computer: ${x.error}`, terminal: false };
+      fs.mkdirSync(ctx.workspace, { recursive: true, mode: 0o700 });
+      const bf = path.join(ctx.workspace, `${ctx.job.id}.bundle`); const pf = path.join(ctx.workspace, `${ctx.job.id}.patch`);
+      fs.writeFileSync(bf, x.bundle, { mode: 0o600 }); fs.writeFileSync(pf, x.patch, { mode: 0o600 });
+      exported = { bundle: recordArtifact(ctx, 'commit', 'file', `Build ${inputs.branch} (git bundle: git fetch <file> ${inputs.branch})`, bf, { branch: inputs.branch, commit: c.commit }) ?? bf, patch: recordArtifact(ctx, 'commit', 'file', `Build ${inputs.branch} (patch)`, pf, { branch: inputs.branch, commit: c.commit }) ?? pf };
+      ctx.store.event(ctx.job.id, ctx.actor, 'build.exported', { branch: inputs.branch, commit: c.commit, bundle: bf, patch: pf, bytes: x.bundle.length });
+    }
+    return { ok: true, payload: { branch: inputs.branch, commit: c.commit, files: c.files, ...(exported ? { bundle_artifact: exported.bundle, patch_artifact: exported.patch } : {}), summary: `${String(ctx.previous.summary ?? '')}${c.commit ? ` · committed ${c.commit.slice(0, 7)} on ${inputs.branch} (${c.files.length} file${c.files.length === 1 ? '' : 's'}; not pushed)` : ' · no changes to commit'}`.trim() } };
   },
   async verify_artifacts(ctx) {
     const rows = ctx.db.prepare("SELECT id, path, sha256 FROM artifacts WHERE job_id = ? AND kind = 'file'").all(ctx.job.id) as Array<{ id: string; path: string | null; sha256: string | null }>;

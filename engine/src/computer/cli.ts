@@ -12,5 +12,9 @@ try {
   else if (cmd === 'snapshot') show(await host.snapshot(arg ?? 'manual'));
   else if (cmd === 'reset') show(await host.reset(arg));
   else if (cmd === 'update') show(await host.update());
-  else { console.error('usage: claudebot computer up|down|status|snapshot [reason]|reset [snapshot-id]|update'); process.exit(2); }
+  else if (cmd === 'builder-token') {   // reads the token from stdin (paste, or pipe from claude setup-token); --remove deletes it
+    let input = ''; if (arg !== '--remove') { process.stdin.setEncoding('utf8'); for await (const c of process.stdin) input += c; }
+    show(await host.setBuilderToken(arg === '--remove' ? '' : input));
+  }
+  else { console.error('usage: claudebot computer up|down|status|snapshot [reason]|reset [snapshot-id]|update|builder-token [--remove] (token on stdin)'); process.exit(2); }
 } catch (e) { console.error(`computer ${cmd}: ${(e as Error).message}`); process.exit(1); }

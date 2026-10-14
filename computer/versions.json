@@ -14,6 +14,7 @@
     "screens": 3
   },
   "packages": [
+    "nftables",
     "sway",
     "wayvnc",
     "xwayland",

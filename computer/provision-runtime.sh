@@ -20,10 +20,21 @@ install -d -o "$U" -m 700 "$D/claude" "$D/openclaw" "$D/secrets" "$D/logs" "$D/w
 # or other worktrees; $D/repos is traverse-only so the builder reaches only the worktree it was handed.
 id claudebot-builder >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/claudebot-builder --shell /bin/bash claudebot-builder
 install -d -o "$U" -m 711 "$D/repos"
+install -m 755 -o root /etc/claudebot/claudebot-handover /opt/claudebot/bin/claudebot-handover
+# Builder egress: the builder uid reaches only the egress proxy (Anthropic, GitHub, npm), DNS and the engine on the host.
+install -m 644 /etc/claudebot/egress-proxy.mjs /opt/claudebot/egress-proxy.mjs
+sed "s/__USER__/$U/" /etc/claudebot/claudebot-egress.service > /etc/systemd/system/claudebot-egress.service
+HOST_IP=$(getent ahostsv4 host.lima.internal | awk 'NR==1{print $1}'); [ -n "$HOST_IP" ] || HOST_IP=192.168.5.2
+sed "s/__HOST_IP__/$HOST_IP/" /etc/claudebot/builder-egress.nft > /etc/claudebot/builder-egress.applied.nft
+nft list table inet claudebot_builder >/dev/null 2>&1 && nft delete table inet claudebot_builder; nft -f /etc/claudebot/builder-egress.applied.nft
+# Builder turns (off unless the engine's builder_turns setting is on): the adapter wrappers and the builder's own folders.
+install -m 755 /etc/claudebot/claude-acp-builder /opt/claudebot/bin/claude-acp-builder; install -m 755 /etc/claudebot/claude-acp-as-builder /opt/claudebot/bin/claude-acp-as-builder
+install -m 755 /etc/claudebot/builder-live-check.sh /opt/claudebot/bin/builder-live-check
+install -d -o claudebot-builder -m 700 /var/lib/claudebot-builder/claude /var/lib/claudebot-builder/logs
 [ -s "$D/secrets/gateway.token" ] || (umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$D/secrets/gateway.token"); chown "$U" "$D/secrets/gateway.token"
 sudo -u "$U" env OPENCLAW_STATE_DIR="$D/openclaw" PATH=$PATH bash -c "[ -d '$D/openclaw/npm/projects' ] && ls '$D/openclaw/npm/projects' | grep -q acpx || openclaw --profile computer plugins install $(jq -r .runtime.acpx_plugin $V)"
 install -o "$U" -m 600 /etc/claudebot/openclaw.json "$D/openclaw/openclaw.json"
 install -d -o "$U" -m 700 "$D/tmp"; echo "d /tmp/openclaw 0755 root root -" > /etc/tmpfiles.d/claudebot-openclaw.conf; systemd-tmpfiles --create /etc/tmpfiles.d/claudebot-openclaw.conf; [ "$(stat -c %U /tmp/openclaw)" = root ] || { rm -rf /tmp/openclaw; install -d -o root -m 755 /tmp/openclaw; }
 sed "s/__USER__/$U/; s/__UID__/$(id -u "$U")/" /etc/claudebot/openclaw-gateway.service > /etc/systemd/system/openclaw-gateway.service
-systemctl daemon-reload; systemctl enable openclaw-gateway; systemctl restart openclaw-gateway
+systemctl daemon-reload; systemctl enable openclaw-gateway; systemctl restart openclaw-gateway; systemctl enable --now claudebot-egress
 echo runtime-provisioned > /etc/claudebot/runtime-provisioned

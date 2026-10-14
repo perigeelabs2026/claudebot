@@ -1,0 +1,12 @@
+[Unit]
+Description=ClaudeBot builder egress proxy (Anthropic, GitHub and npm only; loopback)
+After=network-online.target
+[Service]
+User=__USER__
+# The builder's nftables rules are (re)applied as root before the proxy starts, so they hold after a restart of the computer.
+ExecStartPre=+/bin/sh -c 'nft list table inet claudebot_builder >/dev/null 2>&1 || nft -f /etc/claudebot/builder-egress.applied.nft'
+ExecStart=/opt/node/bin/node /opt/claudebot/egress-proxy.mjs
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target

@@ -26,6 +26,7 @@ import { requeueNote } from '../cos/requeue.ts';
 import { honestyNotes, ledgerStatus, statusNote } from '../cos/honesty.ts';
 import { reportModelProblem } from '../runtime/model-check.ts';
 import { bankKnows } from '../memory/answer-bank.ts';
+import { builderTurnsOn } from '../build/repo.ts';
 import { untilText } from '../approvals/permissions.ts';
 
 export interface RunDeps {
@@ -420,7 +421,7 @@ Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-�
       if (turnCwd === ctx.workspace) { const sk = installSkills(turnCwd, agentId); if (sk.installed.length || sk.refused.length) store.event(job.id, 'engine', 'skills.prepared', sk); }   // reviewed skills only; never into a selected repository
       if (directions) markDirectionsDelivered(deps, job.id, `step ${stage.name}`);
       const resume = !!job.session_ref;
-      const r: TurnResult = await withModelFallback(deps, job.id, agent, jobModel, jobModel !== agent?.model && agent?.model ? agent.model : ctx.defs.previousModel(agentId), (model, fallbackModel) => deps.runtime.startTurn({ jobId: job.id, sessionRef: job.session_ref ?? job.id, role: agentId, cwd: turnCwd, ...(vmCwd ? { vmCwd } : {}), prompt, resume, model, fallbackModel, timeoutMs: Number(process.env.CLAUDEBOT_STAGE_TIMEOUT_MS ?? (stage.timeoutMs ?? 15 * 60_000)), onHeartbeat: ctx.beat, onSession: (key) => { if (key !== store.get(job.id)?.session_ref) store.patch(job.id, { session_ref: key, runtime_session_id: key }); }, signal: ctx.signal }));
+      const r: TurnResult = await withModelFallback(deps, job.id, agent, jobModel, jobModel !== agent?.model && agent?.model ? agent.model : ctx.defs.previousModel(agentId), (model, fallbackModel) => deps.runtime.startTurn({ jobId: job.id, sessionRef: job.session_ref ?? job.id, role: agentId, cwd: turnCwd, ...(vmCwd ? { vmCwd, ...(builderTurnsOn(deps.db) ? { asBuilder: true } : {}) } : {}), prompt, resume, model, fallbackModel, timeoutMs: Number(process.env.CLAUDEBOT_STAGE_TIMEOUT_MS ?? (stage.timeoutMs ?? 15 * 60_000)), onHeartbeat: ctx.beat, onSession: (key) => { if (key !== store.get(job.id)?.session_ref) store.patch(job.id, { session_ref: key, runtime_session_id: key }); }, signal: ctx.signal }));
       if (r.runtimeSessionId && r.runtimeSessionId !== job.session_ref) store.patch(job.id, { session_ref: r.runtimeSessionId, runtime_session_id: r.runtimeSessionId });
       noteModelIssue(deps, job.id, agent, r);
       if (r.ok) {

@@ -73,6 +73,10 @@
             "claude": {
               "command": "/opt/claudebot/bin/claude-acp",
               "args": []
+            },
+            "builder": {
+              "command": "/opt/claudebot/bin/claude-acp-builder",
+              "args": []
             }
           }
         }
@@ -128,6 +132,21 @@
         "sandbox": {
           "mode": "off"
         }
+      },
+      "builder": {
+        "workspace": "/mnt/lima-claudebot-computer-data/workspace/_control",
+        "sandbox": {
+          "mode": "off"
+        },
+        "runtime": {
+          "type": "acp",
+          "acp": {
+            "agent": "builder",
+            "backend": "acpx",
+            "mode": "persistent",
+            "cwd": "/mnt/lima-claudebot-computer-data/repos"
+          }
+        }
       }
     }
   },
@@ -164,7 +183,8 @@
     "backend": "acpx",
     "defaultAgent": "claude",
     "allowedAgents": [
-      "claude"
+      "claude",
+      "builder"
     ],
     "stream": {
       "deliveryMode": "live"
