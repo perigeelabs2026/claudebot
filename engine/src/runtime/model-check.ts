@@ -15,23 +15,36 @@ import { teamLine } from '../cos/alerts.ts';
 export const ADVERTISED_MODELS = ['default', 'opus', 'sonnet', 'haiku'] as const;
 export const resolves = (model: string, advertised: readonly string[] = ADVERTISED_MODELS): boolean => advertised.map((a) => a.toLowerCase()).includes(acpModel(model).toLowerCase());
 
-/** The most recent distinct real ACP session keys (agent:<role>:acp:<uuid>) from the jobs table, newest first: the only kind of session
- *  `/acp model` lists models on. Several, so a closed or broken one does not end the probe. */
-export function latestAcpSessions(db: DB | null | undefined, limit = 5): string[] {
+/** The most recent distinct real ACP session keys (agent:<id>:acp:<uuid>) from the jobs table, newest first, each with the assistant
+ *  whose job it ran (jobs.agent_role): the only kind of session `/acp model` lists models on. Several, so a closed or broken one does
+ *  not end the probe. The key's own <id> segment is OpenClaw's agent id, not the assistant. */
+export function latestAcpSessionRoles(db: DB | null | undefined, limit = 5): Array<{ key: string; role: string }> {
   if (!db) return [];
-  const rows = db.prepare("SELECT session_ref AS a, runtime_session_id AS b FROM jobs WHERE session_ref LIKE 'agent:%:acp:%' OR runtime_session_id LIKE 'agent:%:acp:%' ORDER BY updated_at DESC LIMIT 50").all() as Array<{ a: string | null; b: string | null }>;
-  const out: string[] = [];
-  for (const r of rows) for (const k of [r.a, r.b]) if (k && /^agent:[a-z_]+:acp:[0-9a-f-]+$/i.test(k) && !out.includes(k)) { out.push(k); if (out.length >= limit) return out; }
+  const rows = db.prepare("SELECT session_ref AS a, runtime_session_id AS b, agent_role AS role FROM jobs WHERE session_ref LIKE 'agent:%:acp:%' OR runtime_session_id LIKE 'agent:%:acp:%' ORDER BY updated_at DESC LIMIT 50").all() as Array<{ a: string | null; b: string | null; role: string }>;
+  const out: Array<{ key: string; role: string }> = [];
+  for (const r of rows) for (const k of [r.a, r.b]) if (k && /^agent:[a-z_]+:acp:[0-9a-f-]+$/i.test(k) && !out.some((o) => o.key === k)) { out.push({ key: k, role: r.role }); if (out.length >= limit) return out; }
   return out;
 }
+/** Each session key mapped to the configured model of the assistant whose job ran on it (keys with no job or no model are left out:
+ *  the runtime restores those with the connection default). */
+export function sessionModels(db: DB, keys: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of keys) {
+    const r = db.prepare("SELECT d.model AS model FROM jobs j JOIN agent_definitions d ON d.id = j.agent_role WHERE (j.session_ref = ? OR j.runtime_session_id = ?) AND d.model IS NOT NULL AND d.model != '' ORDER BY j.updated_at DESC LIMIT 1").get(k, k) as { model: string } | undefined;
+    if (r) out[k] = r.model;
+  }
+  return out;
+}
+export const latestAcpSessions = (db: DB | null | undefined, limit = 5): string[] => latestAcpSessionRoles(db, limit).map((o) => o.key);
 export const latestAcpSession = (db: DB | null | undefined): string | null => latestAcpSessions(db, 1)[0] ?? null;
 
 /** The connection's own list, or the fallback list when it names none. */
 export async function advertised(runtime: Pick<ModelRuntime, 'advertisedModels'> | null | undefined, opts: { fresh?: boolean; db?: DB | null } = {}): Promise<{ models: readonly string[]; reply: string | null; verified: boolean }> {
   try {
-    const sessionKeys = latestAcpSessions(opts.db);
-    const roleModels = opts.db ? Object.fromEntries((opts.db.prepare("SELECT id, model FROM agent_definitions WHERE model IS NOT NULL AND model != ''").all() as Array<{ id: string; model: string }>).map((r) => [r.id, r.model])) : undefined;
-    const r = await runtime?.advertisedModels?.(opts.fresh || sessionKeys.length || roleModels ? { ...(opts.fresh ? { fresh: true } : {}), ...(sessionKeys.length ? { sessionKeys } : {}), ...(roleModels ? { roleModels } : {}) } : undefined); if (r && r.models.length) return { models: r.models, reply: r.reply, verified: true }; } catch { /* the fallback list */ }
+    const sessions = latestAcpSessionRoles(opts.db); const sessionKeys = sessions.map((s) => s.key);
+    const roleModels: Record<string, string> | undefined = opts.db ? Object.fromEntries((opts.db.prepare("SELECT id, model FROM agent_definitions WHERE model IS NOT NULL AND model != ''").all() as Array<{ id: string; model: string }>).map((r) => [r.id, r.model])) : undefined;
+    const sessionModels = roleModels ? Object.fromEntries(sessions.filter((s) => roleModels[s.role]).map((s) => [s.key, roleModels[s.role]])) : undefined;   // = sessionModels(db, keys)
+    const r = await runtime?.advertisedModels?.(opts.fresh || sessionKeys.length || roleModels ? { ...(opts.fresh ? { fresh: true } : {}), ...(sessionKeys.length ? { sessionKeys } : {}), ...(roleModels ? { roleModels, sessionModels } : {}) } : undefined); if (r && r.models.length) return { models: r.models, reply: r.reply, verified: true }; } catch { /* the fallback list */ }
   return { models: ADVERTISED_MODELS, reply: null, verified: false };
 }
 

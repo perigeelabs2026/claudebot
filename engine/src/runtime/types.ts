@@ -40,7 +40,7 @@ export interface ModelRuntime {
   /** Close a persistent session and free its processes (adapter + model CLI). Optional for runtimes without sessions. */
   closeSession?(sessionRef: string): Promise<void>;
   /** The models the Claude connection advertises, in its own words (null when it does not list them). */
-  advertisedModels?(opts?: { probe?: boolean; fresh?: boolean; sessionKey?: string | null; sessionKeys?: string[]; roleModels?: Record<string, string>; budgetMs?: number }): Promise<{ models: string[]; reply: string } | null>;
+  advertisedModels?(opts?: { probe?: boolean; fresh?: boolean; sessionKey?: string | null; sessionKeys?: string[]; sessionModels?: Record<string, string>; roleModels?: Record<string, string>; budgetMs?: number }): Promise<{ models: string[]; reply: string } | null>;
   /** Read-only inspection of a known owned session; no model turn or setting changes. */
   inspectSession?(sessionRef: string): Promise<{ text: string; observed_at: string }>;
 }
