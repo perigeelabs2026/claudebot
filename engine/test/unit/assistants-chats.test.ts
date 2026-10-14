@@ -483,7 +483,7 @@ test('groups: the lead creates and renames groups on the owner\'s words; purpose
 });
 
 test('honesty check: a reply that says an application was submitted, without a verified confirmation, gets a plain note under it; "not submitted" does not', async () => {
-  const s = setup([{ kind: 'ok', text: 'Done! I submitted the Northwind application.' }, { kind: 'ok', text: 'Northwind is not submitted yet: the upload failed.' }, { kind: 'ok', text: 'Research only: three roles listed, and nothing was applied for.' }, { kind: 'ok', text: 'Three roles found, with links, and applied to none.' }]);
+  const s = setup([{ kind: 'ok', text: 'Done! I submitted the Northwind application.' }, { kind: 'ok', text: 'Northwind is not submitted yet: the upload failed.' }, { kind: 'ok', text: 'Research only: three roles listed, and nothing was applied for.' }, { kind: 'ok', text: 'Three roles found, with links, and applied to none.' }, { kind: 'ok', text: 'I sent the follow-up email to Pat at Globex.' }]);
   const c = s.chat.create({ workspace_id: s.ws.id });
   const t1 = s.chat.send(c.id, 'apply to Northwind', s.defs).job; await run(s, t1.id);
   const notes = () => s.chat.messages(c.id).filter((m) => (m.meta as { honesty_check?: boolean }).honesty_check);
@@ -492,6 +492,10 @@ test('honesty check: a reply that says an application was submitted, without a v
   assert.equal(notes().length, 1, 'an honest "not submitted" gets no note');
   const t3 = s.chat.send(c.id, 'and the practice run?', s.defs).job; await run(s, t3.id); assert.equal(notes().length, 1, '"nothing was applied for" is honest too (rehearsal 2 false alarm)');
   const t4 = s.chat.send(c.id, 'and now?', s.defs).job; await run(s, t4.id); assert.equal(notes().length, 1, '"applied to none" is honest (rehearsal 5)');
+  let prompt = ''; const orig = s.runtime.startTurn.bind(s.runtime); s.runtime.startTurn = async (req) => { prompt = req.prompt; return orig(req); };
+  const t5 = s.chat.send(c.id, 'did the email go?', s.defs).job; await run(s, t5.id);
+  assert.equal(notes().length, 2); assert.match(notes()[1].content, /no sent message is recorded/, '"sent" with no action.performed gets the note');
+  assert.match(prompt, /Team status from the work record \(use these numbers exactly/, 'the lead words counts from the ledger');
 });
 
 test('the lead switches an assistant off and back on, only on the owner\'s words (morning restart after a pause)', async () => {

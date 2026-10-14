@@ -23,6 +23,7 @@ import { releaseTaskTabs } from '../browser/tabs.ts';
 import { readingDue, recordReading, refreshGovernor } from '../usage/governor.ts';
 import { ESSAY } from '../cos/owner-needs.ts';
 import { requeueNote } from '../cos/requeue.ts';
+import { honestyNotes, ledgerStatus, statusNote } from '../cos/honesty.ts';
 import { bankKnows } from '../memory/answer-bank.ts';
 
 export interface RunDeps {
@@ -271,6 +272,7 @@ Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-�
         const pend = deps.db.prepare("SELECT ap.action_kind, ap.target, ap.created_at, j.agent_role, c.title, c.type FROM approvals ap LEFT JOIN jobs j ON j.id = ap.job_id LEFT JOIN conversations c ON c.id = j.conversation_id WHERE ap.status = 'pending' ORDER BY ap.created_at").all() as Array<{ action_kind: string; target: string; created_at: string; agent_role: string | null; title: string | null; type: string | null }>;
         const qs = deps.db.prepare("SELECT m.sender, m.content, c.title FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE m.kind = 'question' AND json_extract(m.meta, '$.options') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to = m.id AND r.role = 'owner')").all() as Array<{ sender: string; content: string; title: string | null }>;
         const drafts = (deps.db.prepare("SELECT count(*) AS n FROM assistant_drafts WHERE status = 'pending'").get() as { n: number }).n;
+        parts.push(ledgerStatus(deps.db, { exclude: job.id }).text);   // every running/live/submitted sentence comes from the ledger; the lead only words it
         parts.push(pend.length || qs.length || drafts ? `Waiting on the owner right now (from the work record, every conversation):\n${[...pend.map((p) => `- decision: ${p.action_kind} → ${p.target} (asked by ${p.agent_role ?? 'an assistant'}${p.title ? ` in "${p.title}"` : ''}${p.type === 'group' ? ', private review' : ''})`), ...qs.map((q) => `- question from ${q.sender}${q.title ? ` in "${q.title}"` : ''}: ${q.content}`), ...(drafts ? [`- ${drafts} assistant draft(s) to name and confirm`] : [])].join('\n')}` : 'Waiting on the owner right now: nothing (no pending decisions, questions or drafts in the work record).');
       }
       { const att = conversationAttachments(deps.db, conv.id); if (att.length) parts.push(`Files the owner attached to this conversation (owner uploads, checked text):\n${att.map((x) => `- ${x.title} (result ${x.artifact_id}, from upload task ${x.job_id}, sha256 ${x.sha256.slice(0, 12)})`).join('\n')}\nRead one with read_artifact. To give a file to a specialist, create its task with depends_on: [the upload task id]; it then receives the file automatically.`); }
@@ -352,13 +354,11 @@ Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-�
           : NEW_ACCOUNT_PASSWORD.test(reply.trim().slice(-400))
           ? 'ClaudeBot: do not ask the owner for a new account password. Create it with set_account_password (account = "<site>:<login email>"), type it with browser_act action "fill_secret" into the password and confirm fields, and finish the sign-up. You never see the value.'
           : 'ClaudeBot: do not ask the owner whether to do work you and the team can do yourselves; the owner asked not to be asked. Do what you just offered now, and report the result when it is done.', `askback:${job.id}`, ctx.defs);
-        // Honesty guard: a reply that claims an application went in, with no verified confirmation recorded in this turn, gets a plain note under it.
-        const claimsSubmission = /\b(i|we|he|she|they)\s+(have\s+|just\s+|successfully\s+)?(submitted|applied|sent in)\b|\bsubmitted\s+(your|the|his|her|their|an?|\d+)\b[^.]{0,30}\bapplications?\b|\bapplications?\s+(was|were|has been|have been|is|are)\s+(submitted|sent|in)\b|\b(is|are)\s+(now\s+)?submitted\b/i.test(reply);
-        const negated = /\b(not|n't|never|nothing|no|none|without|couldn't|didn't|isn't|wasn't|haven't|hasn't|won't)\b[^.]{0,40}\b(submitted|applied)\b|\b(submitted|applied)\b[^.]{0,20}\b(none|nothing|no one|zero)\b/i.test(reply);
-        // Verified in this turn, or by any task of this conversation in the last 3 hours (the lead reporting a teammate's verified submit is honest).
-        const verified = deps.db.prepare("SELECT 1 FROM job_events e JOIN jobs j ON j.id = e.job_id WHERE e.type = 'application.verified' AND (e.job_id = ? OR (j.conversation_id = ? AND e.at > ?)) LIMIT 1").get(job.id, conv.id, new Date(Date.now() - 3 * 3600_000).toISOString());
-        if (claimsSubmission && !negated && !verified)
-          chat.add({ conversation_id: conv.id, role: 'system', kind: 'activity', content: 'ClaudeBot check: no application confirmation was verified in this reply, so treat any application mentioned above as not yet submitted.', job_id: job.id, meta: { honesty_check: true } });
+        // Honesty guard (cos/honesty.ts): a reply that claims an application went in, a message was sent, something was verified, an
+        // account was created or a sign-in worked, with no matching record, gets a plain note under it; so does a wrong count of live tasks.
+        const checks = honestyNotes(deps.db, reply, job.id, conv.id);
+        const countCheck = statusNote(reply, ledgerStatus(deps.db, { exclude: job.id })); if (countCheck) checks.push(countCheck);
+        for (const note of checks) chat.add({ conversation_id: conv.id, role: 'system', kind: 'activity', content: note, job_id: job.id, meta: { honesty_check: true } });
         // Files this reply saved appear in the chat under it, one file card each (preview, download), so "it's in the chat" is true.
         for (const a of deps.db.prepare("SELECT id, title FROM artifacts WHERE job_id = ? AND kind = 'file' AND id NOT IN (SELECT artifact_id FROM messages WHERE artifact_id IS NOT NULL AND conversation_id = ?) ORDER BY created_at, rowid").all(job.id, conv.id) as Array<{ id: string; title: string }>)
           chat.add({ conversation_id: conv.id, role: 'assistant', kind: 'result', sender: agentId, content: a.title || 'Saved a file', job_id: job.id, artifact_id: a.id, meta: { state: 'completed', file_verified: true, chat_file: true } });
