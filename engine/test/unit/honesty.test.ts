@@ -6,6 +6,12 @@ import { openDatabase } from '../../src/db/open.ts';
 import { JobStore } from '../../src/jobs/store.ts';
 import { Definitions } from '../../src/model/definitions.ts';
 import { collectReport } from '../../src/cos/report.ts';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { Workspaces } from '../../src/model/workspaces.ts';
+import { bankKnows } from '../../src/memory/answer-bank.ts';
+import { Vault } from '../../src/memory/vault.ts';
 import { claimsIn, honestyNotes, ledgerStatus, statusNote } from '../../src/cos/honesty.ts';
 
 function setup() { const db = openDatabase(':memory:'); const store = new JobStore(db); new Definitions(db).seedSystemDefaults(); return { db, store }; }
@@ -48,4 +54,36 @@ test('"sent" with no action.performed gets the check note; with the performed se
   event(db, j.id, 'account.password_set', { account: 'workday:owner@example.com' });
   event(db, j.id, 'browser.act', { action: 'click', name: 'Sign in', commit: true });
   assert.deepEqual(honestyNotes(db, 'I sent the email to Pat. I created your Workday account and signed in.', j.id, null), []);
+});
+
+test('test projects (telegram:false, dry_run) are not counted, unless the question is asked inside one', () => {
+  const { db, store } = setup(); const wss = new Workspaces(db, fs.mkdtempSync(path.join(os.tmpdir(), 'hws-')));
+  const test1 = wss.create({ name: 'Rehearsal', policies: { telegram: false } } as never, 't'); const test2 = wss.create({ name: 'Dry', policies: { dry_run: true } } as never, 't');
+  db.prepare('UPDATE workspaces SET policies = ? WHERE id = ?').run(JSON.stringify({ telegram: false }), test1.id); db.prepare('UPDATE workspaces SET policies = ? WHERE id = ?').run(JSON.stringify({ dry_run: true }), test2.id);
+  for (let i = 1; i <= 3; i++) { const j = job(store, `real${i}`, `Real ${i}`); store.patch(j.id, { state: 'running' } as never); }
+  for (const [k, ws] of [['t1', test1.id], ['t2', test2.id], ['t3', test2.id]] as const) { const j = store.create({ idempotency_key: k, kind: 'research.report', objective: k, success_contract: {}, agent_role: 'researcher', workspace_id: ws, inputs: {} } as never, 'owner').job; store.patch(j.id, { state: 'running' } as never); }
+  const asking = job(store, 'ask', 'status?', 'coordinator');
+  assert.equal(ledgerStatus(db, { exclude: asking.id }).live, 3, 'only the real project');
+  const inTest = store.create({ idempotency_key: 'ask2', kind: 'research.report', objective: 'status?', success_contract: {}, agent_role: 'coordinator', workspace_id: test2.id, inputs: {} } as never, 'owner').job;
+  assert.equal(ledgerStatus(db, { exclude: inTest.id }).live, 2, 'asked inside a test project: that project only');
+});
+
+test('"verified" needs a *.verified record or a page about the same thing: an earlier send does not count', () => {
+  const { db, store } = setup(); const j = job(store, 'v', 'Email Pat');
+  event(db, j.id, 'action.performed', { kind: 'send', via: 'browser_act' });
+  assert.match(honestyNotes(db, 'I verified the address.', j.id, null).join(''), /nothing was verified/, 'a send is not a verification');
+  event(db, j.id, 'browser.read', { url: 'https://globex.example/team/pat-rivera' });
+  assert.deepEqual(honestyNotes(db, "I verified Pat Rivera's role on the Globex team page.", j.id, null), [], 'the page read is about what was verified');
+  assert.match(honestyNotes(db, 'I verified the mailing address.', j.id, null).join(''), /nothing was verified/, 'a different subject still needs evidence');
+  event(db, j.id, 'email.verified', { address: 'x' });
+  assert.deepEqual(honestyNotes(db, 'I verified the address.', j.id, null), []);
+});
+
+test('Accounts.md does not feed the answer bank: a quota blocker that mentions a .com URL is not bank-known', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bank-acct-'));
+  new Vault(dir).recordAccount('acme.myworkdayjobs.com:owner@example.com', 'Jude');
+  assert.equal(bankKnows('The form at https://acme.myworkdayjobs.com/careers asks for quota attainment for 2024', dir), false);
+  assert.equal(bankKnows('Sign in at www.example.org or example.io', dir), false);
+  fs.writeFileSync(path.join(dir, 'Owner', 'Application answers.md'), '- Quota attainment: 70% across all quarters\n');
+  assert.equal(bankKnows('The form at https://acme.myworkdayjobs.com/careers asks for quota attainment for 2024', dir), true, 'the real answer still counts');
 });

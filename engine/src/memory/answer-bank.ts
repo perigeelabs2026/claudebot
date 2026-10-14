@@ -15,7 +15,7 @@ const words = (s: string) => String(s).toLowerCase().replace(/[^a-z0-9%+\-' ]+/g
 
 function facts(dir: string): Array<{ text: string; key: string; source: string }> {
   const files: string[] = []; const own = path.join(dir, 'Owner.md'); if (fs.existsSync(own)) files.push(own);
-  const sub = path.join(dir, 'Owner'); if (fs.existsSync(sub)) for (const f of fs.readdirSync(sub)) if (f.endsWith('.md')) files.push(path.join(sub, f));
+  const sub = path.join(dir, 'Owner'); if (fs.existsSync(sub)) for (const f of fs.readdirSync(sub)) if (f.endsWith('.md') && f !== 'Accounts.md') files.push(path.join(sub, f));   // Accounts.md lists sign-ins the team created, not answers
   const out: Array<{ text: string; key: string; source: string }> = [];
   for (const f of files) for (const raw of fs.readFileSync(f, 'utf8').split('\n')) {
     const line = raw.trim(); if (!/^[-*]\s+/.test(line)) continue; const text = line.replace(/^[-*]\s+/, '').trim(); if (text.length < 4) continue;
@@ -28,7 +28,7 @@ function facts(dir: string): Array<{ text: string; key: string; source: string }
 
 /** The best matching facts for a form question, strongest first; empty means the bank does not know. */
 // Labels so generic they would match almost any question; they never count as a key hit for the strict check.
-const GENERIC_KEYS = new Set(['company', 'role', 'title', 'date', 'dates', 'name', 'email', 'phone', 'location', 'first', 'last']);
+const GENERIC_KEYS = new Set(['company', 'role', 'title', 'date', 'dates', 'name', 'email', 'phone', 'location', 'first', 'last', 'com', 'net', 'org', 'io', 'www', 'http', 'https']);
 
 export function lookupAnswer(question: string, dir: string = vaultDir(), limit = 3, opts: { keyMatch?: boolean } = {}): Answer[] {
   const q = new Set(words(question)); if (!q.size) return [];

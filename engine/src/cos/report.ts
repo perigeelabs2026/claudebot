@@ -39,25 +39,28 @@ const LIVE_STATES = "('queued','leased','running','retry_scheduled','waiting_for
 export interface LiveTask { id: string; title: string; agent: string; state: string; kind: string; updated_at: string }
 /** What the team is doing right now, from live task state: every task (chat replies and continuation rounds included) that is
  *  queued, leased, running or waiting, with the assistant and the objective. Continuation rounds are titled by their goal. */
-export function liveTasks(db: DB, opts: { workspace?: string | null; limit?: number } = {}): LiveTask[] {
+/** Tasks of the owner's real projects: test projects (policies telegram:false or dry_run) left out. */
+export const REAL_PROJECT = "(j.workspace_id IS NULL OR NOT EXISTS (SELECT 1 FROM workspaces w WHERE w.id = j.workspace_id AND (COALESCE(json_extract(w.policies, '$.telegram'), 1) = 0 OR COALESCE(json_extract(w.policies, '$.dry_run'), 0) <> 0)))";
+export function liveTasks(db: DB, opts: { workspace?: string | null; limit?: number; realOnly?: boolean } = {}): LiveTask[] {
   const names = new Map((db.prepare('SELECT id, name FROM agent_definitions').all() as Array<{ id: string; name: string }>).map((a) => [a.id, a.name]));
   const ws = opts.workspace ?? null;
-  const rows = db.prepare(`SELECT j.id, j.objective, j.agent_role, j.state, j.kind, j.updated_at FROM jobs j WHERE j.state IN ${LIVE_STATES} AND j.kind NOT IN ${NOT_LIVE}${ws ? ' AND j.workspace_id = ?' : ''} ORDER BY CASE j.state WHEN 'running' THEN 0 WHEN 'leased' THEN 0 WHEN 'queued' THEN 2 ELSE 1 END, j.updated_at DESC LIMIT ?`).all(...(ws ? [ws] : []), opts.limit ?? 40) as Array<{ id: string; objective: string; agent_role: string; state: string; kind: string; updated_at: string }>;
+  const rows = db.prepare(`SELECT j.id, j.objective, j.agent_role, j.state, j.kind, j.updated_at FROM jobs j WHERE j.state IN ${LIVE_STATES} AND j.kind NOT IN ${NOT_LIVE}${ws ? ' AND j.workspace_id = ?' : ''}${opts.realOnly ? ` AND ${REAL_PROJECT}` : ''} ORDER BY CASE j.state WHEN 'running' THEN 0 WHEN 'leased' THEN 0 WHEN 'queued' THEN 2 ELSE 1 END, j.updated_at DESC LIMIT ?`).all(...(ws ? [ws] : []), opts.limit ?? 40) as Array<{ id: string; objective: string; agent_role: string; state: string; kind: string; updated_at: string }>;
   return rows.map((j) => { const goal = /^Continuing \(round/i.test(j.objective) ? (j.objective.match(/^Goal:\s*(.+)$/m)?.[1] ?? j.objective) : j.objective; return { id: j.id, title: taskTitle(goal), agent: names.get(j.agent_role) ?? j.agent_role, state: j.state, kind: j.kind, updated_at: j.updated_at }; });
 }
 
 export interface SubmittedApplication { record: string; company: string; role: string; verified: boolean; submitted_at: string; agent: string | null }
 /** Job applications submitted in the window, from verified application records (record_application) and their
  *  'application.verified' events. Only a verified record counts as submitted. */
-export function submittedApplications(db: DB, sinceIso: string): SubmittedApplication[] {
+export function submittedApplications(db: DB, sinceIso: string, opts: { realOnly?: boolean } = {}): SubmittedApplication[] {
+  const real = opts.realOnly ? ` AND (j.id IS NULL OR ${REAL_PROJECT})` : '';
   const names = new Map((db.prepare('SELECT id, name FROM agent_definitions').all() as Array<{ id: string; name: string }>).map((a) => [a.id, a.name]));
   const out = new Map<string, SubmittedApplication>();
-  for (const r of db.prepare("SELECT r.id, r.data, r.created_at, j.agent_role FROM records r LEFT JOIN jobs j ON j.id = r.job_id WHERE r.type = 'application' AND r.created_at >= ? ORDER BY r.created_at").all(sinceIso) as Array<{ id: string; data: string; created_at: string; agent_role: string | null }>) {
+  for (const r of db.prepare(`SELECT r.id, r.data, r.created_at, j.agent_role FROM records r LEFT JOIN jobs j ON j.id = r.job_id WHERE r.type = 'application' AND r.created_at >= ?${real} ORDER BY r.created_at`).all(sinceIso) as Array<{ id: string; data: string; created_at: string; agent_role: string | null }>) {
     let d: { company?: string; role?: string; verified?: boolean; submitted_at?: string } = {}; try { d = JSON.parse(r.data); } catch { /* unreadable record: skipped below */ }
     if (!d.company || !d.role) continue;
     out.set(r.id, { record: r.id, company: d.company, role: d.role, verified: d.verified === true, submitted_at: d.submitted_at ?? r.created_at, agent: r.agent_role ? names.get(r.agent_role) ?? r.agent_role : null });
   }
-  for (const e of db.prepare("SELECT e.detail, e.at, j.agent_role FROM job_events e LEFT JOIN jobs j ON j.id = e.job_id WHERE e.type = 'application.verified' AND e.at >= ? ORDER BY e.at").all(sinceIso) as Array<{ detail: string; at: string; agent_role: string | null }>) {
+  for (const e of db.prepare(`SELECT e.detail, e.at, j.agent_role FROM job_events e LEFT JOIN jobs j ON j.id = e.job_id WHERE e.type = 'application.verified' AND e.at >= ?${real} ORDER BY e.at`).all(sinceIso) as Array<{ detail: string; at: string; agent_role: string | null }>) {
     let d: { record?: string; company?: string; role?: string } = {}; try { d = JSON.parse(e.detail); } catch { continue; }
     const key = d.record ?? `${d.company}|${d.role}|${e.at}`; const prev = out.get(key);
     if (prev) { prev.verified = true; continue; }

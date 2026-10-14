@@ -364,7 +364,7 @@ export class ChatStore {
   /** What other members said in a group since this assistant last spoke (each member's session sees only its own turns). */
   groupContext(conversationId: string, agentId: string, beforeSeq: number): string {
     const last = this.db.prepare("SELECT max(seq) AS s FROM messages WHERE conversation_id = ? AND role = 'assistant' AND sender = ? AND seq < ?").get(conversationId, agentId, beforeSeq) as { s: number | null };
-    const rows = this.db.prepare("SELECT id, role, sender, kind, content, artifact_id FROM messages WHERE conversation_id = ? AND seq > ? AND seq < ? AND (role IN ('owner','assistant') OR kind IN ('result','delegation') OR json_extract(meta, '$.mirror_of') IS NOT NULL) ORDER BY seq DESC LIMIT 40").all(conversationId, last.s ?? 0, beforeSeq) as Array<{ role: string; sender: string; kind: string; content: string }>;
+    const rows = this.db.prepare("SELECT id, role, sender, kind, content, artifact_id FROM messages WHERE conversation_id = ? AND seq > ? AND seq < ? AND (role IN ('owner','assistant') OR kind IN ('result','delegation') OR json_extract(meta, '$.mirror_of') IS NOT NULL OR json_extract(meta, '$.honesty_check') = 1) ORDER BY seq DESC LIMIT 40").all(conversationId, last.s ?? 0, beforeSeq) as Array<{ role: string; sender: string; kind: string; content: string }>;
     const names = new Map((this.db.prepare('SELECT id, name FROM agent_definitions').all() as Array<{ id: string; name: string }>).map((a) => [a.id, a.name]));
     return rows.reverse().filter((r) => !(r.role === 'assistant' && r.sender === agentId)).map((r) => `${r.role === 'owner' ? 'Owner' : r.role === 'assistant' ? (names.get(r.sender) ?? r.sender) : 'System'}: ${this.contextText(r as never)}`).join('\n');
   }
@@ -443,7 +443,7 @@ export class ChatStore {
 
   /** Transcript for a lead-assistant session that has to be (re)started: the recent owner/assistant exchange. */
   transcript(conversationId: string, opts: { limit?: number; beforeSeq?: number; names?: boolean } = {}): string {
-    const rows = (this.db.prepare("SELECT id, role, kind, content, sender, artifact_id FROM messages WHERE conversation_id = ? AND seq < ? AND (role IN ('owner','assistant') OR kind IN ('result','delegation') OR json_extract(meta, '$.mirror_of') IS NOT NULL) ORDER BY seq DESC LIMIT ?").all(conversationId, opts.beforeSeq ?? Number.MAX_SAFE_INTEGER, opts.limit ?? 30) as Array<{ role: string; kind: string; content: string; sender: string }>).reverse();
+    const rows = (this.db.prepare("SELECT id, role, kind, content, sender, artifact_id FROM messages WHERE conversation_id = ? AND seq < ? AND (role IN ('owner','assistant') OR kind IN ('result','delegation') OR json_extract(meta, '$.mirror_of') IS NOT NULL OR json_extract(meta, '$.honesty_check') = 1) ORDER BY seq DESC LIMIT ?").all(conversationId, opts.beforeSeq ?? Number.MAX_SAFE_INTEGER, opts.limit ?? 30) as Array<{ role: string; kind: string; content: string; sender: string }>).reverse();
     const names = opts.names ? new Map((this.db.prepare('SELECT id, name FROM agent_definitions').all() as Array<{ id: string; name: string }>).map((a) => [a.id, a.name])) : null;
     return rows.map((r) => `${r.role === 'owner' ? 'Owner' : r.role === 'assistant' ? (names ? (names.get(r.sender) ?? r.sender) : 'You') : 'System'}: ${this.contextText(r as never)}`).join('\n');
   }

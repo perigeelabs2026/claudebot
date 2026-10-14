@@ -483,7 +483,7 @@ test('groups: the lead creates and renames groups on the owner\'s words; purpose
 });
 
 test('honesty check: a reply that says an application was submitted, without a verified confirmation, gets a plain note under it; "not submitted" does not', async () => {
-  const s = setup([{ kind: 'ok', text: 'Done! I submitted the Northwind application.' }, { kind: 'ok', text: 'Northwind is not submitted yet: the upload failed.' }, { kind: 'ok', text: 'Research only: three roles listed, and nothing was applied for.' }, { kind: 'ok', text: 'Three roles found, with links, and applied to none.' }, { kind: 'ok', text: 'I sent the follow-up email to Pat at Globex.' }]);
+  const s = setup([{ kind: 'ok', text: 'Done! I submitted the Northwind application.' }, { kind: 'ok', text: 'Northwind is not submitted yet: the upload failed.' }, { kind: 'ok', text: 'Research only: three roles listed, and nothing was applied for.' }, { kind: 'ok', text: 'Three roles found, with links, and applied to none.' }, { kind: 'ok', text: 'I sent the follow-up email to Pat at Globex.' }, { kind: 'ok', text: 'You are right: the email is not sent yet.' }]);
   const c = s.chat.create({ workspace_id: s.ws.id });
   const t1 = s.chat.send(c.id, 'apply to Northwind', s.defs).job; await run(s, t1.id);
   const notes = () => s.chat.messages(c.id).filter((m) => (m.meta as { honesty_check?: boolean }).honesty_check);
@@ -496,6 +496,8 @@ test('honesty check: a reply that says an application was submitted, without a v
   const t5 = s.chat.send(c.id, 'did the email go?', s.defs).job; await run(s, t5.id);
   assert.equal(notes().length, 2); assert.match(notes()[1].content, /no sent message is recorded/, '"sent" with no action.performed gets the note');
   assert.match(prompt, /Team status from the work record \(use these numbers exactly/, 'the lead words counts from the ledger');
+  const t6 = s.chat.send(c.id, 'so did it go?', s.defs).job; await run(s, t6.id);
+  assert.match(prompt, /ClaudeBot check: no sent message is recorded/, 'the next turn sees the check note');
 });
 
 test('the lead switches an assistant off and back on, only on the owner\'s words (morning restart after a pause)', async () => {
@@ -741,4 +743,12 @@ test('a task blocked on something the answer bank answers (or an essay) is re-qu
   s.store.patch(q2.id, { state: 'failed_terminal', blocker_code: 'BLOCKED', failure_detail: 'blocked: the form needs quota attainment again' } as never);
   assert.deepEqual(requeueBankKnownBlockers(s.db, s.store, { bankDir: bank }), [], 'a re-queued task that blocks again is not re-queued again');
   void pw; void salary;
+});
+
+test('a group member (not only the lead) gets the ledger status block, so its counts come from the work record too', async () => {
+  const s = setup([{ kind: 'ok', text: 'Working on it.' }]); addAssistant(s, 'scout', 'Scout', 'Job boards');
+  const g = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'scout'] });
+  const turn = s.chat.send(g.id, '@Scout how many tasks are running?', s.defs).job;
+  assert.equal(turn.agent_role, 'scout'); assert.equal(await run(s, turn.id), 'completed');
+  assert.match(s.runtime.history.at(-1)!.prompt, /Team status from the work record \(use these numbers exactly/);
 });

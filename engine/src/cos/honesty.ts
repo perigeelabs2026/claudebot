@@ -32,25 +32,37 @@ const CLAIMS: Record<Claim, { says: RegExp; negated: RegExp; note: string }> = {
     note: 'ClaudeBot check: no successful sign-in is recorded for this reply, so treat any sign-in mentioned above as unconfirmed.' },
 };
 
-/** Which world-changing claims a reply makes (sentence by sentence, skipping negated and conditional sentences). */
-export function claimsIn(reply: string): Claim[] {
-  const sentences = String(reply ?? '').split(/(?<=[.!?])\s+|\n+/);
-  const out = new Set<Claim>();
-  for (const s of sentences) {
+/** Each world-changing claim a reply makes, with its sentence (skipping negated, conditional and future sentences). */
+export function claimSentences(reply: string): Array<{ claim: Claim; sentence: string }> {
+  const out: Array<{ claim: Claim; sentence: string }> = [];
+  for (const s of String(reply ?? '').split(/(?<=[.!?])\s+|\n+/)) {
     if (/\?\s*$/.test(s) || /\b(if|once|when|after|before|will|should|could|would|can|going to|about to|ready to|plan to)\b[^.]{0,40}$/i.test(s.split(/\b(sent|submitted|applied|verified|confirmed|created|signed|logged|registered)\b/i)[0] ?? '')) continue;
-    for (const [k, c] of Object.entries(CLAIMS) as Array<[Claim, (typeof CLAIMS)[Claim]]>) if (c.says.test(s) && !c.negated.test(s)) out.add(k);
+    for (const [k, c] of Object.entries(CLAIMS) as Array<[Claim, (typeof CLAIMS)[Claim]]>) if (c.says.test(s) && !c.negated.test(s)) out.push({ claim: k, sentence: s });
   }
-  return [...out];
+  return out;
+}
+/** Which world-changing claims a reply makes. */
+export function claimsIn(reply: string): Claim[] { return [...new Set(claimSentences(reply).map((c) => c.claim))]; }
+
+const STOP = new Set(['that', 'this', 'with', 'from', 'their', 'there', 'they', 'them', 'have', 'been', 'just', 'also', 'into', 'your', 'both', 'each', 'every', 'which', 'what', 'were', 'will', 'still', 'already', 'successfully', 'verified', 'confirmed', 'today', 'now']);
+/** The words a "verified" sentence is about ("I verified Pat's address at Globex" → pat, address, globex). */
+export function claimSubject(sentence: string): string[] {
+  const after = sentence.split(/\b(verified|confirmed)\b/i).slice(2).join(' ') || sentence;
+  return [...new Set((after.toLowerCase().match(/[a-z][a-z0-9'-]{3,}/g) ?? []).map((w) => w.replace(/'s$/, '')).filter((w) => !STOP.has(w)))].slice(0, 6);
 }
 
 /** Ledger evidence for a claim, from this task or any task of the same conversation in the last 3 hours. */
-export function hasEvidence(db: DB, claim: Claim, jobId: string, conversationId: string | null): boolean {
+export function hasEvidence(db: DB, claim: Claim, jobId: string, conversationId: string | null, sentence = ''): boolean {
   const since = new Date(Date.now() - 3 * 3600_000).toISOString();
   const ev = (where: string, ...args: unknown[]) => !!db.prepare(`SELECT 1 FROM job_events e JOIN jobs j ON j.id = e.job_id WHERE (e.job_id = ? OR (j.conversation_id = ? AND e.at > ?)) AND (${where}) LIMIT 1`).get(jobId, conversationId ?? '', since, ...(args as never[]));
   switch (claim) {
     case 'submitted': return ev("e.type = 'application.verified'");
     case 'sent': return ev("e.type = 'action.performed' AND (json_extract(e.detail, '$.kind') IN ('send', 'external_message', 'email', 'message') OR e.detail LIKE '%send%')");
-    case 'verified': return ev("e.type LIKE '%.verified' OR e.type = 'action.performed'");
+    case 'verified': {   // a *.verified record, or a page the team read or acted on that is about what the sentence says was verified
+      if (ev("e.type LIKE '%.verified'")) return true;
+      const words = claimSubject(sentence); if (!words.length) return false;
+      return ev(`e.type IN ('browser.act', 'browser.read', 'browser.tab') AND (${words.map(() => 'lower(e.detail) LIKE ?').join(' OR ')})`, ...words.map((w) => `%${w}%`));
+    }
     case 'account': return ev("e.type = 'account.password_set' OR (e.type = 'browser.act' AND json_extract(e.detail, '$.commit') = 1 AND lower(json_extract(e.detail, '$.name')) GLOB '*[cr][re][eg]*' AND (lower(json_extract(e.detail, '$.name')) LIKE '%create%' OR lower(json_extract(e.detail, '$.name')) LIKE '%register%' OR lower(json_extract(e.detail, '$.name')) LIKE '%sign up%'))");
     case 'signed_in': return ev("(e.type = 'browser.act' AND (lower(json_extract(e.detail, '$.name')) LIKE '%sign in%' OR lower(json_extract(e.detail, '$.name')) LIKE '%log in%' OR lower(json_extract(e.detail, '$.name')) LIKE '%signin%' OR lower(json_extract(e.detail, '$.name')) LIKE '%login%')) OR e.type IN ('browser.login_ok', 'auth.signed_in')");
   }
@@ -58,7 +70,8 @@ export function hasEvidence(db: DB, claim: Claim, jobId: string, conversationId:
 
 /** The check notes a reply needs: one per claim with no evidence. */
 export function honestyNotes(db: DB, reply: string, jobId: string, conversationId: string | null): string[] {
-  return claimsIn(reply).filter((c) => !hasEvidence(db, c, jobId, conversationId)).map((c) => CLAIMS[c].note);
+  const failed = new Set<Claim>(); for (const c of claimSentences(reply)) if (!failed.has(c.claim) && !hasEvidence(db, c.claim, jobId, conversationId, c.sentence)) failed.add(c.claim);
+  return [...failed].map((c) => CLAIMS[c].note);
 }
 
 const WORDS: Record<string, number> = { no: 0, zero: 0, none: 0, nothing: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
@@ -66,9 +79,12 @@ export interface LedgerStatus { live: number; running: number; waiting: number; 
 
 /** What the team is doing, from the same queries as the morning report. `exclude` leaves out the turn asking. */
 export function ledgerStatus(db: DB, opts: { exclude?: string; workspace?: string | null } = {}): LedgerStatus {
-  const live = liveTasks(db, { workspace: opts.workspace ?? null, limit: 500 }).filter((t) => t.id !== opts.exclude);
+  // Test projects (telegram:false or dry_run) are not the owner's work: left out, unless the question is asked inside one (then only it counts).
+  const own = opts.exclude ? (db.prepare('SELECT j.workspace_id AS ws, w.policies FROM jobs j LEFT JOIN workspaces w ON w.id = j.workspace_id WHERE j.id = ?').get(opts.exclude) as { ws: string | null; policies: string | null } | undefined) : undefined;
+  const ownIsTest = (() => { try { const p = JSON.parse(own?.policies || '{}') as { telegram?: boolean; dry_run?: boolean }; return p.telegram === false || !!p.dry_run; } catch { return false; } })();
+  const live = liveTasks(db, { workspace: opts.workspace ?? (ownIsTest ? own!.ws : null), realOnly: !ownIsTest, limit: 500 }).filter((t) => t.id !== opts.exclude);
   const running = live.filter((t) => t.state === 'leased' || t.state === 'running').length; const waiting = live.length - running;
-  const apps = submittedApplications(db, new Date(Date.now() - 24 * 3600_000).toISOString());
+  const apps = submittedApplications(db, new Date(Date.now() - 24 * 3600_000).toISOString(), { realOnly: !ownIsTest });
   const text = `Team status from the work record (use these numbers exactly; never state a different count): ${live.length} live task${live.length === 1 ? '' : 's'} (${running} running, ${waiting} queued or waiting)${live.length ? `: ${live.slice(0, 12).map((t) => `${t.agent}: ${t.title}`).join('; ')}${live.length > 12 ? `; and ${live.length - 12} more` : ''}` : ''}. Job applications submitted and verified in the last 24 hours: ${apps.length}${apps.length ? ` (${apps.map((a) => a.company).join(', ')})` : ''}.`;
   return { live: live.length, running, waiting, applications: apps.length, text };
 }
