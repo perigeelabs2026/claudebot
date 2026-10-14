@@ -121,6 +121,7 @@ test('record_application reads a thank-you shown inside an embedded application 
   (s.broker as unknown as { browserRunner: (a: string[]) => Promise<{ ok: boolean; stdout: string; stderr: string }> }).browserRunner = async (args) => ({ ok: true, stdout: args[0] === 'evaluate' ? 'Careers | Northwind Labs\nOpen roles' : args[0] === 'snapshot' ? '- iframe:\n  - heading "Thank you Sam! Your application has been submitted."' : '', stderr: '' });
   const ok = await s.call(turn, 'record_application', { company: 'Northwind Labs', role: 'Channel Account Manager' });
   assert.equal(ok.ok, true, ok.text); assert.match(ok.text, /Recorded and verified: Northwind Labs/);
+  assert.ok(s.chat.messages(c.id).some((m) => m.content === 'Applied: Northwind Labs, Channel Account Manager. Confirmation page seen and receipt saved.'), 'the receipt shows in the team group');
 });
 
 test('every field and key press inside a job application is covered by the permission (Workday "How Did You Hear About Us?" + Enter asked the owner); messaging and paying are not', async () => {

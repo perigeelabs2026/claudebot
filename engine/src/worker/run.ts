@@ -329,8 +329,12 @@ Do not end with DONE. Do not mention tool names or ids (job-…, art-…, apr-�
         // A status report that hands the owner work the team can do ("the other eight roles need answers only you can give") is bounced the same way.
         const ownerTodo = /\b(answers? only you can (give|provide)|only you can answer|need(s)? your answers|need(s)? your input|need you to (answer|fill|provide|find|check|look up))\b/i.test(reply);
         // A reply that reports being stuck ("stays unsent", "unverified", "could not find") without the other routes it tried is bounced too.
-        const stuckReport = /\b(stays? unsent|unverified|not verified|could(n't| not) (find|verify|reach|confirm)|no (public |verified )?(email|address|contact)|stuck)\b/i.test(reply)
-          && !/\b(also (tried|checked|searched)|i tried|we tried|alternatives?|other (people|contacts?|routes?|sources?)|instead)\b/i.test(reply) && !/\b(captcha|sign[- ]?in|log[- ]?in|password|verification code)\b/i.test(reply);
+        // It passes only when it names another person, source or route actually tried; a login/CAPTCHA blocker exempts only its own sentence.
+        const STUCK = /\b(stays? unsent|unverified|not verified|could(n't| not) (find|verify|reach|confirm)|no (public |verified )?(email|address|contact)|stuck)\b/i;
+        const OWNER_BLOCK = /\b(captcha|sign[- ]?in|log[- ]?in|password|verification code)\b/i;
+        const TRIED = /\b(tried|checked|searched|contacted|looked (at|up|through)|asked|reached out to|went through)\b[^.?!]{0,100}\b(linkedin|company (site|website|page)|website|press|news|gmail|inbox|ceo|founder|manager|vp|director|team|recruiter|hiring|committee|directory|google|crunchbase|rocketreach|hunter|apollo|zoominfo|pattern|careers page|github|twitter|x\.com)\b/i;
+        const stuckSentences = reply.split(/(?<=[.!?])\s+/).filter((x) => STUCK.test(x) && !OWNER_BLOCK.test(x));
+        const stuckReport = stuckSentences.length > 0 && !TRIED.test(reply);
         const askBack = !String(msg.content ?? '').startsWith('ClaudeBot: do not ask the owner') && (ownerTodo || stuckReport || /\b(should i|shall i|want me to|do you want me to|would you like me to|can i go ahead|ok(ay)? to|or leave (it|them) for later)\b[^?]{0,240}\?\s*$/i.test(lastSentence)
           && !/\b(send|email|e-mail|message|post|publish|pay|buy|purchase|spend|delete|remove)\b/i.test(lastSentence.replace(/\bverify\b[^?]*/i, ''))   // asking to send, spend, post or delete is the owner's call
           && !/\b(password|passcode|verification code|captcha|salary|compensation|pay range|quota|stack rank|essay)\b/i.test(reply.trim().slice(-400)));   // a personal answer may be named in the sentence before the question

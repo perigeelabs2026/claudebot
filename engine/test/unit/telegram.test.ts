@@ -231,3 +231,15 @@ test('T10: routine progress never goes to Telegram: assistants\' updates, group 
   assert.deepEqual(texts.sort(), ['Applied: Dragos, Senior CSM. Confirmation page seen and receipt saved.', 'Two applications are in.'], 'only the reply to their Telegram message and the verified receipt; never a routine automatic report');
   f.close();
 });
+
+test('T11: a blocker only the owner can clear reaches Telegram as one plain line (held in quiet hours); a team-fixable blocker does not', async () => {
+  const f = await fakeTelegram(); const s = setup(f.base); saveToken(s.secrets, TOKEN);
+  const { code } = newPairingCode(s.db); f.push(msg(1, 777, `/start ${code}`)); await s.bridge.cycle(0);
+  const mk = (key: string, detail: string) => { const j = s.store.create({ idempotency_key: key, kind: 'research.report', objective: `Apply to ${key}`, success_contract: {}, agent_role: 'researcher', workspace_id: s.ws.id } as never, 'owner').job; s.db.prepare("UPDATE jobs SET state = 'failed_terminal', blocker_code = 'BLOCKED', failure_detail = ?, updated_at = ? WHERE id = ?").run(detail, new Date().toISOString(), j.id); return j; };
+  mk('PointClickCare', 'blocked: an hCaptcha appeared at Submit'); mk('Esri', 'blocked: the page timed out');
+  f.calls.length = 0; await s.bridge.cycle(0);
+  const texts = f.calls.filter((x) => x.method === 'sendMessage').map((x) => String(x.body.text));
+  assert.equal(texts.filter((t) => /stuck on something only you can do: an hCaptcha appeared at Submit\. Open ClaudeBot to take over\./.test(t)).length, 1, texts.join('\n'));
+  assert.ok(!texts.some((t) => /timed out/.test(t)), 'a timeout is the team\'s to fix');
+  f.close();
+});

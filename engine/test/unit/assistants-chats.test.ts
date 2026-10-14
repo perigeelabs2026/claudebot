@@ -642,3 +642,15 @@ test('one answer store: the team folder answers sync into the vault and "quota a
   const bounce = s.db.prepare('SELECT objective FROM jobs WHERE idempotency_key = ?').get(`engine:askback:${job.id}`) as { objective: string }; assert.ok(bounce, 'stuck report bounced'); assert.match(bounce.objective, /do not stop at the first blocked path/);
   assert.match(s.chat.groupContext(team.id, 'scout', 1e9), /From direct chat.* · You: Follow up with Acme/, 'the team record is in group context');
 });
+
+test('the stuck bounce cannot be slipped past: "no alternatives were found" and a login sentence elsewhere still bounce; naming a route tried passes', async () => {
+  const s = setup([
+    { kind: 'ok', text: 'No alternatives were found, so the Acme follow-up stays unsent.' }, { kind: 'ok', text: 'ok' },
+    { kind: 'ok', text: "I couldn't sign in to the careers site. The hiring manager's address is unverified." }, { kind: 'ok', text: 'ok' },
+    { kind: 'ok', text: "I tried the CEO via LinkedIn and the company site; there is still no public email for the hiring manager, so it stays unsent." }]);
+  const d = s.chat.create({ workspace_id: s.ws.id, type: 'direct', members: ['coordinator'] });
+  const bounced = async (text: string) => { const { job } = s.chat.send(d.id, text, s.defs); assert.equal(await run(s, job.id), 'completed'); const b = s.db.prepare('SELECT id FROM jobs WHERE idempotency_key = ?').get(`engine:askback:${job.id}`) as { id: string } | undefined; if (b) assert.equal(await run(s, b.id), 'completed'); return !!b; };
+  assert.equal(await bounced('Acme?'), true, '"no alternatives were found" is not an alternative');
+  assert.equal(await bounced('The careers site and Acme?'), true, 'a login sentence exempts only itself');
+  assert.equal(await bounced('Acme again?'), false, 'a reply naming the routes tried passes');
+});

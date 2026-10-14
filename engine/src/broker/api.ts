@@ -266,6 +266,9 @@ export class BrokerApi {
         const recId = newId('rec'); const rt = now();
         db.prepare('INSERT INTO records(id, type, data, job_id, created_at, updated_at) VALUES (?,?,?,?,?,?)').run(recId, 'application', JSON.stringify({ title: `${company} – ${role}`, company, role, url: urlNow, submitted_at: rt, confirmation: conf, receipt_artifact: shotArt, verified: true }), cap.job_id, rt, rt);
         this.store.event(cap.job_id, actor, 'application.verified', { record: recId, company, role, url: urlNow, confirmation: conf, receipt: shotArt });
+        // The receipt shows in the team group too (all work shows there).
+        try { const chat = new ChatStore(db, this.store); const team = chat.teamConversation(); const me = this.store.get(cap.job_id); const pol = me?.workspace_id ? JSON.parse(((db.prepare('SELECT policies FROM workspaces WHERE id = ?').get(me.workspace_id) as { policies: string } | undefined)?.policies) || '{}') as { telegram?: boolean; dry_run?: boolean } : {};
+          if (team && pol.telegram !== false && !pol.dry_run) chat.add({ conversation_id: team, role: 'system', kind: 'activity', content: `Applied: ${company}, ${role}. Confirmation page seen and receipt saved.`, job_id: cap.job_id, meta: { mirror_of: `receipt:${recId}`, receipt: recId } }); } catch { /* the record stands */ }
         return { ok: true, text: `Recorded and verified: ${company} – ${role}. Confirmation on the page: "${conf}". ${shotArt ? 'The receipt screenshot shows as a file card under your reply.' : ''} You may now tell the owner it was submitted.`, data: { record_id: recId, receipt: shotArt } };
       }
       // ---- conversation tools (chat replies) ----

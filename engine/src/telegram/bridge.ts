@@ -1,3 +1,4 @@
+import { classifyBlocked } from '../cos/owner-needs.ts';
 /**
  * Telegram bridge (long polling; no public webhook is needed on a Mac). Owner-only:
  * - the bot token lives in secrets/telegram.token (0600), set by the owner in the app, never logged or returned;
@@ -195,6 +196,20 @@ export class TelegramBridge {
         const skip = quietNow || pol.telegram === false || pol.dry_run;
         const sent = skip ? null : await this.api<{ message_id: number }>('sendMessage', { chat_id: b.chat_id, text: `Applied: ${d.company ?? 'a company'}, ${d.role ?? 'a role'}. Confirmation page seen and receipt saved.` }).catch(() => null);
         db.prepare('INSERT OR IGNORE INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?,?,?,?,?)').run(`receipt:${r.seq}`, b.chat_id, sent?.message_id ?? null, skip ? (quietNow ? 'held-quiet' : 'skipped-test') : 'receipt', now()); if (sent) n++;
+      }
+    }
+    // True blockers that only the owner can clear (a password, a code, a CAPTCHA, a sign-in) are important: one plain line each.
+    if (!onlyIds) {
+      const quietNow = String((rs(db, 'telegram.quiet_until') as { until?: string } | null)?.until ?? '') > now();
+      const blocked = db.prepare(`SELECT j.id, j.agent_role, j.objective, j.failure_detail, j.state, j.waiting_on, w.policies FROM jobs j LEFT JOIN workspaces w ON w.id = j.workspace_id WHERE j.updated_at >= ? AND ((j.state = 'failed_terminal' AND j.blocker_code = 'BLOCKED') OR j.state = 'waiting_for_auth') AND NOT EXISTS (SELECT 1 FROM telegram_outbox o WHERE o.message_id = 'blocker:' || j.id) ORDER BY j.updated_at LIMIT 10`).all(since) as Array<{ id: string; agent_role: string; objective: string; failure_detail: string | null; state: string; waiting_on: string | null; policies: string | null }>;
+      for (const j of blocked) {
+        let pol: { telegram?: boolean; dry_run?: boolean } = {}; try { pol = JSON.parse(j.policies || '{}'); } catch { /* */ }
+        const detail = String(j.failure_detail ?? '').replace(/^blocked: /, ''); const ownerOnly = j.state === 'waiting_for_auth' || /captcha|recaptcha|hcaptcha/i.test(detail) || classifyBlocked({ kind: 'blocker', title: j.objective, detail }) === 'owner';
+        if (!ownerOnly) { db.prepare('INSERT OR IGNORE INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?,?,?,?,?)').run(`blocker:${j.id}`, b.chat_id, null, 'skipped-team', now()); continue; }
+        const skip = quietNow || pol.telegram === false || pol.dry_run; const who = (this.d.defs.getAgent(j.agent_role)?.name ?? j.agent_role).replace(/\s*\(.*\)$/, '');
+        const what = j.state === 'waiting_for_auth' ? `needs you to sign in${j.waiting_on?.startsWith('browser:') ? ` to ${j.waiting_on.slice(8)}` : ''}` : `is stuck on something only you can do: ${detail.replace(/\s+/g, ' ').slice(0, 200)}`;
+        const sent = skip ? null : await this.api<{ message_id: number }>('sendMessage', { chat_id: b.chat_id, text: `${who} ${what}. Open ClaudeBot to take over.` }).catch(() => null);
+        db.prepare('INSERT OR IGNORE INTO telegram_outbox(message_id, chat_id, tg_message_id, kind, sent_at) VALUES (?,?,?,?,?)').run(`blocker:${j.id}`, b.chat_id, sent?.message_id ?? null, skip ? (quietNow ? 'held-quiet' : 'skipped-test') : 'blocker', now()); if (sent) n++;
       }
     }
     const rows = db.prepare(`SELECT m.id, m.conversation_id, m.kind, m.role, m.sender, m.content, m.approval_id, c.title, c.type FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE ${onlyIds ? `m.id IN (${onlyIds.map(() => '?').join(',')}) AND ? <> ''` : 'm.created_at >= ?'} AND ((m.role = 'assistant' AND m.kind = 'text' AND m.sender = 'coordinator' AND COALESCE(json_extract(m.meta, '$.update'), 0) = 0 AND EXISTS (SELECT 1 FROM jobs jj JOIN telegram_outbox oi ON oi.message_id = json_extract(jj.inputs, '$.message_id') AND oi.kind = 'inbound' WHERE jj.id = m.job_id)) OR m.kind = 'decision') AND NOT EXISTS (SELECT 1 FROM telegram_outbox o WHERE o.message_id = m.id) ORDER BY m.created_at LIMIT ?`).all(...(onlyIds ?? []), since, limit) as Array<{ id: string; conversation_id: string; kind: string; role: string; sender: string; content: string; approval_id: string | null; title: string; type: string }>;
