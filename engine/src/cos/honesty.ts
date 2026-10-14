@@ -58,10 +58,11 @@ export function hasEvidence(db: DB, claim: Claim, jobId: string, conversationId:
   switch (claim) {
     case 'submitted': return ev("e.type = 'application.verified'");
     case 'sent': return ev("e.type = 'action.performed' AND (json_extract(e.detail, '$.kind') IN ('send', 'external_message', 'email', 'message') OR e.detail LIKE '%send%')");
-    case 'verified': {   // a *.verified record, or a page the team read or acted on that is about what the sentence says was verified
+    case 'verified': {   // a *.verified record, an application record, or a committed action on a page about the subject. Opening or reading a page verifies nothing.
       if (ev("e.type LIKE '%.verified'")) return true;
+      if (db.prepare("SELECT 1 FROM records r JOIN jobs j ON j.id = r.job_id WHERE r.type = 'application' AND (r.job_id = ? OR (j.conversation_id = ? AND r.created_at > ?)) LIMIT 1").get(jobId, conversationId ?? '', since)) return true;
       const words = claimSubject(sentence); if (!words.length) return false;
-      return ev(`e.type IN ('browser.act', 'browser.read', 'browser.tab') AND (${words.map(() => 'lower(e.detail) LIKE ?').join(' OR ')})`, ...words.map((w) => `%${w}%`));
+      return ev(`e.type = 'browser.act' AND json_extract(e.detail, '$.commit') = 1 AND (${words.map(() => 'lower(e.detail) LIKE ?').join(' OR ')})`, ...words.map((w) => `%${w}%`));
     }
     case 'account': return ev("e.type = 'account.password_set' OR (e.type = 'browser.act' AND json_extract(e.detail, '$.commit') = 1 AND lower(json_extract(e.detail, '$.name')) GLOB '*[cr][re][eg]*' AND (lower(json_extract(e.detail, '$.name')) LIKE '%create%' OR lower(json_extract(e.detail, '$.name')) LIKE '%register%' OR lower(json_extract(e.detail, '$.name')) LIKE '%sign up%'))");
     case 'signed_in': return ev("(e.type = 'browser.act' AND (lower(json_extract(e.detail, '$.name')) LIKE '%sign in%' OR lower(json_extract(e.detail, '$.name')) LIKE '%log in%' OR lower(json_extract(e.detail, '$.name')) LIKE '%signin%' OR lower(json_extract(e.detail, '$.name')) LIKE '%login%')) OR e.type IN ('browser.login_ok', 'auth.signed_in')");

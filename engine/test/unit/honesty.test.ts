@@ -72,8 +72,12 @@ test('"verified" needs a *.verified record or a page about the same thing: an ea
   const { db, store } = setup(); const j = job(store, 'v', 'Email Pat');
   event(db, j.id, 'action.performed', { kind: 'send', via: 'browser_act' });
   assert.match(honestyNotes(db, 'I verified the address.', j.id, null).join(''), /nothing was verified/, 'a send is not a verification');
-  event(db, j.id, 'browser.read', { url: 'https://globex.example/team/pat-rivera' });
-  assert.deepEqual(honestyNotes(db, "I verified Pat Rivera's role on the Globex team page.", j.id, null), [], 'the page read is about what was verified');
+  event(db, j.id, 'browser.read', { url: 'https://www.linkedin.com/in/pat-rivera' });
+  assert.match(honestyNotes(db, "I verified Pat's address on LinkedIn.", j.id, null).join(''), /nothing was verified/, 'reading a LinkedIn page only opened it');
+  event(db, j.id, 'browser.tab', { opened: 'TAB9', url: 'https://jobs.globex.example/listing/account-executive' });
+  assert.match(honestyNotes(db, 'I confirmed the Account Executive role at Globex.', j.id, null).join(''), /nothing was verified/, 'opening a listing only opened it');
+  event(db, j.id, 'browser.act', { action: 'click', name: 'Verify email', url: 'https://jobs.globex.example/listing/account-executive', commit: true });
+  assert.deepEqual(honestyNotes(db, 'I confirmed the Account Executive role at Globex.', j.id, null), [], 'a committed action on the matching page counts');
   assert.match(honestyNotes(db, 'I verified the mailing address.', j.id, null).join(''), /nothing was verified/, 'a different subject still needs evidence');
   event(db, j.id, 'email.verified', { address: 'x' });
   assert.deepEqual(honestyNotes(db, 'I verified the address.', j.id, null), []);
