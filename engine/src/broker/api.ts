@@ -442,7 +442,8 @@ export class BrokerApi {
         } catch (e) { return { ok: false, text: `not scheduled: ${(e as Error).message}` }; }
       }
       case 'browser_act': return this.browserAct(cap, a, actor);
-      case 'set_account_password': return this.setAccountPassword(cap, actor, String(a.account ?? ''));
+      case 'set_account_password': return this.setAccountPassword(cap, actor, String(a.account ?? ''), a.replace === true);
+      case 'list_accounts': { const list = new Vault().accounts(); return { ok: true, text: list.length ? `Accounts the team created for the owner (passwords stored, never shown):\n${list.map((x) => `- ${x.line}`).join('\n')}` : 'No accounts recorded yet.', data: { accounts: list.map((x) => x.account) } }; }
       case 'wait_for_children': {
         const ids = Array.isArray(a.ids) ? a.ids.map(String) : (db.prepare("SELECT id FROM jobs WHERE parent_id = ?").all(cap.job_id) as Array<{ id: string }>).map((r) => r.id);
         const r = await waitForChildren(db, this.store, cap.job_id, ids, Number(a.max_seconds ?? 50) * 1000);
@@ -629,18 +630,22 @@ export class BrokerApi {
   };
 
   /** Create (or replace) the password for an account the assistant is signing up for; the value never leaves the broker. */
-  private async setAccountPassword(cap: Capability, actor: string, account: string): Promise<{ ok: boolean; text: string }> {
+  private async setAccountPassword(cap: Capability, actor: string, account: string, replace: boolean): Promise<{ ok: boolean; text: string }> {
     const key = accountKey(account); if (!key) return { ok: false, text: 'account is required, e.g. "myworkdayjobs.com:name@example.com"' };
-    const ok = await this.accounts().set(key, generatePassword());
-    if (!ok) return { ok: false, text: 'The password store could not save it. Nothing was typed.' };
-    this.store.event(cap.job_id, actor, 'account.password_set', { account: key });
+    const w = await this.accounts().set(key, generatePassword(), { replace });
+    if (!w.ok && w.reason === 'exists') return { ok: false, text: `A password for ${key} is already stored; nothing was changed. Use it with browser_act fill_secret. Pass replace: true only when the site has just accepted a password reset for this account.` };
+    if (!w.ok) { this.store.event(cap.job_id, actor, 'account.password_store_error', { account: key, detail: w.detail }); return { ok: false, text: `The password store could not be used (${w.detail}); nothing was changed or typed. Report it as a blocker for the owner.` }; }
+    this.store.event(cap.job_id, actor, 'account.password_set', { account: key, replaced: replace });
+    try { const name = (this.db.prepare('SELECT name FROM agent_definitions WHERE id = ?').get(cap.role) as { name: string } | undefined)?.name ?? cap.role; new Vault().recordAccount(key, name); } catch { /* the account list is a convenience; the password is stored */ }
     return { ok: true, text: `A strong password for ${key} is stored. Type it with browser_act action "fill_secret", ref = the password field, account = "${key}" (and the confirm field too). You never see the value.` };
   }
 
   private async fillSecret(cap: Capability, actor: string, tab: string, el: SnapshotElement | undefined, ref: string | undefined, account: string): Promise<{ ok: boolean; text: string }> {
     const key = accountKey(account);
     if (!el || !(el.role === 'password' || /\bpass(word|code|phrase)?\b/i.test(el.name))) return { ok: false, text: `fill_secret types only into a password field; ${ref ?? '?'} is not one. Take a new snapshot and use the password field's ref.` };
-    const value = key ? await this.accounts().get(key) : null;
+    const got = key ? await this.accounts().read(key) : { status: 'missing' as const };
+    if (got.status === 'error') return { ok: false, text: `The password store could not be read (${got.reason}); nothing was typed. Report it as a blocker for the owner; do not create a new password.` };
+    const value = got.status === 'found' ? got.value : null;
     if (!value) return { ok: false, text: `No stored password for "${key || account}". Call set_account_password for it first (or the owner types it during takeover).` };
     const focus = await this.browserRunner(['click', el.ref, '--target-id', tab], 'browser.click');
     const typed = focus.ok && await this.secretTyper(tab, value);

@@ -78,6 +78,20 @@ export class Vault {
   }
   file(scope: 'team' | 'owner' | 'self', agent?: { id: string; name: string }): string { this.ensure(); return scope === 'team' ? path.join(this.dir, 'Team.md') : scope === 'owner' ? path.join(this.dir, 'Owner.md') : this.notePath(agent!); }
 
+  /** Owner/Accounts.md: the accounts the team created for the owner, one line each (the account key and when; never a password). */
+  accountsFile(): string { return path.join(this.dir, 'Owner', 'Accounts.md'); }
+  recordAccount(key: string, by: string, when: Date = new Date()): void {
+    if (looksSecret(key)) return;
+    const f = this.accountsFile(); fs.mkdirSync(path.dirname(f), { recursive: true });
+    if (!fs.existsSync(f)) fs.writeFileSync(f, '# Accounts\n\nAccounts the team created in your name. Passwords are in the Keychain (service claudebot.account), never here.\n\n');
+    if (this.accounts().some((a) => a.account === key)) return;
+    fs.appendFileSync(f, `- ${key} — created ${localDay(when)} by ${by.replace(/[\r\n]+/g, ' ')}\n`);
+  }
+  accounts(): Array<{ account: string; line: string }> {
+    let t = ''; try { t = fs.readFileSync(this.accountsFile(), 'utf8'); } catch { return []; }
+    return t.split('\n').map((l) => l.match(/^-\s+([a-z0-9@._:+-]+)\b/)).filter((m): m is RegExpMatchArray => !!m).map((m) => ({ account: m[1], line: m.input!.slice(2).trim() }));
+  }
+
   /** Add one line under a section (deduplicated; at most 40 lines per section, oldest dropped). Refuses secrets. */
   remember(input: { scope: 'team' | 'owner' | 'self'; section?: Section; text: string; agent: { id: string; name: string }; source?: string }): { ok: true; file: string; added: boolean } | { ok: false; reason: string } {
     const text = String(input.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 400); if (!text) return { ok: false, reason: 'nothing to remember' };

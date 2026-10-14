@@ -150,10 +150,52 @@ test('account passwords: on macOS the value goes to the Keychain through the sec
   const calls: string[][] = []; const kc = new Map<string, string>();
   const exec = async (cmd: string, args: string[]) => { calls.push([cmd, ...args]); const a = args[args.indexOf('-a') + 1];
     if (args[0] === 'add-generic-password') { kc.set(a, args[args.indexOf('-w') + 1]); return { ok: true, stdout: '' }; }
-    return kc.has(a) ? { ok: true, stdout: `${kc.get(a)}\n` } : { ok: false, stdout: '' }; };
+    return kc.has(a) ? { ok: true, stdout: `${kc.get(a)}\n` } : { ok: false, stdout: '', code: 44 }; };   // 44 = errSecItemNotFound
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kc-')); const sec = new AccountSecrets({ secretsDir: dir, platform: 'darwin', exec });
-  assert.equal(await sec.get('a:b@c.d'), null);
-  assert.equal(await sec.set('A:b@c.d', 'Xy7!secretvalue'), true); assert.equal(await sec.get('a:b@c.d'), 'Xy7!secretvalue');
-  assert.deepEqual(calls[1].slice(0, 7), ['/usr/bin/security', 'add-generic-password', '-U', '-a', 'a:b@c.d', '-s', 'claudebot.account']);
+  assert.deepEqual(await sec.read('a:b@c.d'), { status: 'missing' });
+  assert.deepEqual(await sec.set('A:b@c.d', 'Xy7!secretvalue'), { ok: true }); assert.equal(await sec.get('a:b@c.d'), 'Xy7!secretvalue');
+  assert.deepEqual(calls.find((c) => c[1] === 'add-generic-password')!.slice(0, 6), ['/usr/bin/security', 'add-generic-password', '-a', 'a:b@c.d', '-s', 'claudebot.account'], 'a first write never uses -U');
   assert.equal(fs.readdirSync(dir).length, 0, 'nothing written to disk on macOS');
+  // An existing password is never overwritten without replace: true.
+  assert.deepEqual(await sec.set('a:b@c.d', 'Other!value99'), { ok: false, reason: 'exists', detail: 'a password for a:b@c.d is already stored' }); assert.equal(await sec.get('a:b@c.d'), 'Xy7!secretvalue');
+  assert.deepEqual(await sec.set('a:b@c.d', 'Reset!value99', { replace: true }), { ok: true }); assert.equal(await sec.get('a:b@c.d'), 'Reset!value99');
+  assert.ok(calls.filter((c) => c[1] === 'add-generic-password').at(-1)!.includes('-U'), 'replace uses -U');
+});
+
+test('account passwords: a locked Keychain is a store error, never "nothing stored", and nothing is written over the live password', async () => {
+  const { AccountSecrets } = await import('../../src/secrets/accounts.ts');
+  const writes: string[][] = [];
+  const locked = async (_cmd: string, args: string[]) => { if (args[0] === 'add-generic-password') { writes.push(args); return { ok: true, stdout: '' }; } return { ok: false, stdout: '', code: 36 }; };   // errSecInteractionNotAllowed
+  const sec = new AccountSecrets({ secretsDir: fs.mkdtempSync(path.join(os.tmpdir(), 'kc2-')), platform: 'darwin', exec: locked });
+  const r = await sec.read('a:b@c.d'); assert.equal(r.status, 'error'); assert.match((r as { reason: string }).reason, /locked/);
+  const w = await sec.set('a:b@c.d', 'New!value123'); assert.equal(w.ok, false); assert.equal((w as { reason: string }).reason, 'error');
+  assert.equal((await sec.set('a:b@c.d', 'New!value123', { replace: true })).ok, false, 'not even with replace');
+  assert.equal(writes.length, 0, 'no write reached the Keychain');
+  // Off macOS: a damaged file is an error too, and is left as it is.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kc3-')); fs.writeFileSync(path.join(dir, 'accounts.json'), '{not json');
+  const lin = new AccountSecrets({ secretsDir: dir, platform: 'linux' });
+  assert.equal((await lin.read('a:b@c.d')).status, 'error'); assert.equal((await lin.set('a:b@c.d', 'x!Y2zzzzzz')).ok, false); assert.equal(fs.readFileSync(path.join(dir, 'accounts.json'), 'utf8'), '{not json');
+});
+
+test('account passwords: the broker refuses to replace a stored password, reports a store error as a blocker, and lists created accounts from Owner/Accounts.md', async () => {
+  const { Vault } = await import('../../src/memory/vault.ts');
+  const vdir = fs.mkdtempSync(path.join(os.tmpdir(), 'acctvault-')); process.env.CLAUDEBOT_MEMORY_DIR = vdir;
+  try {
+    const s = setup(); recordTaskTab(s.db, s.job.id, 'TAB1');
+    const cap = issueCapability(path.join(s.tmp, 'run'), s.job, s.wsDir, [...s.cap.tools, 'set_account_password', 'list_accounts']);
+    s.broker.secretTyper = async () => true;
+    assert.match((await s.broker.call(cap, 'list_accounts', {})).text, /No accounts recorded yet/);
+    assert.equal((await s.broker.call(cap, 'set_account_password', { account: 'jobs.example.com:owner@example.com' })).ok, true);
+    const first = (await s.broker.accounts().get('jobs.example.com:owner@example.com'))!;
+    const again = await s.broker.call(cap, 'set_account_password', { account: 'jobs.example.com:owner@example.com' });
+    assert.equal(again.ok, false); assert.match(again.text, /already stored; nothing was changed/); assert.equal(await s.broker.accounts().get('jobs.example.com:owner@example.com'), first, 'the live password is kept');
+    const page = fs.readFileSync(path.join(vdir, 'Owner', 'Accounts.md'), 'utf8');
+    assert.match(page, /^- jobs\.example\.com:owner@example\.com — created \d{4}-\d{2}-\d{2} by /m); assert.ok(!page.includes(first), 'the page never holds the password');
+    assert.deepEqual(new Vault(vdir).accounts().map((a) => a.account), ['jobs.example.com:owner@example.com'], 'recorded once');
+    const list = await s.broker.call(cap, 'list_accounts', {}); assert.match(list.text, /jobs\.example\.com:owner@example\.com/); assert.ok(!list.text.includes(first));
+    // A store that cannot be read: fill_secret types nothing and says it is a blocker.
+    fs.writeFileSync(path.join(s.tmp, 'secrets', 'accounts.json'), '{broken');
+    const f = await s.broker.call(cap, 'browser_act', { action: 'fill_secret', ref: 'e50', account: 'jobs.example.com:owner@example.com' });
+    assert.equal(f.ok, false); assert.match(f.text, /could not be read[\s\S]*do not create a new password/);
+  } finally { delete process.env.CLAUDEBOT_MEMORY_DIR; }
 });
