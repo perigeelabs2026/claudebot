@@ -179,7 +179,7 @@ export const DETERMINISTIC: Record<string, DetFn> = {
     fs.copyFileSync(patch.path, path.join(ctx.workspace, 'diff.patch'));
     for (const a of arts.filter((x) => /final-.*-output\.txt$/.test(x.path) && fs.existsSync(x.path))) fs.copyFileSync(a.path, path.join(ctx.workspace, 'checks', path.basename(a.path)));
     const root = buildRoot(build); const rootJob = ctx.store.get(root) ?? build;
-    const earlier = (ctx.db.prepare("SELECT e.detail FROM job_events e JOIN jobs j ON j.id = e.job_id WHERE e.type = 'code_review.failed' AND json_extract(j.inputs, '$.build_root') = ? ORDER BY e.seq").all(root) as Array<{ detail: string }>).map((r, i) => `Round ${i + 1}:\n${(JSON.parse(r.detail) as { gaps: string[] }).gaps.map((g) => `- ${g}`).join('\n')}`);
+    const earlier = (ctx.db.prepare("SELECT e.detail FROM job_events e JOIN jobs j ON j.id = e.job_id WHERE e.type = 'review.failed' AND json_extract(j.inputs, '$.build_root') = ? ORDER BY e.seq").all(root) as Array<{ detail: string }>).map((r, i) => `Round ${i + 1}:\n${(JSON.parse(r.detail) as { gaps: string[] }).gaps.map((g) => `- ${g}`).join('\n')}`);
     fs.writeFileSync(path.join(ctx.workspace, 'REQUEST.md'), `# Review of ${inputs.commit ?? ''}\n\nThe request: ${rootJob.objective}\n${(JSON.parse(rootJob.inputs || '{}') as { change?: string }).change ? `Details: ${(JSON.parse(rootJob.inputs || '{}') as { change?: string }).change}\n` : ''}Build: ${build.id} (${build.objective})\n\n${earlier.length ? `Earlier rounds' gaps (check each is really fixed):\n${earlier.join('\n\n')}\n` : ''}`);
     return { ok: true, payload: { build_job: build.id, build_root: root, commit: inputs.commit ?? null, files: fs.readdirSync(path.join(ctx.workspace, 'checks')) } };
   },
@@ -194,7 +194,7 @@ export const DETERMINISTIC: Record<string, DetFn> = {
     const verdict = m[1].toLowerCase() as 'pass' | 'fail'; const gaps = text.split('\n').filter((l) => /^\s*-\s*Gap:/i.test(l)).map((l) => l.replace(/^\s*-\s*Gap:\s*/i, '').trim()).filter(Boolean);
     if (verdict === 'fail' && !gaps.length) return { ok: false, reason: 'a FAIL verdict names no gap ("- Gap: …" lines)', terminal: true, operatorAction: 'Re-run the review.' };
     const detail = { commit: inputs.commit ?? null, branch: inputs.branch ?? null, build_job: inputs.build_job ?? null, build_root: inputs.build_root ?? null, ...(verdict === 'fail' ? { gaps } : {}) };
-    ctx.store.event(ctx.job.id, ctx.actor, verdict === 'pass' ? 'code_review.passed' : 'code_review.failed', detail);
+    ctx.store.event(ctx.job.id, ctx.actor, verdict === 'pass' ? 'review.passed' : 'review.failed', detail);
     let fix: string | null = null;
     if (verdict === 'fail' && inputs.build_job) { const j = requeueBuild(ctx.db, ctx.store, inputs.build_job, { source: 'review', feedback: gaps.map((g) => `- ${g}`).join('\n'), ref: ctx.job.id }, ctx.actor); fix = j?.id ?? null; }
     return { ok: true, payload: { verdict, gaps, fix_job: fix, summary: verdict === 'pass' ? `Code review PASS for ${String(inputs.commit ?? '').slice(0, 7)}` : `Code review FAIL (${gaps.length} gap${gaps.length === 1 ? '' : 's'})${fix ? `; fix round queued (${fix})` : '; fix rounds exhausted'}` } };

@@ -27,6 +27,7 @@ import { markdownToHtml, renderDocument } from '../documents/render.ts';
 import { Vault } from '../memory/vault.ts';
 import { teamLine } from '../cos/alerts.ts';
 import { shellFor, runBuildCheck, buildRepo } from '../build/repo.ts';
+import { requestDeploy } from '../build/pipeline.ts';
 import { ACP_MODEL_ALIAS } from '../runtime/claude-acp.ts';
 import { taskTitle } from '../model/wording.ts';
 import type { Capability } from './capabilities.ts';
@@ -415,6 +416,10 @@ export class BrokerApi {
           const live = db.prepare("SELECT id FROM standing_permissions WHERE status = 'active' AND action_kind = ?").all(CODES) as Array<{ id: string }>; for (const x of live) revokePermission(db, x.id, 'owner:chat'); return { ok: true, text: live.length ? 'Switched off: verification codes go back to the owner.' : 'It was already off.' };
         }
         return { ok: false, text: 'permission must be "job_applications", "emails" or "verification_codes" (or give id with on=false to revoke another one)' };
+      }
+      case 'request_deploy': {   // the lead queues a build's commit for the deployer; refused unless an independent review PASSed that exact commit
+        const r = requestDeploy(db, this.store, cap.job_id, { build_job: a.build_job ? String(a.build_job) : undefined, commit: a.commit ? String(a.commit) : undefined }, actor);
+        return { ok: r.ok, text: r.text, ...(r.request ? { data: r.request } : {}) };
       }
       case 'add_dependency': {   // the lead makes a waiting task also wait for another one (e.g. applications wait for the tailored resumes)
         const me = this.store.get(cap.job_id); const target = this.store.get(String(a.task_id ?? ''));

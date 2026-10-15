@@ -2,7 +2,7 @@
  * The build chain after a commit (Abdul builder plan, steps 5 and 7): every committed build.task gets an independent code.review on its
  * own model (fable by default); a FAIL, or a red CI run on the change's pull request, re-queues the build on the same branch and
  * worktree with the gaps or the failing log as its input. Five fix rounds per change, then one blocker line and nothing more.
- * Deploy requires a PASS for the exact commit (reviewPassed).
+ * Deploy requires a PASS for the exact commit: request_deploy (requestDeploy) queues a commit only when reviewPassed is true.
  */
 import type { DB } from '../db/open.ts';
 import type { JobStore } from '../jobs/store.ts';
@@ -53,6 +53,34 @@ export function requeueBuild(db: DB, store: JobStore, buildId: string, fix: { so
 
 /** Deploy gate: a code review PASSed this exact commit (and no later review of it failed). */
 export function reviewPassed(db: DB, commit: string): boolean {
-  const last = db.prepare("SELECT type FROM job_events WHERE type IN ('code_review.passed', 'code_review.failed') AND json_extract(detail, '$.commit') = ? ORDER BY seq DESC LIMIT 1").get(commit) as { type: string } | undefined;
-  return last?.type === 'code_review.passed';
+  const last = db.prepare("SELECT type FROM job_events WHERE type IN ('review.passed', 'review.failed') AND json_extract(detail, '$.commit') = ? ORDER BY seq DESC LIMIT 1").get(commit) as { type: string } | undefined;
+  return last?.type === 'review.passed';
+}
+
+export interface DeployRequest { commit: string; branch: string; build_job: string; build_root: string; review_job: string; requested_by: string; at: string; status: 'queued' }
+const deployKey = (commit: string) => `deploy.request.${commit}`;
+export function deployRequests(db: DB): DeployRequest[] { return (db.prepare("SELECT value FROM runtime_state WHERE key LIKE 'deploy.request.%' ORDER BY observed_at").all() as Array<{ value: string }>).map((r) => JSON.parse(r.value) as DeployRequest); }
+
+/** request_deploy: queue a build's commit for the deployer, only when an independent review PASSed that exact commit (review.passed,
+ *  and no later review.failed of it). Give the build task (its newest reviewed commit) or a full commit hash. Refused otherwise, with
+ *  why; nothing is queued twice. The deployer reads the deploy.request.<commit> rows. */
+export function requestDeploy(db: DB, store: JobStore, jobId: string, a: { build_job?: string; commit?: string }, actor = 'engine'): { ok: boolean; text: string; request?: DeployRequest } {
+  const want = String(a.commit ?? '').trim().toLowerCase(); const bj = String(a.build_job ?? '').trim();
+  if (!want && !bj) return { ok: false, text: 'give build_job (the build task) or commit (the full hash)' };
+  if (want && !/^[0-9a-f]{40}$/.test(want)) return { ok: false, text: 'commit must be the full 40-character hash' };
+  // The review task of that build or commit (newest first): it carries the commit, branch and build.
+  const rv = db.prepare(`SELECT id, inputs FROM jobs WHERE kind = ? AND (${want ? "json_extract(inputs, '$.commit') = ?" : "json_extract(inputs, '$.build_job') = ?"}) ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(REVIEW_KIND, want || bj) as { id: string; inputs: string } | undefined;
+  const refuse = (why: string) => { store.event(jobId, actor, 'deploy.refused', { build_job: bj || null, commit: want || null, reason: why }); return { ok: false, text: `Not deployed: ${why}.` }; };
+  if (!rv) return refuse(`no code review exists for ${want ? `commit ${want.slice(0, 7)}` : `build ${bj}`}`);
+  const ri = inputsOf(rv); const commit = String(ri.commit ?? ''); if (!commit) return refuse('the review names no commit');
+  if (!reviewPassed(db, commit)) {
+    const last = db.prepare("SELECT type FROM job_events WHERE type IN ('review.passed', 'review.failed') AND json_extract(detail, '$.commit') = ? ORDER BY seq DESC LIMIT 1").get(commit) as { type: string } | undefined;
+    return refuse(last ? `the code review of ${commit.slice(0, 7)} FAILED; deploy the fixed commit once its review passes` : `the code review of ${commit.slice(0, 7)} has not passed yet (${store.get(rv.id)?.state ?? 'unknown'})`);
+  }
+  const prev = db.prepare('SELECT value FROM runtime_state WHERE key = ?').get(deployKey(commit)) as { value: string } | undefined;
+  if (prev) return { ok: true, text: `Already queued for deploy: ${commit.slice(0, 7)}.`, request: JSON.parse(prev.value) as DeployRequest };
+  const req: DeployRequest = { commit, branch: String(ri.branch ?? ''), build_job: String(ri.build_job ?? ''), build_root: String(ri.build_root ?? ri.build_job ?? ''), review_job: rv.id, requested_by: jobId, at: new Date().toISOString(), status: 'queued' };
+  db.prepare("INSERT INTO runtime_state(key, value, evidence, observed_at) VALUES (?, ?, ?, ?)").run(deployKey(commit), JSON.stringify(req), `review ${rv.id} passed`, req.at);
+  store.event(jobId, actor, 'deploy.requested', { commit, branch: req.branch, build_job: req.build_job, review_job: rv.id });
+  return { ok: true, text: `Queued for deploy: ${commit.slice(0, 7)} on ${req.branch} (review PASS, ${rv.id}).`, request: req };
 }

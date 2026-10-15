@@ -103,3 +103,33 @@ test('fix rounds stop at five with one blocker line; a review with no verdict or
   fs.writeFileSync(f, 'Looks fine to me\n'); reg(); assert.match(((await run()) as { reason: string }).reason, /does not start with "Verdict/);
   fs.writeFileSync(f, 'Verdict: FAIL\nnot great\n'); assert.match(((await run()) as { reason: string }).reason, /names no gap/);
 });
+
+test('request_deploy: refused until the independent review PASSes that exact commit; a FAILed commit is refused, its fixed commit is queued once', async () => {
+  const s = setup(); assistants(s, ['the greeting must keep a comma after the name', 'PASS']); const b = s.build('Say Hi instead of Hello');
+  const { requestDeploy, deployRequests } = await import('../../src/build/pipeline.ts');
+  const lead = s.store.create({ idempotency_key: 'lead', kind: 'chat.turn', objective: 'deploy it', success_contract: {}, agent_role: 'coordinator', inputs: {} }).job;
+  assert.match(requestDeploy(s.db, s.store, lead.id, { build_job: b.id }).text, /no code review exists/, 'before the review exists');
+  assert.match(requestDeploy(s.db, s.store, lead.id, {}).text, /give build_job/);
+  assert.match(requestDeploy(s.db, s.store, lead.id, { commit: 'abc' }).text, /full 40-character hash/);
+  await drain(s);
+  const [c1, c2] = (s.db.prepare("SELECT inputs FROM jobs WHERE kind = 'code.review' ORDER BY created_at").all() as Array<{ inputs: string }>).map((r) => JSON.parse(r.inputs).commit as string);
+  assert.ok(s.db.prepare("SELECT 1 FROM job_events WHERE type = 'review.passed' AND json_extract(detail, '$.commit') = ?").get(c2), 'review.passed names the commit');
+  const r1 = requestDeploy(s.db, s.store, lead.id, { build_job: b.id }); assert.equal(r1.ok, false); assert.match(r1.text, /FAILED/, 'the first build\'s commit failed review');
+  assert.equal(requestDeploy(s.db, s.store, lead.id, { commit: c1 }).ok, false);
+  const fix = (s.db.prepare("SELECT id FROM jobs WHERE kind = 'build.task' AND json_extract(inputs, '$.build_root') = ?").get(b.id) as { id: string }).id;
+  const r2 = requestDeploy(s.db, s.store, lead.id, { build_job: fix }); assert.equal(r2.ok, true, r2.text); assert.equal(r2.request!.commit, c2); assert.equal(r2.request!.branch, `coordinator/${b.id}`);
+  assert.match(requestDeploy(s.db, s.store, lead.id, { commit: c2 }).text, /Already queued/);
+  assert.deepEqual(deployRequests(s.db).map((d) => d.commit), [c2], 'queued once');
+  const ev = (t: string) => (s.db.prepare('SELECT COUNT(*) AS n FROM job_events WHERE job_id = ? AND type = ?').get(lead.id, t) as { n: number }).n;
+  assert.equal(ev('deploy.requested'), 1); assert.equal(ev('deploy.refused'), 3);
+  // A later FAIL of the same commit takes the PASS back.
+  s.store.event(lead.id, 'test', 'review.failed', { commit: c2 }); s.db.prepare('DELETE FROM runtime_state WHERE key = ?').run(`deploy.request.${c2}`);
+  assert.equal(requestDeploy(s.db, s.store, lead.id, { commit: c2 }).ok, false);
+});
+
+test('request_deploy is a lead-only broker tool', async () => {
+  const { TOOL_SCHEMAS } = await import('../../src/broker/capabilities.ts'); assert.match(TOOL_SCHEMAS.request_deploy.description, /^Lead only/);
+  const { setupBroker } = await import('./helpers-broker.ts'); const s = setupBroker();
+  const t = s.store.create({ idempotency_key: 'x', kind: 'chat.turn', objective: 'x', success_contract: {}, agent_role: 'coordinator', inputs: {} }).job;
+  const r = await s.call(t, 'request_deploy', { build_job: 'nope' }); assert.equal(r.ok, false); assert.match(r.text, /Not deployed: no code review exists/);
+});
