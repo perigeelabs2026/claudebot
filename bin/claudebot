@@ -5,7 +5,7 @@
 #   claudebot start | stop   start or stop the background engine
 #   claudebot logs           follow the engine log
 #   claudebot update         pull the latest version and reinstall
-#   claudebot maintenance <counts|purge --confirm (fixture tasks only)|purge --all --yes-delete-every-task-and-result --confirm|followup-requeue <record>|--all-failed|followup-create --missing>
+#   claudebot maintenance <counts|purge --confirm (fixture tasks only)|purge --all --yes-delete-every-task-and-result --confirm|followup-requeue <record>|--all-failed|followup-create --missing|ci-watch <owner/repo> <pr> --job <build>>
 #   claudebot computer <up|down|status|snapshot|reset|update>   optional private computer for the assistants (needs Lima)
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; L="$HOME/.local/bin"; H="$HOME/.claudebot"

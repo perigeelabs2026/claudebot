@@ -38,6 +38,7 @@ import { releaseTabsOfFinishedTasks, cdpCloser } from '../browser/tabs.ts';
 import { rollupWorkLogs } from '../memory/worklog.ts';
 import { requeueBankKnownBlockers } from '../cos/requeue.ts';
 import { watchTick } from '../cos/watch.ts';
+import { ciTick, watches } from '../build/ci-watch.ts';
 import { startupModelCheck } from '../runtime/model-check.ts';
 import { localDay } from '../memory/vault.ts';
 
@@ -122,6 +123,9 @@ void (async () => { try {
 } catch (e) { log.warn('model check failed', { err: (e as Error).message }); } })();
 // Silent-idle watch: failure streaks, routine results, governor pauses, a starved queue, a lapsed plan limit, unanswered decisions.
 timers.push(setInterval(() => watchTick(db, store, { workerLimit: dispatcher.desired }), 60_000));
+// CI watch (builder plan step 7): open build PRs are read with gh every 5 minutes; red re-queues the change with the failing log.
+let ciRunning = false;
+timers.push(setInterval(async () => { if (ciRunning || !watches(db).some((w) => w.status === 'open')) return; ciRunning = true; try { const r = await ciTick(db, store); if (r.length) log.info('ci watch', { results: r }); } catch (e) { log.warn('ci watch failed', { err: (e as Error).message }); } finally { ciRunning = false; } }, 60_000));
 timers.push(setInterval(() => { try { const r = requeueBankKnownBlockers(db, store); if (r.length) log.info('blocked tasks re-queued', { tasks: r.length }); } catch (e) { log.warn('re-queue failed', { err: (e as Error).message }); } }, 60_000));
 timers.push(setInterval(() => { if (new Date().getHours() === 3 && workLogDay !== localDay()) { workLogDay = localDay(); runWorkLog('nightly'); } }, 10 * 60_000));
 let permRunning = false;

@@ -44,5 +44,13 @@ else if (cmd === 'followup-create') {
   const { JobStore } = await import('../jobs/store.ts'); const { followUpFor, missingFollowUps } = await import('../jobs/followup.ts');
   const store = new JobStore(db); console.log(JSON.stringify(missingFollowUps(db).map((r) => { const x = followUpFor(db, store, r, 'owner:cli'); return 'job' in x ? { record: r, job: x.job.id } : { record: r, skipped: x.skipped }; }), null, 2));
 }
-else { console.error('usage: claudebot maintenance counts | purge --confirm [--include-real-projects] | purge --all --yes-delete-every-task-and-result --confirm | compact | followup-requeue <record>... | followup-requeue --all-failed | followup-create --missing'); process.exit(2); }
+else if (cmd === 'ci-watch') {
+  // Watch a build's pull request: claudebot maintenance ci-watch <owner/repo> <pr> --job <build task> [--branch <name>]
+  const [repo, pr] = rest.filter((x) => !x.startsWith('--')); const job = rest[rest.indexOf('--job') + 1]; const br = rest.includes('--branch') ? rest[rest.indexOf('--branch') + 1] : '';
+  if (!repo || !pr || !rest.includes('--job') || !job) { console.error('usage: claudebot maintenance ci-watch <owner/repo> <pr> --job <build task id> [--branch <name>]'); process.exit(2); }
+  const { JobStore } = await import('../jobs/store.ts'); const { watchPr } = await import('../build/ci-watch.ts'); const store = new JobStore(db);
+  const branch = br || String((JSON.parse(store.get(job)?.inputs || '{}') as { branch?: string }).branch ?? '');
+  console.log(JSON.stringify(watchPr(db, store, { repo, pr: Number(pr), branch, build_job: job }), null, 2));
+}
+else { console.error('usage: claudebot maintenance counts | purge --confirm [--include-real-projects] | purge --all --yes-delete-every-task-and-result --confirm | compact | followup-requeue <record>... | followup-requeue --all-failed | followup-create --missing | ci-watch <owner/repo> <pr> --job <build>'); process.exit(2); }
 db.close();
