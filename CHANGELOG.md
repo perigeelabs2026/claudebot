@@ -13,6 +13,8 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - **Deploys need a passed code review**: the lead's `request_deploy` (give the build task or the full commit) queues a commit for the deployer only when the independent review PASSed that exact commit (`review.passed`, with no later `review.failed`). Otherwise it is refused and the reason is given. Nothing is queued twice. Review events are now `review.passed` / `review.failed`.
 
 ### Fixed
+- **Routines run as the assistant you name.** `create_schedule` now takes `agent` (a name or id, e.g. Oscar). Before, every routine ran as the workflow's usual assistant, so an inbox check meant for one assistant went to another. An unknown or switched-off assistant is refused.
+- **The lead can switch off its own routines.** New lead-only tools: `disable_schedule` (with a reason, and a receipt in the team group) and `list_my_schedules`. Routines the owner made can only be switched off by the owner.
 - Code review on macOS: the reviewer's brief is now `REQUEST.md`. Before, it was `REVIEW.md`, which on a case-insensitive disk is the same file as the verdict `review.md`, so writing the verdict erased the brief and earlier rounds' gaps.
 
 ### Security

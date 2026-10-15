@@ -38,6 +38,21 @@ export const COMMAND_ALLOWLIST: RegExp[] = [/^ls( -la?)?( [\w./-]+)?$/, /^wc -l 
 export interface ToolResult { ok: boolean; text: string; data?: unknown }
 
 /** Engine-side implementation of broker tools. Every call is audited in job_events with the capability's job id. */
+/** An assistant named by id, name or first name ("@oscar", "Oscar", "email"), switched on. */
+export function resolveAssistant(defs: Definitions, raw: string): { ok: true; id: string } | { ok: false; text: string } {
+  const want = raw.trim().toLowerCase().replace(/^@/, '');
+  const named = defs.listAgents({ includeDisabled: true }).find((x) => x.id.toLowerCase() === want || x.name.toLowerCase() === want || x.name.toLowerCase().split(/[\s(]+/)[0] === want);
+  if (!named) return { ok: false, text: `there is no assistant called "${raw}". Use one of: ${defs.listAgents().map((x) => x.name).join(', ')}.` };
+  if (!named.enabled) return { ok: false, text: `${named.name} is switched off; ask the owner to switch them on, or name an assistant who is on.` };
+  return { ok: true, id: named.id };
+}
+/** A routine this assistant created with create_schedule: created_by in its inputs, or (routines from before created_by was recorded)
+ *  made from a conversation, which only create_schedule does and only the lead has. */
+export function scheduleCreatedBy(s: { inputs?: string | null }, role: string): boolean {
+  let i: { created_by?: string; conversation_id?: string } = {}; try { i = JSON.parse(s.inputs || '{}'); } catch { return false; }
+  return i.created_by ? i.created_by === role : role === 'coordinator' && !!i.conversation_id;
+}
+
 export class BrokerApi {
   private db: DB; private store: JobStore; private approvals: ApprovalStore; private cfg: EngineConfig;
   constructor(db: DB, store: JobStore, approvals: ApprovalStore, cfg: EngineConfig) { this.db = db; this.store = store; this.approvals = approvals; this.cfg = cfg; }
@@ -539,12 +554,33 @@ export class BrokerApi {
         if (active >= 10) return { ok: false, text: 'This project already has 10 active schedules (the limit); ask the owner which to remove.' };
         const every = a.every_seconds !== undefined ? Number(a.every_seconds) : null; if (every !== null && (!Number.isFinite(every) || every < 900)) return { ok: false, text: 'every_seconds must be at least 900 (15 minutes)' };
         const kind = String(a.kind ?? ''); if (['chat.turn', 'assistant.draft', 'priority.rank'].includes(kind) || kind.startsWith('system.')) return { ok: false, text: 'that kind of work cannot be scheduled' };
+        // Who runs it: the assistant named in agent (id, name or first name), never silently the workflow's default assistant.
+        let agentRole: string | undefined;
+        { const raw = a.agent ?? a.agent_role; if (raw !== undefined && raw !== null && String(raw).trim()) { const defs = new Definitions(db); const r = resolveAssistant(defs, String(raw)); if (!r.ok) return { ok: false, text: `Not scheduled: ${r.text}` }; agentRole = r.id; } }
         try {
           const { Scheduler } = await import('../supervisor/scheduler.ts');
-          const sch = new Scheduler(db, this.store).add({ name: String(a.name ?? taskTitle(String(a.objective ?? ''))).slice(0, 120), kind, objective: String(a.objective ?? ''), at: a.in_minutes !== undefined ? new Date(Date.now() + Math.max(1, Number(a.in_minutes)) * 60_000).toISOString() : a.at ? String(a.at) : null, cron: a.cron ? String(a.cron) : null, every_seconds: every, workspace_id: ws, inputs: { ...(parent?.conversation_id ? { conversation_id: parent.conversation_id } : {}) } }, actor);
-          if (parent?.conversation_id) new ChatStore(db, this.store).add({ conversation_id: parent.conversation_id, role: 'system', kind: 'status', content: `Scheduled by the lead assistant: "${sch.name}" — ${sch.once ? `once at ${new Date(sch.next_run_at!).toLocaleString('en-US')}` : sch.cron ? `cron ${sch.cron}` : `every ${Math.round(sch.every_seconds! / 60)} minutes`}. Remove it under Automations if you did not want this.`, job_id: null, meta: { schedule_id: sch.id } });
-          return { ok: true, text: `Scheduled ${sch.id}: ${sch.once ? `once at ${sch.next_run_at}` : sch.cron ? `cron "${sch.cron}"` : `every ${sch.every_seconds} s`}. Its results will be posted in this conversation. The owner can remove it on the Automations screen.`, data: { id: sch.id } };
+          const sch = new Scheduler(db, this.store).add({ name: String(a.name ?? taskTitle(String(a.objective ?? ''))).slice(0, 120), kind, ...(agentRole ? { agent_role: agentRole } : {}), objective: String(a.objective ?? ''), at: a.in_minutes !== undefined ? new Date(Date.now() + Math.max(1, Number(a.in_minutes)) * 60_000).toISOString() : a.at ? String(a.at) : null, cron: a.cron ? String(a.cron) : null, every_seconds: every, workspace_id: ws, inputs: { ...(parent?.conversation_id ? { conversation_id: parent.conversation_id } : {}), created_by: cap.role } }, actor);
+          if (parent?.conversation_id) new ChatStore(db, this.store).add({ conversation_id: parent.conversation_id, role: 'system', kind: 'status', content: `Scheduled by the lead assistant: "${sch.name}" — ${sch.once ? `once at ${new Date(sch.next_run_at!).toLocaleString('en-US')}` : sch.cron ? `cron ${sch.cron}` : `every ${Math.round(sch.every_seconds! / 60)} minutes`}. Runs as ${new Definitions(db).getAgent(sch.agent_role)?.name ?? sch.agent_role}. Remove it under Automations if you did not want this.`, job_id: null, meta: { schedule_id: sch.id } });
+          return { ok: true, text: `Scheduled ${sch.id} for ${new Definitions(db).getAgent(sch.agent_role)?.name ?? sch.agent_role}: ${sch.once ? `once at ${sch.next_run_at}` : sch.cron ? `cron "${sch.cron}"` : `every ${sch.every_seconds} s`}. Its results will be posted in this conversation. The owner can remove it on the Automations screen.`, data: { id: sch.id } };
         } catch (e) { return { ok: false, text: `not scheduled: ${(e as Error).message}` }; }
+      }
+      case 'disable_schedule': {   // the lead switches off a routine the lead itself created (create_schedule), with a receipt in the team group
+        const { Scheduler } = await import('../supervisor/scheduler.ts'); const sched = new Scheduler(db, this.store);
+        const want = String(a.schedule_id ?? '').trim(); if (!want) return { ok: false, text: 'give schedule_id (from the "Scheduled sch-…" receipt or list_my_schedules)' };
+        const sch = sched.get(want); if (!sch) return { ok: false, text: `There is no routine ${want}.` };
+        if (!scheduleCreatedBy(sch, cap.role)) return { ok: false, text: `Not switched off: ${sch.id} ("${sch.name}") was not created by you; only the owner can switch it off (Automations).` };
+        if (!sch.enabled) return { ok: true, text: `${sch.id} ("${sch.name}") is already off.` };
+        sched.setEnabled(sch.id, false);
+        const why = String(a.reason ?? '').trim().slice(0, 200);
+        this.store.event(cap.job_id, actor, 'schedule.disabled', { id: sch.id, name: sch.name, agent_role: sch.agent_role, reason: why || null });
+        const who = new Definitions(db).getAgent(cap.role)?.name ?? cap.role; const runs = new Definitions(db).getAgent(sch.agent_role)?.name ?? sch.agent_role;
+        teamLine(db, this.store, { key: `schedule-disabled:${sch.id}:${now()}`, jobId: cap.job_id, text: `${who} switched off the routine "${sch.name}" (${sch.id}, run by ${runs})${why ? `: ${why}` : '.'} It can be switched back on under Automations.` });
+        return { ok: true, text: `Switched off ${sch.id} ("${sch.name}", run by ${runs}). A receipt is in the team group.`, data: { id: sch.id } };
+      }
+      case 'list_my_schedules': {   // the routines the lead created, on or off
+        const { Scheduler } = await import('../supervisor/scheduler.ts');
+        const rows = new Scheduler(db, this.store).list().filter((x) => scheduleCreatedBy(x, cap.role)).map((x) => ({ id: x.id, name: x.name, kind: x.kind, runs_as: x.agent_role, on: !!x.enabled, when: x.once ? `once at ${x.next_run_at}` : x.cron ? `cron ${x.cron}` : `every ${x.every_seconds} s` }));
+        return { ok: true, text: rows.length ? JSON.stringify(rows, null, 1) : 'You have not created any routines.', data: rows };
       }
       case 'browser_act': return this.browserAct(cap, a, actor);
       case 'set_account_password': return this.setAccountPassword(cap, actor, String(a.account ?? ''), a.replace === true);
