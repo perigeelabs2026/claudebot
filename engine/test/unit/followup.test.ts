@@ -184,3 +184,23 @@ test('backfill and skips: followup-create --missing finds verified applications 
   s.store.event(null, 'w', 'followup.sent', { record: r2, recipient: 'x@initech.example', sent_search_url: 'https://mail.google.com/mail/u/0/#sent' });
   assert.deepEqual(missingFollowUps(s.db), [], 'already sent: nothing to create');
 });
+
+test('a bounce after the follow-up finished: the follow-up owner records it from any of its tasks with the record, and the follow-up is re-queued for the next candidate', async () => {
+  const s = setupBroker(); grantEmails(s.db, 'owner:test', { max_per_day: 50, days: null }); const rec = await apply(s);
+  const f = s.store.get((s.db.prepare('SELECT id FROM jobs WHERE idempotency_key = ?').get(followupKey(rec)) as { id: string }).id)!;
+  s.store.event(f.id, 'w', 'followup.sent', { record: rec, recipient: 'jane@northwind.example', sent_search_url: 'https://mail.google.com/mail/u/0/#sent' });
+  s.store.transition(f.id, 'leased', 'w'); s.store.transition(f.id, 'running', 'w'); s.store.transition(f.id, 'completed', 'w');
+  // Later, in an inbox check by the same assistant (a chat turn), the mailer-daemon message shows up.
+  const c = s.chat.create({ workspace_id: s.ws.id, type: 'group', members: ['coordinator', 'reviewer', 'researcher'] });
+  const turn = s.chat.send(c.id, '@reviewer check the inbox', s.defs).job; recordTaskTab(s.db, turn.id, 'tab-i');
+  browser(s, { url: 'https://mail.google.com/mail/u/0/#inbox/FMfcgz', page: "Mail Delivery Subsystem\nAddress not found\nYour message wasn't delivered to jane@northwind.example" });
+  assert.match((await s.call(turn, 'record_followup', { result: 'bounced', recipient: 'jane@northwind.example' })).text, /only result "bounced" with record/);
+  assert.match((await s.call(turn, 'record_followup', { result: 'no_address', record: rec, tried: ['x'] })).text, /only result "bounced" with record/);
+  const other = s.chat.send(c.id, '@researcher check', s.defs).job; recordTaskTab(s.db, other.id, 'tab-o');
+  assert.match((await s.call(other, 'record_followup', { result: 'bounced', record: rec, recipient: 'jane@northwind.example' })).text, /only the assistant that owns follow-up emails/);
+  assert.match((await s.call(turn, 'record_followup', { result: 'bounced', record: rec, recipient: 'bob@northwind.example' })).text, /not a delivery-failure|no follow-up to bob/);
+  const b = await s.call(turn, 'record_followup', { result: 'bounced', record: rec, recipient: 'jane@northwind.example' }); assert.equal(b.ok, true, b.text); assert.match(b.text, /A new follow-up task \(job-/);
+  const nj = s.store.get((b.data as { job_id: string }).job_id)!; assert.equal(nj.kind, FOLLOWUP_KIND); assert.equal(nj.idempotency_key, followupKey(rec));
+  assert.match(JSON.parse(nj.inputs).bounced_note, /jane@northwind\.example/); assert.equal(s.store.get(f.id)!.idempotency_key, `${followupKey(rec)}:replaced:${f.id}`);
+  assert.equal(sentFollowUp(s.db, rec), null);
+});

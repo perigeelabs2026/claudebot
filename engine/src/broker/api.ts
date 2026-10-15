@@ -1,6 +1,6 @@
 import { lookupAnswer } from '../memory/answer-bank.ts';
 import { safeExtract, sourceAllowed } from './archive.ts';
-import { FOLLOWUP_KIND, followUpFor, sentFollowUp, isSentSearchUrl, sentSearchShows, isBounceFor, bouncedAddresses } from '../jobs/followup.ts';
+import { FOLLOWUP_KIND, followupKey, requeueFollowUp, followUpFor, sentFollowUp, isSentSearchUrl, sentSearchShows, isBounceFor, bouncedAddresses } from '../jobs/followup.ts';
 import { matchPermission, jobApplicationPermission, emailPermission, grantEmails, EMAILS, emailRecipients, teamPermissionState, untilText, webmailName, CODES, codesPermission, grantVerificationCodes, isJobSite, isApplicationControl, isApplicationFormControl, contentRecipients, grantJobApplications, revokePermission, JOB_APPLICATIONS } from '../approvals/permissions.ts';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -256,8 +256,16 @@ export class BrokerApi {
         return { ok: true, text: `Round ${round} scheduled; it starts right after this reply. End this reply with a one-line status for the owner (no claim of done).`, data: { job_id: j.id, round } };
       }
       case 'record_followup': {
-        const me = this.store.get(cap.job_id); if (me?.kind !== FOLLOWUP_KIND) return { ok: false, text: 'record_followup is for follow-up email tasks only' };
-        const record = String((JSON.parse(me.inputs || '{}') as { record?: string }).record ?? ''); if (!record) return { ok: false, text: 'this follow-up task names no application record' };
+        const me = this.store.get(cap.job_id); const inFollowUp = me?.kind === FOLLOWUP_KIND;
+        // A bounce usually arrives after the follow-up task finished: the follow-up owner records it from any of its tasks, naming the record.
+        if (!inFollowUp) {
+          if (a.result !== 'bounced' || !a.record) return { ok: false, text: 'record_followup is for follow-up email tasks only; from another task only result "bounced" with record (the application record id) is accepted' };
+          const owner = (db.prepare('SELECT agent_role FROM jobs WHERE idempotency_key = ?').get(followupKey(String(a.record))) as { agent_role: string } | undefined)?.agent_role ?? new Definitions(db).getWorkflow(FOLLOWUP_KIND)?.default_agent;
+          if (!me || me.agent_role !== owner) return { ok: false, text: 'only the assistant that owns follow-up emails can record a bounce' };
+        }
+        const record = inFollowUp ? String((JSON.parse(me!.inputs || '{}') as { record?: string }).record ?? '') : String(a.record);
+        if (!record) return { ok: false, text: 'this follow-up task names no application record' };
+        if (!inFollowUp && !db.prepare("SELECT 1 FROM records WHERE id = ? AND type = 'application'").get(record)) return { ok: false, text: `no application record ${record}` };
         if (a.result === 'no_address') {
           const tried = [...new Set([...(Array.isArray(a.tried) ? a.tried : []).map((x) => String(x).trim().slice(0, 300)).filter(Boolean).slice(0, 40), ...bouncedAddresses(db, record).map((b) => `${b} (bounced)`)])];
           if (!tried.length) return { ok: false, text: 'Not recorded: list every source and address pattern you tried in tried.' };
@@ -272,9 +280,13 @@ export class BrokerApi {
           const u = await this.tabUrl(tb); if (!webmailName(u)) return { ok: false, text: `Not recorded: your tab (${u}) is not the team's webmail.` };
           const pg = await this.browserRunner(['evaluate', '--fn', '() => (document.title + "\\n" + document.body.innerText).slice(0, 20000)', '--target-id', tb], 'browser.evaluate', 30_000);
           if (!isBounceFor(pg.stdout ?? '', to)) return { ok: false, text: `Not recorded: the page in your tab is not a delivery-failure (mailer-daemon) message for ${to}.` };
+          if (!db.prepare("SELECT 1 FROM job_events WHERE type = 'followup.sent' AND json_extract(detail, '$.record') = ? AND json_extract(detail, '$.recipient') = ?").get(record, to)) return { ok: false, text: `Not recorded: no follow-up to ${to} is recorded as sent for this application.` };
           this.store.event(cap.job_id, actor, 'followup.bounced', { record, recipient: to, url: u });
+          // Its follow-up task already finished: re-queue it so the next candidate gets written to (Sent checked first, the bounced address avoided).
+          let requeued = '';
+          if (!inFollowUp) { try { const rq = requeueFollowUp(db, this.store, record, 'engine:bounce'); if (rq.ok) { requeued = rq.job.id; this.store.event(cap.job_id, actor, 'followup.requeued_after_bounce', { record, job: rq.job.id, replaced: rq.replaced }); } else this.store.event(cap.job_id, actor, 'followup.requeue_refused', { record, reason: rq.reason }); } catch (e) { this.store.event(cap.job_id, actor, 'followup.requeue_refused', { record, reason: (e as Error).message.slice(0, 200) }); } }
           try { const r = db.prepare('SELECT data FROM records WHERE id = ?').get(record) as { data: string } | undefined; if (r) { const d = JSON.parse(r.data); d.followup = { ...(d.followup ?? {}), bounced: [...new Set([...((d.followup?.bounced as string[]) ?? []), to])], sent_to: d.followup?.sent_to === to ? null : d.followup?.sent_to ?? null }; db.prepare('UPDATE records SET data = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(d), now(), record); } } catch { /* the event stands */ }
-          return { ok: true, text: `Recorded: the email to ${to} bounced and no longer counts as sent. Never write to ${to} again. Find the next candidate and send to them, or record no_address (the bounced address is already in what was tried).` };
+          return { ok: true, text: inFollowUp ? `Recorded: the email to ${to} bounced and no longer counts as sent. Never write to ${to} again. Find the next candidate and send to them, or record no_address (the bounced address is already in what was tried).` : `Recorded: the email to ${to} bounced and no longer counts as sent.${requeued ? ` A new follow-up task (${requeued}) will write to the next candidate.` : ''}`, ...(requeued ? { data: { job_id: requeued } } : {}) };
         }
         if (bouncedAddresses(db, record).includes(to)) return { ok: false, text: `${to} bounced for this application; it cannot count as sent. Write to the next candidate.` };
         const prior = sentFollowUp(db, record); if (prior && prior.job_id !== cap.job_id) return { ok: false, text: `Already recorded: the follow-up for this application went to ${prior.recipient} (${prior.at.slice(0, 16)}). Do not send another.` };
