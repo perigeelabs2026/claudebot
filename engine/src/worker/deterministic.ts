@@ -11,7 +11,8 @@ import { runProbe } from '../infra/probe.ts';
 import { collectReport, openWork } from '../cos/report.ts';
 import { isSentSearchUrl } from '../jobs/followup.ts';
 import { createCodeReview, requeueBuild, buildRoot } from '../build/pipeline.ts';
-import { buildShell, shellFor, buildRepo, ensureClone, prepareWorktree, runBuildCheck, commitBuild, exportBuild, stageBundle, NO_BUILD_REPO, type BuildCheck } from '../build/repo.ts';
+import { portSettings, preparePort, scrubDiff, stagedDiff, NO_PORT_SETTINGS } from '../port/public.ts';
+import { buildShell, shellFor, localShell, buildRepo, ensureClone, prepareWorktree, runBuildCheck, commitBuild, exportBuild, stageBundle, NO_BUILD_REPO, type BuildCheck } from '../build/repo.ts';
 
 export interface DetCtx { db: DB; store: JobStore; job: Job; workspace: string; previous: Record<string, unknown>; actor: string; approvals: ApprovalStore; actions: ActionStore; /** the assistants' computer is on (build jobs run there) */ vmOn?: boolean }
 export type DetResult = { ok: true; payload: Record<string, unknown> } | { ok: false; reason: string; terminal?: boolean; operatorAction?: string };
@@ -197,6 +198,48 @@ export const DETERMINISTIC: Record<string, DetFn> = {
     let fix: string | null = null;
     if (verdict === 'fail' && inputs.build_job) { const j = requeueBuild(ctx.db, ctx.store, inputs.build_job, { source: 'review', feedback: gaps.map((g) => `- ${g}`).join('\n'), ref: ctx.job.id }, ctx.actor); fix = j?.id ?? null; }
     return { ok: true, payload: { verdict, gaps, fix_job: fix, summary: verdict === 'pass' ? `Code review PASS for ${String(inputs.commit ?? '').slice(0, 7)}` : `Code review FAIL (${gaps.length} gap${gaps.length === 1 ? '' : 's'})${fix ? `; fix round queued (${fix})` : '; fix rounds exhausted'}` } };
+  },
+  /** port.public, 1: the private range from..to (default: settings last_synced..main), renamed, applied on port/<job> in the public clone. */
+  async port_prepare(ctx) {
+    const st = portSettings(ctx.db); if (!st) return { ok: false, reason: NO_PORT_SETTINGS, terminal: true, operatorAction: 'Set port_public in Settings, then re-run.' };
+    const inputs = JSON.parse(ctx.job.inputs || '{}') as { from?: string; to?: string };
+    const from = inputs.from ?? st.last_synced; const to = inputs.to ?? 'main';
+    if (!from) return { ok: false, reason: 'no starting commit: give from, or set port_public.last_synced', terminal: true, operatorAction: 'Re-run with from.' };
+    const p = await preparePort(st, ctx.job.id, from, to);
+    if (!p.ok) return { ok: false, reason: p.error, terminal: true, operatorAction: 'Port by hand or narrow the range.' };
+    ctx.db.prepare('UPDATE jobs SET inputs = ?, updated_at = ? WHERE id = ?').run(JSON.stringify({ ...inputs, worktree: p.dir, branch: p.branch, from_sha: p.from, to_sha: p.to }), now(), ctx.job.id);
+    ctx.store.event(ctx.job.id, ctx.actor, 'port.prepared', { branch: p.branch, from: p.from, to: p.to, files: p.files.length });
+    return { ok: true, payload: { branch: p.branch, worktree: p.dir, from: p.from, to: p.to, files: p.files } };
+  },
+  /** port.public, 2: nothing private in what would be published. One hit fails the job (file:line, kind, the value masked). */
+  async port_scrub(ctx) {
+    const st = portSettings(ctx.db); const dir = String(ctx.previous.worktree ?? ''); if (!st || !dir) return { ok: false, reason: 'the port worktree is missing', terminal: true, operatorAction: 'Re-run the task.' };
+    const hits = scrubDiff(await stagedDiff(dir), st);
+    if (hits.length) {
+      ctx.store.event(ctx.job.id, ctx.actor, 'port.scrub_hit', { hits: hits.slice(0, 50) });
+      fs.mkdirSync(ctx.workspace, { recursive: true, mode: 0o700 }); const f = path.join(ctx.workspace, 'scrub-hits.txt'); fs.writeFileSync(f, hits.map((h) => `${h.file}:${h.line}: ${h.kind} ${h.masked}`).join('\n') + '\n');
+      recordArtifact(ctx, 'scrub', 'file', `Scrub check: ${hits.length} hit${hits.length === 1 ? '' : 's'}`, f, {});
+      return { ok: false, reason: `scrub check: ${hits.length} private item${hits.length === 1 ? '' : 's'} would be published (${hits.slice(0, 5).map((h) => `${h.file}:${h.line} ${h.kind}`).join('; ')})`, terminal: true, operatorAction: 'Remove them in the private repository (or add a rename), then port again. Nothing was published.' };
+    }
+    return { ok: true, payload: { scrub: 'clean' } };
+  },
+  /** port.public, 3: the public repository's own tests on the ported branch. */
+  async port_checks(ctx) {
+    const st = portSettings(ctx.db); const dir = String(ctx.previous.worktree ?? ''); if (!st || !dir) return { ok: false, reason: 'the port worktree is missing', terminal: true, operatorAction: 'Re-run the task.' };
+    const sh = localShell(path.dirname(dir)); const r = await runBuildCheck(sh, dir, 'test', 20 * 60_000);
+    fs.mkdirSync(ctx.workspace, { recursive: true, mode: 0o700 }); const f = path.join(ctx.workspace, 'port-test-output.txt'); fs.writeFileSync(f, r.output);
+    recordArtifact(ctx, 'checks', 'file', `Public tests (${r.notRun ? 'not run' : r.ok ? 'passed' : 'failed'})`, f, { command: r.label });
+    if (!r.ok && !r.notRun) return { ok: false, reason: `the public tests fail on the ported branch${r.failing.length ? `: ${r.failing.slice(0, 5).map((n) => `"${n}"`).join(', ')}` : ''}`, terminal: true, operatorAction: 'See the saved output.' };
+    return { ok: true, payload: { test_result: r.notRun ? 'not run' : 'pass' } };
+  },
+  /** port.public, 4: one commit on port/<job> naming the private range. Pushing, the PR and CI are the push step and the CI watch. */
+  async port_commit(ctx) {
+    const dir = String(ctx.previous.worktree ?? ''); const branch = String(ctx.previous.branch ?? ''); if (!dir || !branch) return { ok: false, reason: 'the port worktree is missing', terminal: true, operatorAction: 'Re-run the task.' };
+    const from = String(ctx.previous.from ?? ''); const to = String(ctx.previous.to ?? '');
+    const c = await commitBuild(localShell(path.dirname(dir)), dir, branch, `Port ${from.slice(0, 7)}..${to.slice(0, 7)} from the private repository\n\nport.public ${ctx.job.id}: renamed and scrubbed.`, { name: 'ClaudeBot port', email: 'port@claudebot.invalid' });
+    if (!c.ok) return { ok: false, reason: `commit refused: ${c.error}`, terminal: true, operatorAction: 'See the task detail.' };
+    ctx.store.event(ctx.job.id, ctx.actor, 'port.ready', { branch, commit: c.commit, from, to, files: c.files.length });
+    return { ok: true, payload: { branch, commit: c.commit, summary: `Ported ${from.slice(0, 7)}..${to.slice(0, 7)} to ${branch} (${c.files.length} files, scrubbed, tests ${String(ctx.previous.test_result ?? '')}); not pushed` } };
   },
   async verify_artifacts(ctx) {
     const rows = ctx.db.prepare("SELECT id, path, sha256 FROM artifacts WHERE job_id = ? AND kind = 'file'").all(ctx.job.id) as Array<{ id: string; path: string | null; sha256: string | null }>;
