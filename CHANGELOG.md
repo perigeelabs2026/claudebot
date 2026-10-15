@@ -11,6 +11,9 @@ Fixes and improvements to ClaudeBot, newest first. Update with `claudebot update
 - **Port to a public repository** (`port.public`): for anyone keeping a private fork. It applies a range of private commits to your public clone on a branch `port/<task>`, renamed with your map, and fails on anything private: your deny list, personal emails, home paths, tokens and keys, `.local` hostnames. The public tests must pass. Set `port_public` (source, target, rename, deny, exclude). Nothing is pushed.
 - A workflow that has never passed and keeps failing its own check no longer pauses its assistant's queue; you get one line naming the workflow instead.
 
+### Fixed
+- Code review on macOS: the reviewer's brief is now `REQUEST.md`. Before, it was `REVIEW.md`, which on a case-insensitive disk is the same file as the verdict `review.md`, so writing the verdict erased the brief and earlier rounds' gaps.
+
 ### Security
 - Build checks are fenced in tighter: the builder account reaches only GitHub and npm (no longer Anthropic), only the computer's own DNS resolver, and only the engine's port on your Mac. A check that tampers with its worktree's git pointer fails the task, commits never follow it, and nothing a check started keeps running after it ends. Failed `npm ci` output now shows in the check result. See [docs/BUILD-TASKS.md](docs/BUILD-TASKS.md). Existing installs: run `claudebot computer update`.
 

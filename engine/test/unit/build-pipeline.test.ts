@@ -81,7 +81,9 @@ test('step 5: FAIL re-queues the build on the same branch and worktree with the 
   assert.equal(reviews.length, 2); const [c1, c2] = reviews.map((r) => JSON.parse(r.inputs).commit as string);
   assert.equal(reviewPassed(s.db, c1), false); assert.equal(reviewPassed(s.db, c2), true);
   const clone = path.join(process.env.CLAUDEBOT_BUILD_LOCAL_ROOT!, 'demo'); assert.equal(git(clone, 'rev-list', '--count', `main..coordinator/${b.id}`), '2', 'both commits on the one branch');
-  assert.match(fs.readFileSync(path.join(seen.filter((r) => s.store.get(r.jobId)!.kind === 'code.review')[1].cwd, 'REVIEW.md'), 'utf8'), /Earlier rounds' gaps[\s\S]*comma after the name/);
+  const ws2 = seen.filter((r) => s.store.get(r.jobId)!.kind === 'code.review')[1].cwd;
+  assert.notEqual(fs.readFileSync(path.join(ws2, 'review.md'), 'utf8'), fs.readFileSync(path.join(ws2, 'REQUEST.md'), 'utf8'), 'the brief and the verdict are separate files on a case-insensitive disk (macOS)');
+  assert.match(fs.readFileSync(path.join(ws2, 'REQUEST.md'), 'utf8'), /Earlier rounds' gaps[\s\S]*comma after the name/);
   assert.match(fs.readFileSync(path.join(seen.filter((r) => s.store.get(r.jobId)!.kind === 'code.review')[1].cwd, 'diff.patch'), 'utf8'), /Hi 2/, 'the second review sees the whole change');
 });
 
