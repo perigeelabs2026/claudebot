@@ -10,6 +10,7 @@ import { ApprovalStore } from '../approvals/store.ts';
 import { runProbe } from '../infra/probe.ts';
 import { collectReport, openWork } from '../cos/report.ts';
 import { isSentSearchUrl } from '../jobs/followup.ts';
+import { createCodeReview, requeueBuild, buildRoot } from '../build/pipeline.ts';
 import { buildShell, shellFor, buildRepo, ensureClone, prepareWorktree, runBuildCheck, commitBuild, exportBuild, stageBundle, NO_BUILD_REPO, type BuildCheck } from '../build/repo.ts';
 
 export interface DetCtx { db: DB; store: JobStore; job: Job; workspace: string; previous: Record<string, unknown>; actor: string; approvals: ApprovalStore; actions: ActionStore; /** the assistants' computer is on (build jobs run there) */ vmOn?: boolean }
@@ -104,7 +105,9 @@ export const DETERMINISTIC: Record<string, DetFn> = {
     let bundle: string | undefined;
     if (repo.bundle_from) { const b = await stageBundle(sh, repo); if (!b.ok) return { ok: false, reason: `could not hand the repository over: ${b.error}`, terminal: false }; bundle = b.path; }
     const c = await ensureClone(sh, repo, bundle); if (!c.ok) return { ok: false, reason: c.terminal ? c.error : `could not clone or fetch ${repo.url}: ${c.error}`, terminal: !!c.terminal, ...(c.terminal ? { operatorAction: 'Replace the repository token with a read-only one.' } : {}) };
-    const w = await prepareWorktree(sh, repo, ctx.job.id, ctx.job.agent_role || 'coordinator'); if (!w.ok) return { ok: false, reason: `could not create the worktree: ${w.error}`, terminal: true, operatorAction: 'See the task detail.' };
+    // A fix round (code review FAIL or red CI) works in the change's own worktree and branch: those of its first build (build_root).
+    const root = String((JSON.parse(ctx.job.inputs || '{}') as { build_root?: string }).build_root ?? ctx.job.id); const rootJob = root === ctx.job.id ? ctx.job : ctx.store.get(root) ?? ctx.job;
+    const w = await prepareWorktree(sh, repo, root, rootJob.agent_role || ctx.job.agent_role || 'coordinator'); if (!w.ok) return { ok: false, reason: `could not create the worktree: ${w.error}`, terminal: true, operatorAction: 'See the task detail.' };
     const inputs = JSON.parse(ctx.job.inputs || '{}') as Record<string, unknown>;
     ctx.db.prepare('UPDATE jobs SET inputs = ?, updated_at = ? WHERE id = ?').run(JSON.stringify({ ...inputs, worktree: w.dir, branch: w.branch, base_commit: w.base_commit, repo_where: sh.where, app: repo.app }), now(), ctx.job.id);
     fs.mkdirSync(ctx.workspace, { recursive: true, mode: 0o700 });
@@ -158,7 +161,42 @@ export const DETERMINISTIC: Record<string, DetFn> = {
       exported = { bundle: recordArtifact(ctx, 'commit', 'file', `Build ${inputs.branch} (git bundle: git fetch <file> ${inputs.branch})`, bf, { branch: inputs.branch, commit: c.commit }) ?? bf, patch: recordArtifact(ctx, 'commit', 'file', `Build ${inputs.branch} (patch)`, pf, { branch: inputs.branch, commit: c.commit }) ?? pf };
       ctx.store.event(ctx.job.id, ctx.actor, 'build.exported', { branch: inputs.branch, commit: c.commit, bundle: bf, patch: pf, bytes: x.bundle.length });
     }
-    return { ok: true, payload: { branch: inputs.branch, commit: c.commit, files: c.files, ...(exported ? { bundle_artifact: exported.bundle, patch_artifact: exported.patch } : {}), summary: `${String(ctx.previous.summary ?? '')}${c.commit ? ` · committed ${c.commit.slice(0, 7)} on ${inputs.branch} (${c.files.length} file${c.files.length === 1 ? '' : 's'}; not pushed)` : ' · no changes to commit'}`.trim() } };
+    // Step 5: every commit gets an independent code review (it waits for this task to finish).
+    let review: string | null = null;
+    if (c.commit) { const rv = createCodeReview(ctx.db, ctx.store, ctx.job, c.commit, inputs.branch); if (rv) { review = rv.id; ctx.store.event(ctx.job.id, ctx.actor, 'code_review.created', { job: rv.id, commit: c.commit }); } }
+    return { ok: true, payload: { branch: inputs.branch, commit: c.commit, files: c.files, ...(review ? { code_review: review } : {}), ...(exported ? { bundle_artifact: exported.bundle, patch_artifact: exported.patch } : {}), summary: `${String(ctx.previous.summary ?? '')}${c.commit ? ` · committed ${c.commit.slice(0, 7)} on ${inputs.branch} (${c.files.length} file${c.files.length === 1 ? '' : 's'}; not pushed)` : ' · no changes to commit'}`.trim() } };
+  },
+  /** code.review, first step: the build's whole change (base..branch patch), its check output and the request, copied into the review folder. */
+  async prepare_code_review(ctx) {
+    const inputs = JSON.parse(ctx.job.inputs || '{}') as { build_job?: string; commit?: string };
+    const build = inputs.build_job ? ctx.store.get(inputs.build_job) : undefined;
+    if (!build) return { ok: false, reason: `the build task ${inputs.build_job ?? '(none)'} does not exist`, terminal: true, operatorAction: 'Re-run the build.' };
+    if (build.state !== 'completed') return { ok: false, reason: `the build task is ${build.state}, not completed`, terminal: true, operatorAction: 'Nothing to review.' };
+    const arts = ctx.db.prepare("SELECT title, path FROM artifacts WHERE job_id = ? AND kind = 'file' AND path IS NOT NULL").all(build.id) as Array<{ title: string; path: string }>;
+    const patch = arts.find((a) => a.path.endsWith('.patch')); if (!patch || !fs.existsSync(patch.path)) return { ok: false, reason: 'the build has no exported patch to review', terminal: true, operatorAction: 'Re-run the build.' };
+    fs.mkdirSync(path.join(ctx.workspace, 'checks'), { recursive: true, mode: 0o700 });
+    fs.copyFileSync(patch.path, path.join(ctx.workspace, 'diff.patch'));
+    for (const a of arts.filter((x) => /final-.*-output\.txt$/.test(x.path) && fs.existsSync(x.path))) fs.copyFileSync(a.path, path.join(ctx.workspace, 'checks', path.basename(a.path)));
+    const root = buildRoot(build); const rootJob = ctx.store.get(root) ?? build;
+    const earlier = (ctx.db.prepare("SELECT e.detail FROM job_events e JOIN jobs j ON j.id = e.job_id WHERE e.type = 'code_review.failed' AND json_extract(j.inputs, '$.build_root') = ? ORDER BY e.seq").all(root) as Array<{ detail: string }>).map((r, i) => `Round ${i + 1}:\n${(JSON.parse(r.detail) as { gaps: string[] }).gaps.map((g) => `- ${g}`).join('\n')}`);
+    fs.writeFileSync(path.join(ctx.workspace, 'REVIEW.md'), `# Review of ${inputs.commit ?? ''}\n\nThe request: ${rootJob.objective}\n${(JSON.parse(rootJob.inputs || '{}') as { change?: string }).change ? `Details: ${(JSON.parse(rootJob.inputs || '{}') as { change?: string }).change}\n` : ''}Build: ${build.id} (${build.objective})\n\n${earlier.length ? `Earlier rounds' gaps (check each is really fixed):\n${earlier.join('\n\n')}\n` : ''}`);
+    return { ok: true, payload: { build_job: build.id, build_root: root, commit: inputs.commit ?? null, files: fs.readdirSync(path.join(ctx.workspace, 'checks')) } };
+  },
+  /** code.review, last step: the verdict from review.md. PASS is recorded for the exact commit (the deploy gate); FAIL re-queues the build
+   *  with the gaps (five rounds, then a blocker line). Either way the review itself is done. */
+  async verify_code_review(ctx) {
+    const inputs = JSON.parse(ctx.job.inputs || '{}') as { build_job?: string; commit?: string; branch?: string; build_root?: string };
+    const a = (ctx.db.prepare("SELECT path FROM artifacts WHERE job_id = ? AND kind = 'file' AND path LIKE '%review.md' ORDER BY created_at DESC LIMIT 1").get(ctx.job.id) as { path: string } | undefined)?.path;
+    if (!a || !fs.existsSync(a)) return { ok: false, reason: 'the reviewer registered no review.md', terminal: true, operatorAction: 'Re-run the review.' };
+    const text = fs.readFileSync(a, 'utf8'); const first = text.split('\n').find((l) => l.trim())?.trim() ?? '';
+    const m = /^Verdict:\s*(PASS|FAIL)\b/i.exec(first); if (!m) return { ok: false, reason: `review.md does not start with "Verdict: PASS" or "Verdict: FAIL" (it starts "${first.slice(0, 80)}")`, terminal: true, operatorAction: 'Re-run the review.' };
+    const verdict = m[1].toLowerCase() as 'pass' | 'fail'; const gaps = text.split('\n').filter((l) => /^\s*-\s*Gap:/i.test(l)).map((l) => l.replace(/^\s*-\s*Gap:\s*/i, '').trim()).filter(Boolean);
+    if (verdict === 'fail' && !gaps.length) return { ok: false, reason: 'a FAIL verdict names no gap ("- Gap: …" lines)', terminal: true, operatorAction: 'Re-run the review.' };
+    const detail = { commit: inputs.commit ?? null, branch: inputs.branch ?? null, build_job: inputs.build_job ?? null, build_root: inputs.build_root ?? null, ...(verdict === 'fail' ? { gaps } : {}) };
+    ctx.store.event(ctx.job.id, ctx.actor, verdict === 'pass' ? 'code_review.passed' : 'code_review.failed', detail);
+    let fix: string | null = null;
+    if (verdict === 'fail' && inputs.build_job) { const j = requeueBuild(ctx.db, ctx.store, inputs.build_job, { source: 'review', feedback: gaps.map((g) => `- ${g}`).join('\n'), ref: ctx.job.id }, ctx.actor); fix = j?.id ?? null; }
+    return { ok: true, payload: { verdict, gaps, fix_job: fix, summary: verdict === 'pass' ? `Code review PASS for ${String(inputs.commit ?? '').slice(0, 7)}` : `Code review FAIL (${gaps.length} gap${gaps.length === 1 ? '' : 's'})${fix ? `; fix round queued (${fix})` : '; fix rounds exhausted'}` } };
   },
   async verify_artifacts(ctx) {
     const rows = ctx.db.prepare("SELECT id, path, sha256 FROM artifacts WHERE job_id = ? AND kind = 'file'").all(ctx.job.id) as Array<{ id: string; path: string | null; sha256: string | null }>;
